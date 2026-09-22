@@ -156,7 +156,7 @@ delete_workload() {
 upgrade_candidate() {
 	# Helm does not update schemas from crds/ on upgrade. Apply them before
 	# rolling a controller that persists the new rollback generation fence.
-	kubectl apply --server-side --field-manager=shiftpv-crd-upgrade -f "${ROOT_DIR}/charts/shiftpv/crds/"
+	kubectl apply --field-manager=shiftpv-crd-upgrade -f "${ROOT_DIR}/charts/shiftpv/crds/"
 	kubectl wait --for=condition=Established crd/shiftpvmoves.shiftpv.io --timeout=60s
 	assert_equal "installed rollback fence schema" integer \
 		"$(kubectl get crd/shiftpvmoves.shiftpv.io -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.rollbackRequiredGeneration.type}')"

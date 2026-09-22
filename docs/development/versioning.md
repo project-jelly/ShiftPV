@@ -49,7 +49,7 @@ version을 채택하기 전까지 운영 배포를 의미하지 않는다.
 TARGET_CHART_VERSION=0.5.9
 CHART_WORKDIR=$(mktemp -d)
 helm pull shiftpv/shiftpv --version "${TARGET_CHART_VERSION}" --untar --untardir "${CHART_WORKDIR}"
-kubectl apply --server-side --field-manager=shiftpv-crd-upgrade -f "${CHART_WORKDIR}/shiftpv/crds/"
+kubectl apply --field-manager=shiftpv-crd-upgrade -f "${CHART_WORKDIR}/shiftpv/crds/"
 kubectl wait --for=condition=Established crd/shiftpvmoves.shiftpv.io --timeout=60s
 helm upgrade shiftpv "${CHART_WORKDIR}/shiftpv" --namespace shiftpv-system --values /path/to/values.yaml --wait
 ```
