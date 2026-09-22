@@ -99,6 +99,14 @@ func (m *memoryRepository) CompareAndSetState(_ context.Context, id, phase, acti
 func (m *memoryRepository) Pools(context.Context) ([]volumeapi.Pool, error) {
 	return identifiedTestPools(m.pools), nil
 }
+func (m *memoryRepository) ObservePools(ctx context.Context) (volumeapi.PoolSnapshot, error) {
+	pools, err := m.Pools(ctx)
+	if err != nil {
+		return volumeapi.PoolSnapshot{}, err
+	}
+	ready, err := m.ReadyPools(ctx)
+	return volumeapi.PoolSnapshot{Registered: pools, Ready: ready}, err
+}
 func (m *memoryRepository) ReadyPools(context.Context) ([]volumeapi.Pool, error) {
 	if m.readyPoolsConfigured {
 		return identifiedReadyTestPools(m.readyPools, m.volumes, m.pools), nil

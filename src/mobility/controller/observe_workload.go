@@ -17,17 +17,11 @@ import (
 // observeBinding resolves the PV/PVC pair this volume is still bound to and the
 // namespace opt-in that makes its workload movable at all.
 func (r *Reconciler) observeBinding(ctx context.Context, move volumeapi.Move, result *observation) (bool, error) {
-	persistentVolumes, err := r.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	pv, err := r.boundPersistentVolume(ctx, move)
 	if err != nil {
-		return false, fmt.Errorf("list PersistentVolumes: %w", err)
+		return false, err
 	}
-	for index := range persistentVolumes.Items {
-		candidate := &persistentVolumes.Items[index]
-		if candidate.Spec.CSI != nil && candidate.Spec.CSI.Driver == admission.DriverName && candidate.Spec.CSI.VolumeHandle == move.Spec.VolumeID {
-			result.PV = candidate.DeepCopy()
-			break
-		}
-	}
+	result.PV = pv
 	if result.PV == nil || result.PV.Spec.ClaimRef == nil {
 		result.FSM.UnsafeReason = "VolumeBindingMissing"
 		result.FSM.SourceAuthorityInvalid = true
@@ -66,6 +60,32 @@ func (r *Reconciler) observeBinding(ctx context.Context, move volumeapi.Move, re
 		return true, nil
 	}
 	return false, nil
+}
+
+// A started Move has already persisted its PV name. Read that exact object
+// and retain validBinding's driver, handle, deletion and claim UID checks.
+func (r *Reconciler) boundPersistentVolume(ctx context.Context, move volumeapi.Move) (*corev1.PersistentVolume, error) {
+	if move.Status.PersistentVolumeName != "" {
+		pv, err := r.Client.CoreV1().PersistentVolumes().Get(ctx, move.Status.PersistentVolumeName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read PersistentVolume: %w", err)
+		}
+		return pv, nil
+	}
+	list, err := r.Client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list PersistentVolumes: %w", err)
+	}
+	for i := range list.Items {
+		pv := &list.Items[i]
+		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == admission.DriverName && pv.Spec.CSI.VolumeHandle == move.Spec.VolumeID {
+			return pv.DeepCopy(), nil
+		}
+	}
+	return nil, nil
 }
 
 // observeConsumers separates the Pod this transaction is moving from any other

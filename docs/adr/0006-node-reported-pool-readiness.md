@@ -19,6 +19,15 @@ Node Plugin이 자기 node의 Pool을 주기적으로 검사하고 표준 Condit
 필요하면 Controller가 `spec.scanEpoch`를 증가시켜 새 generation을 요청하고 그 generation의
 valid·complete inventory만 causal proof로 사용한다.
 
+Node Plugin은 자기 Pool의 generation, 삭제 요청, identity release 승인 변경을 watch하여 즉시
+재검사한다. Watch는 재검사의 신호로만 쓰고 실제 Pool은 API에서 다시 읽는다. 자기 status write는
+재검사를 유발하지 않으며, watch 연결이 끊겨도 기존 주기 검사가 계속된다. 이를 위해 Node의
+`shiftpvpools` 권한에는 `get`, `list`, `watch`가 필요하다.
+
+한 inventory scan 안에서는 mount table을 한 번 읽어 복사본들의 publication을 판정한다. 이 관찰은
+해당 scan에만 유효하며 다음 generation이나 다음 scan으로 재사용하지 않는다. 실제 publish/unpublish는
+기존 per-volume lock과 live mount 검사를 유지한다.
+
 | Condition | 증거 |
 |---|---|
 | `Accessible` | 기존 directory에 접근 가능 |

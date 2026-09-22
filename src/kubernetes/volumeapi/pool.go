@@ -105,19 +105,30 @@ func (r *Registry) ListPoolRegistrations(ctx context.Context) ([]Pool, error) {
 	return result, nil
 }
 
-func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
+// PoolSnapshot keeps registration and placement readiness on the same API read.
+type PoolSnapshot struct {
+	Registered []Pool
+	Ready      []Pool
+}
+
+func (r *Registry) ObservePools(ctx context.Context) (PoolSnapshot, error) {
 	pools, err := r.Pools(ctx)
 	if err != nil {
-		return nil, err
+		return PoolSnapshot{}, err
 	}
 	now, staleAfter := r.readiness()
-	ready := make([]Pool, 0, len(pools))
+	snapshot := PoolSnapshot{Registered: pools}
 	for _, pool := range pools {
 		if placeable, _ := poolReady(pool, now, staleAfter); placeable {
-			ready = append(ready, pool)
+			snapshot.Ready = append(snapshot.Ready, pool)
 		}
 	}
-	return ready, nil
+	return snapshot, nil
+}
+
+func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
+	snapshot, err := r.ObservePools(ctx)
+	return snapshot.Ready, err
 }
 
 func (r *Registry) PoolNodes(ctx context.Context) ([]string, error) {

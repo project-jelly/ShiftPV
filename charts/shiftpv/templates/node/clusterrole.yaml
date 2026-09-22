@@ -11,7 +11,7 @@ rules:
     verbs: ["get"]
   - apiGroups: ["shiftpv.io"]
     resources: ["shiftpvpools"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["shiftpv.io"]
     resources: ["shiftpvpools/status"]
     verbs: ["update"]
