@@ -192,3 +192,38 @@ func TestScannerFailsClosedWhenPublicationObservationFails(t *testing.T) {
 		t.Fatalf("publication observation failure was not preserved: %#v", result)
 	}
 }
+
+func TestScannerRefreshesPublicationSnapshotOncePerScan(t *testing.T) {
+	host := t.TempDir()
+	root := filepath.Join(host, "pool")
+	if err := os.Mkdir(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	identity := volume.CopyIdentity{InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid", VolumeID: "shiftpv-11111111111111111111111111111111", VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: "node-a", Role: volume.RoleServing}
+	for _, id := range []string{"shiftpv-11111111111111111111111111111111", "shiftpv-22222222222222222222222222222222"} {
+		copy := identity
+		copy.VolumeID, copy.VolumeUID, copy.CopyID = id, id, id
+		if err := ownership.PrepareServing(context.Background(), root, copy, func(context.Context) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	scanner := &Scanner{HostRoot: host, TargetRoot: "/pods", Installation: installation{id: identity.InstallationID}, Publications: publications{err: errors.New("live query must not run")}, Limit: 256}
+	scanner.SnapshotPublications = func() (Publications, error) { calls++; return publications{published: calls == 1}, nil }
+	pool := volumeapi.Pool{Name: identity.PoolName, UID: identity.PoolUID, NodeName: identity.NodeName, MountPath: "/pool"}
+	for pass := 1; pass <= 2; pass++ {
+		result := scanner.Scan(context.Background(), pool, time.Now())
+		if calls != pass || !result.Valid || len(result.Copies) != 2 {
+			t.Fatalf("calls=%d result=%+v", calls, result)
+		}
+		for _, copy := range result.Copies {
+			if copy.Published != (pass == 1) {
+				t.Fatal("publication snapshot leaked between scans")
+			}
+		}
+	}
+	scanner.SnapshotPublications = func() (Publications, error) { return nil, errors.New("unreadable mount table") }
+	if result := scanner.Scan(context.Background(), pool, time.Now()); result.Valid || result.Message == "" {
+		t.Fatal("failed snapshot accepted as absence")
+	}
+}

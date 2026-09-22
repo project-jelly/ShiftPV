@@ -14,6 +14,26 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 	if observed.DestinationNode == "" || r.CapacityProbe == nil || r.PoolLocks == nil {
 		return fmt.Errorf("destination capacity admission is not configured")
 	}
+	// Source traversal can be slow; it does not spend destination capacity.
+	// Re-read the destination and all reservations only after taking its lock.
+	sourceBytes := move.Status.SourceBytes
+	if sourceBytes <= 0 {
+		measured, err := r.CapacityProbe.VolumeUsage(ctx, move.Spec.SourceNode, move.Spec.VolumeID)
+		if err != nil {
+			return fmt.Errorf("measure source volume usage: %w", err)
+		}
+		if measured <= 0 {
+			return fmt.Errorf("source volume usage must be positive, got %d", measured)
+		}
+		sourceBytes = measured
+	}
+	if move.Status.SourceBytes != sourceBytes {
+		previous := move.Status
+		move.Status.SourceBytes = sourceBytes
+		if err := r.persistMoveStatus(ctx, move, previous); err != nil {
+			return err
+		}
+	}
 	unlock := r.PoolLocks.Lock(observed.DestinationNode)
 	defer unlock()
 
@@ -27,16 +47,6 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 	requested, logicalReserved, physicalPending, limit, err := r.destinationCapacityForPool(ctx, *move, pool)
 	if err != nil {
 		return err
-	}
-	sourceBytes := move.Status.SourceBytes
-	if sourceBytes <= 0 {
-		sourceBytes, err = r.CapacityProbe.VolumeUsage(ctx, move.Spec.SourceNode, move.Spec.VolumeID)
-		if err != nil {
-			return fmt.Errorf("measure source volume usage: %w", err)
-		}
-		if sourceBytes <= 0 {
-			return fmt.Errorf("source volume usage must be positive, got %d", sourceBytes)
-		}
 	}
 	stats, err := r.CapacityProbe.StatFS(ctx, observed.DestinationNode)
 	if err != nil {

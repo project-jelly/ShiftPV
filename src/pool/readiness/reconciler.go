@@ -23,6 +23,7 @@ type Reconciler struct {
 	Pools     Repository
 	Inspector Inspector
 	Interval  time.Duration
+	Wake      <-chan struct{}
 	Now       func() time.Time
 	Observe   func(volumeapi.Pool, Result, error)
 	Inventory func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
@@ -43,9 +44,10 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := r.reconcileAndLog(ctx); err != nil && errors.Is(err, context.Canceled) {
-				return nil
-			}
+		case <-r.Wake:
+		}
+		if err := r.reconcileAndLog(ctx); err != nil && errors.Is(err, context.Canceled) {
+			return nil
 		}
 	}
 }

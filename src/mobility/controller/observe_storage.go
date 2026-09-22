@@ -47,10 +47,11 @@ func (r *Reconciler) observeVolume(ctx context.Context, move volumeapi.Move, res
 
 func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 	var index poolIndex
-	pools, err := r.Repository.Pools(ctx)
+	snapshot, err := r.Repository.ObservePools(ctx)
 	if err != nil {
 		return index, err
 	}
+	pools := snapshot.Registered
 	index.registered = make(map[string]volumeapi.Pool, len(pools))
 	for _, pool := range pools {
 		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || filepath.Clean(pool.MountPath) == "/" {
@@ -61,10 +62,7 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 		}
 		index.registered[pool.NodeName] = pool
 	}
-	readyPools, err := r.Repository.ReadyPools(ctx)
-	if err != nil {
-		return index, err
-	}
+	readyPools := snapshot.Ready
 	index.ready = make(map[string]volumeapi.Pool, len(readyPools))
 	for _, pool := range readyPools {
 		index.ready[pool.NodeName] = pool

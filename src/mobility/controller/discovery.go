@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
@@ -28,11 +29,12 @@ func (r *Reconciler) discoverMoves(ctx context.Context) (discoveryErr error) {
 		return err
 	}
 	activeByVolume := activeMoveVolumes(moves, volumes)
+	ownerNodes := make(map[string]*corev1.Node)
 	for volumeID, state := range volumes {
 		if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || activeByVolume[volumeID] {
 			continue
 		}
-		created, err := r.discoverVolumeMove(ctx, volumeID, state, deferred)
+		created, err := r.discoverVolumeMove(ctx, volumeID, state, deferred, ownerNodes)
 		if err != nil {
 			return err
 		}
@@ -69,15 +71,19 @@ func activeMoveVolumes(moves []volumeapi.Move, volumes map[string]volumeapi.Stat
 // discoverVolumeMove opens one transaction for a Ready volume whose owner is
 // cordoned. It reports whether a Move was created; an ineligible or
 // still-schedulable owner is counted as deferred, never as an error.
-func (r *Reconciler) discoverVolumeMove(ctx context.Context, volumeID string, state volumeapi.State, deferred map[string]int) (bool, error) {
-	node, err := r.Client.CoreV1().Nodes().Get(ctx, state.OwnerNode, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
+func (r *Reconciler) discoverVolumeMove(ctx context.Context, volumeID string, state volumeapi.State, deferred map[string]int, ownerNodes map[string]*corev1.Node) (bool, error) {
+	node, found := ownerNodes[state.OwnerNode]
+	if !found {
+		var err error
+		node, err = r.Client.CoreV1().Nodes().Get(ctx, state.OwnerNode, metav1.GetOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("read owner Node %q: %w", state.OwnerNode, err)
 		}
-		return false, fmt.Errorf("read owner Node %q: %w", state.OwnerNode, err)
+		// Cache absence as well, only for this discovery pass. Preflight still
+		// observes the live source before a transaction can be created.
+		ownerNodes[state.OwnerNode] = node
 	}
-	if !node.Spec.Unschedulable || !admission.NodeReady(node) {
+	if node == nil || !node.Spec.Unschedulable || !admission.NodeReady(node) {
 		return false, nil
 	}
 	eligible, reason, err := r.preflightVolume(ctx, volumeID, state.OwnerNode)

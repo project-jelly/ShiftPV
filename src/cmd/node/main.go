@@ -55,10 +55,14 @@ func main() {
 	}
 	identityService := &identity.Service{Version: version}
 	readinessReconciler := &poolreadiness.Reconciler{
+		Wake:     poolreadiness.WatchPoolChanges(ctx, registry.Client, *nodeName),
 		NodeName: *nodeName, Pools: registry, Inspector: poolreadiness.NewProbe(*hostRoot), Interval: *poolReadinessInterval,
 	}
 	inventoryScanner := &nodeobservation.Scanner{
 		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: registry, Publications: binder, Limit: 256,
+	}
+	inventoryScanner.SnapshotPublications = func() (nodeobservation.Publications, error) {
+		return binder.PublicationSnapshot()
 	}
 	readinessReconciler.Inventory = inventoryScanner.Scan
 	readinessReconciler.Release = inventoryScanner.ReleasePool

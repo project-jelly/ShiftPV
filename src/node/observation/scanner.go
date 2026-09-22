@@ -32,7 +32,9 @@ type Scanner struct {
 	TargetRoot   string
 	Installation Installation
 	Publications Publications
-	Limit        int
+	// SnapshotPublications is scoped to one scan, after its generation was read.
+	SnapshotPublications func() (Publications, error)
+	Limit                int
 }
 
 func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
@@ -52,6 +54,16 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	if s.configurationInvalid(pool) {
 		result.Message = "InventoryConfigurationInvalid"
 		return result
+	}
+	if s.SnapshotPublications != nil {
+		publications, err := s.SnapshotPublications()
+		if err != nil || publications == nil {
+			result.Message = "PublicationSnapshotUnavailable"
+			return result
+		}
+		snapshot := *s
+		snapshot.Publications = publications
+		s = &snapshot
 	}
 	installationID, err := s.Installation.InstallationID(ctx)
 	if err != nil {
