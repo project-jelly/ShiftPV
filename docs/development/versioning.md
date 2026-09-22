@@ -34,3 +34,24 @@ image version을 정확히 pin하며, Chart release gate는 그 image가 amd64�
 
 Chart-only 변경은 Controller와 Node version을 올리지 않는다. Component image release도 Chart가 그
 version을 채택하기 전까지 운영 배포를 의미하지 않는다.
+
+## Existing installation upgrades
+
+`helm upgrade`는 Chart의 `crds/` schema를 갱신하지 않는다. 새 Controller가 사용하는 status field가
+기존 CRD에 없으면 API가 그 값을 제거하므로, target Chart의 CRD를 먼저 적용한 뒤 runtime을 올린다.
+특히 rollback generation fence를 도입한 버전은 `status.rollbackRequiredGeneration` schema가 필요하다.
+기록이 유지되지 않으면 Controller는 capacity hold를 보존한 채 새 스캔을 재요청한다.
+
+아래 `TARGET_CHART_VERSION`은 설치할 정확한 Chart version으로 지정한다. 기존 release의 values도
+함께 전달한다.
+
+```sh
+TARGET_CHART_VERSION=0.5.9
+CHART_WORKDIR=$(mktemp -d)
+helm pull shiftpv/shiftpv --version "${TARGET_CHART_VERSION}" --untar --untardir "${CHART_WORKDIR}"
+kubectl apply --field-manager=shiftpv-crd-upgrade -f "${CHART_WORKDIR}/shiftpv/crds/"
+kubectl wait --for=condition=Established crd/shiftpvmoves.shiftpv.io --timeout=60s
+helm upgrade shiftpv "${CHART_WORKDIR}/shiftpv" --namespace shiftpv-system --values /path/to/values.yaml --wait
+```
+
+GitOps에서도 target CRD schema 적용이 Controller rollout보다 먼저 완료되도록 순서를 보장한다.

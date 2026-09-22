@@ -44,12 +44,19 @@ restart_during_recovery() {
 }
 
 recover_source_only() {
-	local source_claim_uid checksum pod source_mount
+	local source_claim_uid checksum pod source_mount rollback_generation destination_pool observed_generation
 	source_claim_uid=$(kubectl -n shiftpv-mobility-blocked get pvc/source-only -o jsonpath='{.metadata.uid}')
 	source_mount=$(pool_mount_for_node "${BLOCKED_SOURCE_NODE}")
 	checksum=$(node_sha256 "${BLOCKED_SOURCE_NODE}" "${source_mount}/volumes/${BLOCKED_VOLUME}/payload")
 	request_recovery "${BLOCKED_MOVE}"
 	restart_during_recovery "${BLOCKED_MOVE}"
+	rollback_generation=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.rollbackRequiredGeneration}')
+	destination_pool=$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.incomingCopy.poolName}')
+	test -n "${rollback_generation}"
+	test "${rollback_generation}" -gt 0
+	observed_generation=$(kubectl get "shiftpvpool/${destination_pool}" -o jsonpath='{.status.observedGeneration}')
+	test "${observed_generation}" -ge "${rollback_generation}"
+	test "$(kubectl get "shiftpvmove/${BLOCKED_MOVE}" -o jsonpath='{.status.capacityApproved}')" = false
 	kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --timeout=180s
 	pod=$(kubectl -n shiftpv-mobility-blocked get pod -l app=shiftpv-mobility-source-only -o jsonpath='{.items[0].metadata.name}')
 	test "$(pod_sha256 shiftpv-mobility-blocked "${pod}" /data/payload)" = "${checksum}"

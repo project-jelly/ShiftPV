@@ -22,37 +22,38 @@ type MoveSpec struct {
 }
 
 type MoveStatus struct {
-	Phase                string
-	Reason               string
-	Message              string
-	LastTransitionTime   string
-	LastProgressTime     string
-	PersistentVolumeName string
-	ClaimNamespace       string
-	ClaimName            string
-	ConsumerName         string
-	ConsumerUID          string
-	ReplacementName      string
-	ReplacementUID       string
-	DestinationNode      string
-	DestinationPoolUID   string
-	SourceBytes          int64
-	CapacityApproved     bool
-	CapacityReason       string
-	CandidateNodes       []string
-	EvictionRequested    bool
-	CopyJobName          string
-	PromotionJobName     string
-	CleanupPhase         string
-	CopyOperationID      string
-	PromotionOperationID string
-	SourceCopy           *volume.CopyIdentity
-	IncomingCopy         *volume.CopyIdentity
-	DestinationCopy      *volume.CopyIdentity
-	RecoveryPhase        string
-	RecoveryOwner        string
-	RecoveryReason       string
-	RecoveryMessage      string
+	Phase                      string
+	Reason                     string
+	Message                    string
+	LastTransitionTime         string
+	LastProgressTime           string
+	PersistentVolumeName       string
+	ClaimNamespace             string
+	ClaimName                  string
+	ConsumerName               string
+	ConsumerUID                string
+	ReplacementName            string
+	ReplacementUID             string
+	DestinationNode            string
+	DestinationPoolUID         string
+	SourceBytes                int64
+	CapacityApproved           bool
+	CapacityReason             string
+	CandidateNodes             []string
+	EvictionRequested          bool
+	CopyJobName                string
+	PromotionJobName           string
+	CleanupPhase               string
+	CopyOperationID            string
+	PromotionOperationID       string
+	SourceCopy                 *volume.CopyIdentity
+	IncomingCopy               *volume.CopyIdentity
+	DestinationCopy            *volume.CopyIdentity
+	RollbackRequiredGeneration int64
+	RecoveryPhase              string
+	RecoveryOwner              string
+	RecoveryReason             string
+	RecoveryMessage            string
 }
 
 type Move struct {
@@ -213,6 +214,13 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		return MoveStatus{}, fmt.Errorf("decode candidateNodes: %w", err)
 	}
 	evictionRequested, _, _ := unstructured.NestedBool(object.Object, "status", "evictionRequested")
+	rollbackGeneration, _, err := unstructured.NestedInt64(object.Object, "status", "rollbackRequiredGeneration")
+	if err != nil {
+		return MoveStatus{}, fmt.Errorf("decode rollbackRequiredGeneration: %w", err)
+	}
+	if rollbackGeneration < 0 {
+		return MoveStatus{}, fmt.Errorf("rollbackRequiredGeneration must not be negative")
+	}
 	sourceBytes, _, _ := unstructured.NestedInt64(object.Object, "status", "sourceBytes")
 	capacityApproved, _, _ := unstructured.NestedBool(object.Object, "status", "capacityApproved")
 	cleanupPhase, _, _ := unstructured.NestedString(object.Object, "status", "cleanup", "status", "phase")
@@ -253,7 +261,8 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		CopyJobName: read("copyJobName"), PromotionJobName: read("promotionJobName"), CleanupPhase: cleanupPhase,
 		CopyOperationID: read("copyOperationID"), PromotionOperationID: read("promotionOperationID"),
 		SourceCopy: sourceCopy, IncomingCopy: incomingCopy, DestinationCopy: destinationCopy,
-		RecoveryPhase: read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
+		RollbackRequiredGeneration: rollbackGeneration,
+		RecoveryPhase:              read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
 		RecoveryReason: read("recoveryReason"), RecoveryMessage: read("recoveryMessage"),
 	}, nil
 }
@@ -276,6 +285,9 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 		"recoveryPhase": status.RecoveryPhase, "recoveryOwner": status.RecoveryOwner,
 		"recoveryReason": status.RecoveryReason, "recoveryMessage": status.RecoveryMessage,
 	}
+	if status.RollbackRequiredGeneration > 0 {
+		next["rollbackRequiredGeneration"] = status.RollbackRequiredGeneration
+	}
 	object.Object["status"] = next
 	encoded := next
 	if cleanup != nil {
@@ -292,6 +304,10 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 }
 
 func preserveMoveIdentity(current, next MoveStatus) error {
+	if next.RollbackRequiredGeneration < 0 || (current.RollbackRequiredGeneration > 0 && current.RollbackRequiredGeneration != next.RollbackRequiredGeneration) {
+		return fmt.Errorf("%w: Move rollbackRequiredGeneration is immutable", ErrStateConflict)
+	}
+
 	for _, item := range []struct {
 		name          string
 		current, next *volume.CopyIdentity

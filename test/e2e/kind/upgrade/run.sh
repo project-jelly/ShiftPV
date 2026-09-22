@@ -152,8 +152,14 @@ delete_workload() {
 }
 
 # The candidate upgrade changes exactly two things against the published
-# install: the chart in this checkout and the images built from it.
+# install: the chart (including CRD schemas) and images built from it.
 upgrade_candidate() {
+	# Helm does not update schemas from crds/ on upgrade. Apply them before
+	# rolling a controller that persists the new rollback generation fence.
+	kubectl apply --field-manager=shiftpv-crd-upgrade -f "${ROOT_DIR}/charts/shiftpv/crds/"
+	kubectl wait --for=condition=Established crd/shiftpvmoves.shiftpv.io --timeout=60s
+	assert_equal "installed rollback fence schema" integer \
+		"$(kubectl get crd/shiftpvmoves.shiftpv.io -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.rollbackRequiredGeneration.type}')"
 	helm upgrade --install "${RELEASE}" "${ROOT_DIR}/charts/shiftpv" \
 		--namespace "${NAMESPACE}" \
 		--set storageClass.defaultClass=true \
@@ -274,7 +280,7 @@ if [[ "${RECLAIM_MISMATCH}" == 0 ]]; then
 	assert_marker shiftpv-upgrade-existing "${MARKER}"
 	create_workload shiftpv-upgrade-new "${DEFAULT_CLASS}" "shiftpv upgrade marker after the candidate upgrade"
 	ASSERTIONS+=(
-		"plain helm upgrade rolled the controller and node to the candidate image"
+		"CRD schema update and helm upgrade rolled the controller and node to the candidate image"
 		"the pre-upgrade Pod still read its marker across the upgrade"
 		"a new PVC provisioned and mounted on the unchanged class"
 	)
