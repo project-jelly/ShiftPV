@@ -172,10 +172,10 @@ upgrade_candidate() {
 		--set-string mobility.helperImage="${CANDIDATE_IMAGE}" \
 		"${READINESS_ARGS[@]}" \
 		--wait --timeout 8m
-	kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
-		-l app.kubernetes.io/instance="${RELEASE}" --timeout=5m
 }
 
+# Rollout status follows the current workload generation. A label-selected
+# kubectl wait can capture an old Pod that is deleted during this upgrade.
 assert_candidate_images() {
 	kubectl -n "${NAMESPACE}" rollout status deployment/shiftpv-controller --timeout=5m
 	kubectl -n "${NAMESPACE}" rollout status daemonset/shiftpv-node --timeout=5m
