@@ -1243,3 +1243,14 @@ func readyNode(name string, cordoned bool) *corev1.Node {
 func claimVolumes() []corev1.Volume {
 	return []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "claim"}}}}
 }
+
+func (m *memoryRepository) RequestPoolScan(_ context.Context, target volume.CopyIdentity) (int64, error) {
+	for i := range m.pools {
+		pool := &m.pools[i]
+		if pool.Name == target.PoolName && pool.UID == target.PoolUID {
+			pool.Generation++
+			return pool.Generation, nil
+		}
+	}
+	return 0, volumeapi.ErrStateConflict
+}

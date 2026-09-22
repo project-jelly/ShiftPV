@@ -333,6 +333,8 @@ func rollbackRecoveryFixture(t *testing.T, copies []volumeapi.CopyObservation) (
 	move.Status.RecoveryOwner, move.Status.RecoveryPhase = "source", recoveryRetiring
 	move.Status.LastTransitionTime = transitionedAt.Format(time.RFC3339Nano)
 	move.Status.SourceBytes = 32 << 20
+	// This fixture starts after a durable rollback scan fence has been observed.
+	move.Status.RollbackRequiredGeneration = 1
 	repo.moves[0] = move
 
 	observedAt := transitionedAt.Add(time.Second)
@@ -424,11 +426,10 @@ func TestRecoveryRollbackAcceptsOnlyFreshExactAbsence(t *testing.T) {
 		}
 	})
 
-	t.Run("inventory not after Retiring", func(t *testing.T) {
+	t.Run("inventory before requested generation", func(t *testing.T) {
 		r, repo, _, _ := rollbackRecoveryFixture(t, nil)
 		move := repo.moves[0]
-		transitionedAt, _ := time.Parse(time.RFC3339Nano, move.Status.LastTransitionTime)
-		repo.pools[1].Status.Inventory.ObservedAt = metav1.NewTime(transitionedAt)
+		move.Status.RollbackRequiredGeneration = repo.pools[1].Generation + 1
 		state, _ := repo.Get(context.Background(), move.Spec.VolumeID)
 		if done, err := r.settleRecoveryArtifacts(context.Background(), &move, state); err == nil || done {
 			t.Fatalf("non-causal absence was accepted: done=%v err=%v", done, err)

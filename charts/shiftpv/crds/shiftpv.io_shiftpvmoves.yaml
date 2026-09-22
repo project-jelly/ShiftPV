@@ -74,6 +74,11 @@ spec:
                 recoveryPhase:
                   type: string
                   enum: ['', Quiescing, Verifying, Retiring, Resuming, Completing, Recovered]
+                rollbackRequiredGeneration:
+                  description: Pool generation requested after Retiring; required before rollback inventory can release capacity.
+                  type: integer
+                  format: int64
+                  minimum: 1
                 recoveryOwner:
                   type: string
                 recoveryReason:

@@ -161,6 +161,15 @@ representation is the original Move remaining `Blocked` with
 `status.recoveryPhase=Recovered`, while the Volume is back to source `Ready` and
 `activeMove` is cleared.
 
+Before using destination inventory in source rollback, `Retiring` requests a new
+Pool `spec.scanEpoch` and persists the returned generation in
+`status.rollbackRequiredGeneration`. Capacity remains held until the exact Pool
+UID reports a valid, complete inventory at its current generation, at or beyond
+that fence. This applies even when neither transaction copy exists and no
+cleanup journal was created. Node/controller timestamps only bound freshness;
+they do not establish scan ordering. A lost request or unrecorded fence causes a
+new scan request, while a persisted fence survives controller restart.
+
 ## Safety Invariants
 
 | Invariant | Meaning |

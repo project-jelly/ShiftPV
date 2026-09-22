@@ -22,6 +22,16 @@ Move authority contradiction은 `Blocked`, parent-owned cleanup contradiction은
 bounded inventory에서 report-only로 보존한다. Exact Move intent가 소유한 non-owner copy만
 rollback/source cleanup 계약에 따라 정리할 수 있다.
 
+Source rollback은 `Retiring`을 저장한 뒤 destination Pool의 `spec.scanEpoch`를 증가시키고,
+API가 반환한 generation을 Move의 `status.rollbackRequiredGeneration`에 기록한다. 다음 reconcile은
+동일 Pool UID의 현재 generation이 이 값 이상이고 `status.observedGeneration`과 일치하는
+valid·complete inventory만 사용한다. `ObservedAt`은 freshness 판단에만 쓰며, 노드와 controller의
+시각 비교로 rollback 이후 관찰임을 증명하지 않는다.
+
+스캔 요청이나 Move 기록의 결과가 불명확하면 durable fence를 다시 읽고, 기록이 없으면 새 스캔을
+요청한다. 이미 사본이 없는 경우에도 이 증거가 있어야 capacity hold를 해제하며, 실제 purge 없이
+cleanup receipt를 만들어내지 않는다. 이전 버전에서 시작한 recovery도 fence가 없으면 새로 요청한다.
+
 ## Alternatives considered
 
 | 대안 | 절충점 |

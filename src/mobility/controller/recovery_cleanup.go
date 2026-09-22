@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
@@ -20,8 +19,8 @@ var errRecoveryCleanupNeedsReview = errors.New("recovery cleanup needs review")
 // Move's temporary capacity hold. Source-owner recovery rolls back the one
 // exact destination transaction artifact, while destination-owner recovery
 // finishes the ordinary retained-source cleanup. A durable Retiring phase and
-// a later Pool inventory make the already-absent case safe without inventing a
-// destructive cleanup receipt.
+// a generation-fenced Pool inventory make the already-absent case safe without
+// inventing a destructive cleanup receipt.
 func (r *Reconciler) settleRecoveryArtifacts(ctx context.Context, move *volumeapi.Move, state volumeapi.State) (bool, error) {
 	if move.Status.CapacityReason == recoveryCapacitySettled {
 		if move.Status.CapacityApproved {
@@ -72,6 +71,9 @@ func (r *Reconciler) settleSourceRollback(ctx context.Context, move *volumeapi.M
 	}
 	if move.Status.SourceCopy == nil || *state.CurrentCopy != *move.Status.SourceCopy {
 		return false, needsRecoveryCleanupReview("recorded source identity differs from current authority")
+	}
+	if ready, err := r.ensureRollbackScan(ctx, move); err != nil || !ready {
+		return false, err
 	}
 	target, present, err := r.rollbackArtifact(ctx, *move)
 	if err != nil {
@@ -125,7 +127,7 @@ func (r *Reconciler) settleDestinationCleanup(ctx context.Context, move *volumea
 }
 
 // rollbackArtifact returns the only exact destination transaction artifact
-// visible in an inventory collected strictly after entry into Retiring. A
+// visible in an inventory from the requested post-Retiring generation. A
 // valid, complete inventory containing neither identity proves that no cleanup
 // effect is required. Any conflicting or problem observation stays untouched.
 func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) (volume.CopyIdentity, bool, error) {
@@ -138,12 +140,11 @@ func (r *Reconciler) rollbackArtifact(ctx context.Context, move volumeapi.Move) 
 
 // rollbackInventoryPool resolves the one registered destination Pool whose
 // identity still matches the approved hold and whose inventory is a fresh,
-// complete observation collected strictly after entry into Retiring. Nothing
+// complete observation from the requested post-Retiring generation. Nothing
 // here inspects copies: it only decides which observation may be trusted.
 func (r *Reconciler) rollbackInventoryPool(ctx context.Context, move volumeapi.Move) (*volumeapi.Pool, error) {
-	transitionedAt, err := rollbackTransitionTime(move)
-	if err != nil {
-		return nil, err
+	if err := validRollbackIntent(move); err != nil {
+		return nil, needsRecoveryCleanupReview("destination cleanup intent is incomplete: %v", err)
 	}
 	pools, err := r.Repository.Pools(ctx)
 	if err != nil {
@@ -153,23 +154,10 @@ func (r *Reconciler) rollbackInventoryPool(ctx context.Context, move volumeapi.M
 	if err != nil {
 		return nil, err
 	}
-	if err := r.rollbackInventoryFresh(destination, transitionedAt); err != nil {
+	if err := r.rollbackInventoryFresh(destination, move.Status.RollbackRequiredGeneration); err != nil {
 		return nil, err
 	}
 	return destination, nil
-}
-
-// rollbackTransitionTime reads the exact instant the Move entered Retiring. An
-// unusable intent or timestamp is a contradiction, never a retry.
-func rollbackTransitionTime(move volumeapi.Move) (time.Time, error) {
-	if err := validRollbackIntent(move); err != nil {
-		return time.Time{}, needsRecoveryCleanupReview("destination cleanup intent is incomplete: %v", err)
-	}
-	transitionedAt, err := time.Parse(time.RFC3339Nano, move.Status.LastTransitionTime)
-	if err != nil {
-		return time.Time{}, needsRecoveryCleanupReview("Retiring transition time is invalid")
-	}
-	return transitionedAt, nil
 }
 
 // rollbackDestinationPool resolves the one registered Pool on the destination
@@ -197,9 +185,12 @@ func rollbackDestinationPool(move volumeapi.Move, pools []volumeapi.Pool) (*volu
 }
 
 // rollbackInventoryFresh reports whether the destination Pool is cleanup-ready
-// and carries a fresh, complete inventory collected strictly after entry into
-// Retiring. A stale or partial observation is a wait, not a contradiction.
-func (r *Reconciler) rollbackInventoryFresh(destination *volumeapi.Pool, transitionedAt time.Time) error {
+// and carries a fresh, complete inventory from the requested post-Retiring
+// generation. A stale or partial observation is a wait, not a contradiction.
+func (r *Reconciler) rollbackInventoryFresh(destination *volumeapi.Pool, requiredGeneration int64) error {
+	if requiredGeneration <= 0 || destination.Generation < requiredGeneration || destination.Status.ObservedGeneration != destination.Generation {
+		return fmt.Errorf("waiting for destination inventory at rollback scan generation %d", requiredGeneration)
+	}
 	now := r.now()
 	staleAfter := r.PoolReadinessStaleAfter
 	if staleAfter <= 0 {
@@ -210,8 +201,8 @@ func (r *Reconciler) rollbackInventoryFresh(destination *volumeapi.Pool, transit
 	}
 	inventory := destination.Status.Inventory
 	if inventory == nil || !inventory.Valid || inventory.Truncated || inventory.Message != "" ||
-		inventory.ObservedAt.IsZero() || !inventory.ObservedAt.Time.After(transitionedAt) || now.Before(inventory.ObservedAt.Time) || now.Sub(inventory.ObservedAt.Time) > staleAfter {
-		return fmt.Errorf("waiting for a fresh complete destination inventory collected after Retiring")
+		inventory.ObservedAt.IsZero() || now.Before(inventory.ObservedAt.Time) || now.Sub(inventory.ObservedAt.Time) > staleAfter {
+		return fmt.Errorf("waiting for a fresh complete destination inventory at the rollback scan fence")
 	}
 	return nil
 }
@@ -274,6 +265,10 @@ func noDestinationEffectIntent(move volumeapi.Move) bool {
 // be derived from. Each sub-predicate names the term it owns, so a NeedsReview
 // entry records which identity contradicted the durable intent.
 func validRollbackIntent(move volumeapi.Move) error {
+	if move.Status.RecoveryPhase != recoveryRetiring {
+		return needsRecoveryCleanupReview("rollback scan requires durable Retiring intent")
+	}
+
 	if err := rollbackSourceIntent(move); err != nil {
 		return err
 	}

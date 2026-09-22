@@ -18,6 +18,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 const (
@@ -31,6 +32,7 @@ type Repository interface {
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	Get(context.Context, string) (volumeapi.State, error)
 	CompareAndSetState(context.Context, string, string, string, string, volumeapi.State) error
+	RequestPoolScan(context.Context, volume.CopyIdentity) (int64, error)
 	Pools(context.Context) ([]volumeapi.Pool, error)
 	ObservePools(context.Context) (volumeapi.PoolSnapshot, error)
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
