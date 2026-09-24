@@ -8,7 +8,7 @@ source "${ROOT_DIR}/test/e2e/kind/lib/artifact.sh"
 # shellcheck source=test/e2e/kind/lib/cluster.sh
 source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
 
-LOCK_FILE=${ARTIFACT_LOCK_FILE:-"${ROOT_DIR}/test/e2e/kind/artifact/versions.env"}
+LOCK_FILE=${ARTIFACT_LOCK_FILE:-"${TEST_DIR}/versions.env"}
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-upgrade-e2e}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 CANDIDATE_IMAGE=${CANDIDATE_IMAGE:-shiftpv:upgrade-dev}
@@ -236,7 +236,7 @@ kind create cluster \
 	--image "${KIND_NODE_IMAGE}" \
 	--config "${WORK_DIR}/cluster.yaml"
 
-install_published_release "${chart_package}" "${NAMESPACE}" "${RELEASE}" "${READINESS_ARGS[@]}"
+install_published_release "${chart_package}" "${NAMESPACE}" "${RELEASE}" --set storageClass.defaultClass=true "${READINESS_ARGS[@]}"
 kubectl apply -f "${WORK_DIR}/pools.yaml"
 kubectl wait --for=condition=Ready shiftpvpool --all --timeout=2m
 

@@ -78,6 +78,7 @@ release-workflow-test:
 	./test/release/version-increase.sh
 	./test/release/wait-for-chart-images.sh
 	./test/release/validate-artifact-lock.sh
+	./test/release/resolve-latest-artifacts.sh
 
 shellcheck:
 	@test -n "$(SHELL_SCRIPTS)" || { echo 'no shell scripts were discovered under build/ or test/'; exit 1; }

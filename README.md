@@ -6,6 +6,13 @@ ShiftPV는 기존 Linux filesystem 위의 node-local directory를 Kubernetes RWO
 > **0.4 contract status:** 0.4.0 runtime은 repository gate, 실제 node의 unclean OS reboot 경계 시험,
 > 100회·12시간 soak를 통과했으며 아래의 명시된 product boundary 안에서 사용한다.
 
+## Start here
+
+[Quickstart](docs/quickstart.md)는 공개된 Chart 0.5.10 / Controller 0.4.11 / Node 0.4.7로
+설치 → Pool 등록 → PVC 쓰기 → Pod 재생성 후 데이터 확인까지 안내한다.
+기존 클러스터의 기본 StorageClass를 바꾸지 않으며 PVC에서 `storageClassName`을 명시한다.
+이미 설치했다면 [CRD 선적용 및 upgrade 안내](docs/development/versioning.md#existing-installation-upgrades)를 따른다.
+
 ## Architecture
 
 ```mermaid

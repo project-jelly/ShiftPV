@@ -58,7 +58,7 @@ func TestDefaultStorageClassesExpressDeleteAndRetainLifecycles(t *testing.T) {
 	for name, want := range map[string]struct {
 		policy, defaultClass string
 	}{
-		"shiftpv":        {policy: "Delete", defaultClass: "true"},
+		"shiftpv":        {policy: "Delete", defaultClass: "false"},
 		"shiftpv-retain": {policy: "Retain", defaultClass: "false"},
 	} {
 		class, ok := classes[name]
@@ -72,6 +72,17 @@ func TestDefaultStorageClassesExpressDeleteAndRetainLifecycles(t *testing.T) {
 			class.Parameters["shiftpv.io/capacity-enforcement"] != "none" {
 			t.Fatalf("unexpected StorageClass %q: %+v", name, class)
 		}
+	}
+}
+
+func TestDefaultStorageClassRequiresExplicitOptIn(t *testing.T) {
+	output, err := render(t, "--set", "storageClass.defaultClass=true",
+		"--show-only", "templates/storage/storageclass.yaml")
+	if err != nil {
+		t.Fatalf("%v: %s", err, output)
+	}
+	if strings.Count(output, `storageclass.kubernetes.io/is-default-class: "true"`) != 1 {
+		t.Fatal("explicit opt-in must mark exactly one ShiftPV StorageClass as default")
 	}
 }
 

@@ -11,7 +11,7 @@ make kind-upgrade-e2e
 
 ## Sequence
 
-1. Install the chart and images pinned in [`../artifact/versions.env`](../artifact/versions.env) on a Kind
+1. Install the previous release pinned in [`versions.env`](versions.env) on a Kind
    cluster named `shiftpv-upgrade-e2e`. The chart tarball is digest-verified before anything is installed from
    it. Register both Pools, then provision a PVC on the default ShiftPV StorageClass and write a marker file.
 2. Build the combined image from this checkout, load it into the cluster, and `helm upgrade` to the local

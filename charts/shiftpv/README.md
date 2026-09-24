@@ -1,7 +1,8 @@
 # ShiftPV Helm Contract
 
-> **Status:** 이 파일은 현재 checkout의 Chart 구현 후보를 설명한다. 운영 gate와 별도 release가
-> 끝나기 전에는 배포 승인 또는 runtime 보증으로 사용하지 않는다.
+이 파일은 현재 checkout의 Chart 설정과 운영 계약을 설명한다. 처음 설치한다면
+[공개 artifact에 고정된 Quickstart](../../docs/quickstart.md)를 따른다.
+이미 설치한 환경은 [기본 StorageClass 변경과 CRD 선적용 절차](../../docs/development/versioning.md#existing-installation-upgrades)를 먼저 확인한다.
 
 Chart는 CSI Controller/Node, 세 CRD(`ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`), StorageClass,
 admission, metrics와 fail-closed removal guard를 설치해야 한다. Pool directory와 host filesystem은
@@ -21,8 +22,8 @@ storage operator가 준비해야 한다.
 
 ## Install
 
-0.4 artifact가 release gate를 통과하기 전에는 이 절차를 실행하지 않는다. 승인 뒤에는 고정한 chart
-version과 image digest를 사용한다.
+다음은 공개된 Chart 0.5.10의 설치 예시다. 재마운트 확인까지 포함한 절차와 image digest pin은
+[Quickstart](../../docs/quickstart.md)에 있다. 운영에서는 검증한 Chart version과 image digest를 고정한다.
 
 ```bash
 helm repo add shiftpv https://project-jelly.github.io/ShiftPV
@@ -30,7 +31,8 @@ helm repo update shiftpv
 helm install shiftpv shiftpv/shiftpv \
   --namespace shiftpv-system \
   --create-namespace \
-  --version <approved-chart-version> \
+  --version 0.5.10 \
+  --set storageClass.defaultClass=false \
   --wait
 ```
 
@@ -40,9 +42,11 @@ Repository 검증에서는 `shiftpv/shiftpv` 대신 `./charts/shiftpv`를 사용
 MicroK8s 예시:
 
 ```bash
-helm install shiftpv ./charts/shiftpv \
+helm install shiftpv shiftpv/shiftpv \
   --namespace shiftpv-system \
   --create-namespace \
+  --version 0.5.10 \
+  --set storageClass.defaultClass=false \
   --set node.kubeletRootDir=/var/snap/microk8s/common/var/lib/kubelet \
   --wait
 ```
@@ -82,14 +86,14 @@ Chart는 directory, filesystem, mount, RAID, encryption과 backup을 만들거�
 ## StorageClass
 
 Chart는 같은 provisioner를 사용하는 두 StorageClass를 설치한다. `shiftpv`는 일반 PVC lifecycle에 맞춰
-삭제되는 기본 class이고, `shiftpv-retain`은 PVC 삭제 뒤에도 PV와 data를 보존해야 하는 workload가
+삭제되는 class이고, `shiftpv-retain`은 PVC 삭제 뒤에도 PV와 data를 보존해야 하는 workload가
 명시적으로 선택한다. 둘 다 `WaitForFirstConsumer`와 RWO filesystem을 사용한다.
 
 ```yaml
 storageClass:
   create: true
   name: shiftpv
-  defaultClass: true
+  defaultClass: false
   reclaimPolicy: Delete
 
 retainStorageClass:
@@ -98,6 +102,10 @@ retainStorageClass:
   defaultClass: false
   reclaimPolicy: Retain
 ```
+
+Chart 0.6.0부터 두 class 모두 기본 StorageClass로 지정하지 않는다. PVC에서 사용할 class를 명시한다.
+클러스터 기본값으로 쓰려는 운영자만 `storageClass.defaultClass=true`를 설정한다.
+기존 기본 StorageClass가 있다면 새 기본값을 추가하기 전에 클러스터의 기본 class 정책을 정한다.
 
 PVC 예시:
 
@@ -141,7 +149,7 @@ helm upgrade shiftpv shiftpv/shiftpv --namespace shiftpv-system --version <appro
 kubectl get storageclass shiftpv shiftpv-retain
 ```
 
-이 절차가 실제로 동작하는지는 `make kind-upgrade-e2e`가 확인한다. 마지막 공개 릴리스를 설치한 뒤 현재
+이 절차가 실제로 동작하는지는 `make kind-upgrade-e2e`가 확인한다. 별도로 고정한 이전 공개 릴리스를 설치한 뒤 현재
 checkout으로 in-place upgrade하고, 의존하는 storage가 남아 있을 때의 삭제 거부와 정리 후의 삭제·재생성을
 그대로 재현한다.
 
