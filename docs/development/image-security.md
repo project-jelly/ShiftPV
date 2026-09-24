@@ -38,6 +38,20 @@ production credentials, new secrets, PATs or `pull_request_target` triggers.
 The workflow's external actions are pinned to full release commit SHAs. Trivy CLI
 is pinned to `v0.74.0`; review and update that version and action pins periodically.
 
+## Runtime image maintenance
+
+Controller and Node use Alpine 3.24.2, pinned by the multi-platform base digest
+in `build/package/Dockerfile`. Controller includes `rsync`; Node explicitly
+installs the util-linux `mount` and `umount` packages. Keep those implementations
+when updating Alpine, because the CSI bind-mount behavior must remain compatible.
+The Go builder remains independent of the runtime distribution.
+
+Base-image updates require rebuilding the final images and checking both
+architectures with Trivy and the existing mount/mobility/upgrade tests. A clean
+scan is a point-in-time report, not a guarantee against future vulnerabilities.
+Refresh the base pin and package contents through a reviewed component patch
+release; the daily report does not rebuild or update deployed images.
+
 ## Operations
 
 After the workflow reaches the default branch, run it once from

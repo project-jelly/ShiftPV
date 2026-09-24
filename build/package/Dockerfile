@@ -26,15 +26,11 @@ RUN export GOOS="${TARGETOS:-$(go env GOOS)}" GOARCH="${TARGETARCH:-$(go env GOA
     -trimpath -ldflags="-s -w -X main.version=${NODE_VERSION}" \
     -o /out/shiftpv-node ./src/cmd/node
 
-FROM debian:bookworm-slim AS runtime-base
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS runtime-base
+RUN apk add --no-cache ca-certificates
 
 FROM runtime-base AS controller
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends rsync \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache rsync
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
 COPY --from=build-controller /out/shiftpv-uninstall-guard /shiftpv-uninstall-guard
 COPY --from=build-controller /out/shiftpv-volume-helper /shiftpv-volume-helper
@@ -42,9 +38,7 @@ USER 65532:65532
 ENTRYPOINT ["/shiftpv-controller"]
 
 FROM runtime-base AS node
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends mount \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache mount umount
 COPY --from=build-node /out/shiftpv-node /shiftpv-node
 USER 0:0
 ENTRYPOINT ["/shiftpv-node"]
@@ -52,9 +46,7 @@ ENTRYPOINT ["/shiftpv-node"]
 # Local kind tests use one loaded image while release builds keep controller
 # and node runtimes independent.
 FROM runtime-base AS combined
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends mount rsync \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache mount umount rsync
 COPY --from=build-controller /out/shiftpv-controller /shiftpv-controller
 COPY --from=build-controller /out/shiftpv-uninstall-guard /shiftpv-uninstall-guard
 COPY --from=build-controller /out/shiftpv-volume-helper /shiftpv-volume-helper
