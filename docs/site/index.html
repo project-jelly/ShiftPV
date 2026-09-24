@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShiftPV — movable local volumes for Kubernetes</title>
+<style>
+  body { max-width: 44rem; margin: 4rem auto; padding: 0 1.5rem; font: 1.1rem/1.6 system-ui, sans-serif; color: #182330; }
+  a { color: #1757a6; }
+  li { margin: .7rem 0; }
+  code { background: #edf1f5; padding: .2rem .4rem; }
+</style>
+<main>
+  <h1>ShiftPV</h1>
+  <p>A Kubernetes CSI driver for node-local RWO filesystem volumes, with planned cold moves between recoverable nodes.</p>
+  <p>ShiftPV uses directories on existing filesystems. Backups, replication and recovery from permanent node or disk loss remain the operator's responsibility.</p>
+  <ul>
+    <li><a href="https://github.com/project-jelly/ShiftPV/blob/main/docs/quickstart.md">Quickstart — install, write and remount</a></li>
+    <li><a href="https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md">Helm configuration and operations</a></li>
+    <li><a href="https://github.com/project-jelly/ShiftPV/blob/main/docs/development/versioning.md">Upgrade and release policy</a></li>
+    <li><a href="https://github.com/project-jelly/ShiftPV">Source, issues and documentation</a></li>
+    <li><a href="index.yaml">Helm repository index</a></li>
+  </ul>
+  <p>Helm repository: <code>https://project-jelly.github.io/ShiftPV</code></p>
+  <p lang="ko">설치 안내에서 검증된 Chart version을 선택하고 PVC의 StorageClass를 명시하세요.</p>
+</main>
+</html>

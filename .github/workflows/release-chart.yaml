@@ -121,6 +121,7 @@ jobs:
           helm repo index chart-repository \
             --url https://project-jelly.github.io/ShiftPV
           touch chart-repository/.nojekyll
+          cp docs/site/index.html chart-repository/index.html
 
       - name: Publish chart repository
         working-directory: chart-repository
@@ -129,7 +130,7 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .nojekyll index.yaml "shiftpv-${VERSION}.tgz"
+          git add .nojekyll index.html index.yaml "shiftpv-${VERSION}.tgz"
           if ! git diff --cached --quiet; then
             git commit -m "Publish shiftpv chart v${VERSION}"
             git push origin HEAD:gh-pages
