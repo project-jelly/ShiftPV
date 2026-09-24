@@ -16,6 +16,7 @@ expect_rejected() {
 }
 
 "${validator}" "${source_lock}" >/dev/null
+"${validator}" "${repo_root}/test/e2e/kind/upgrade/versions.env" >/dev/null
 
 grep -v '^CHART_SHA256=' "${source_lock}" >"${fixture}/missing.env"
 expect_rejected "${fixture}/missing.env"

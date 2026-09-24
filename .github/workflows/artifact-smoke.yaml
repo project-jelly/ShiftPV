@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * *"
+  workflow_run:
+    workflows: [Release Helm Chart]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -14,12 +18,14 @@ concurrency:
 
 jobs:
   kind-artifact-e2e:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     name: kind-artifact-e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
+      ARTIFACT_LOCK_FILE: /tmp/shiftpv-${{ github.run_id }}-public-artifacts.env
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,6 +34,16 @@ jobs:
         uses: ./.github/actions/install-k8s-tools
         with:
           report-versions: "true"
+
+      - name: Resolve latest stable public artifacts
+        run: ./test/e2e/kind/artifact/resolve-latest.sh > "${ARTIFACT_LOCK_FILE}"
+
+      - name: Archive resolved artifact identities
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-artifact-lock
+          path: ${{ env.ARTIFACT_LOCK_FILE }}
+          if-no-files-found: error
 
       - name: Install and mount published artifacts
         env:
@@ -43,7 +59,7 @@ jobs:
           artifact-name: kind-artifact-e2e-diagnostics
           resource-kinds: nodes,pods,pvc,pv,storageclass,csinode
           extra-diagnostics: |
-            cp test/e2e/kind/artifact/versions.env .tmp/ci-artifact-diagnostics/artifact-lock.env
+            cp "${ARTIFACT_LOCK_FILE}" .tmp/ci-artifact-diagnostics/artifact-lock.env
 
       - name: Delete kind cluster
         if: always()

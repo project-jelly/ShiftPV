@@ -7,12 +7,11 @@ ROOT_DIR=$(cd "${TEST_DIR}/../../../.." && pwd)
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 # shellcheck source=test/e2e/kind/lib/artifact.sh
 source "${ROOT_DIR}/test/e2e/kind/lib/artifact.sh"
-LOCK_FILE=${ARTIFACT_LOCK_FILE:-"${TEST_DIR}/versions.env"}
+LOCK_FILE=${ARTIFACT_LOCK_FILE:-}
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-artifact-e2e}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 
 require_commands awk docker helm kind kubectl sed
-load_artifact_lock "${LOCK_FILE}"
 require_kind_version
 
 mkdir -p "${ROOT_DIR}/.tmp"
@@ -21,7 +20,6 @@ worker_a_pool="${work_dir}/worker-a"
 worker_b_pool="${work_dir}/worker-b"
 mkdir -p "${worker_a_pool}" "${worker_b_pool}"
 export KUBECONFIG="${E2E_KUBECONFIG:-${work_dir}/kubeconfig}"
-isolate_tool_environment "${work_dir}"
 
 cleanup() {
   if [[ "${KEEP_CLUSTER}" == 1 ]]; then
@@ -32,6 +30,15 @@ cleanup() {
   rm -rf -- "${work_dir}"
 }
 trap cleanup EXIT
+
+if [[ -z "${LOCK_FILE}" ]]; then
+  LOCK_FILE="${work_dir}/resolved.env"
+  "${TEST_DIR}/resolve-latest.sh" >"${LOCK_FILE}"
+fi
+load_artifact_lock "${LOCK_FILE}"
+# Resolve before isolating Docker's config: desktop installations may discover
+# the buildx CLI plugin through that config. The resolver isolates Helm itself.
+isolate_tool_environment "${work_dir}"
 
 sed -e "s|__WORKER_A_POOL__|${worker_a_pool}|g" \
   -e "s|__WORKER_B_POOL__|${worker_b_pool}|g" \
@@ -45,7 +52,7 @@ chart_package=$(pull_published_chart "${work_dir}")
 kind create cluster --name "${CLUSTER_NAME}" --image "${KIND_NODE_IMAGE}" \
   --config "${work_dir}/cluster.yaml"
 
-install_published_release "${chart_package}" shiftpv-system shiftpv
+install_published_release "${chart_package}" shiftpv-system shiftpv --set storageClass.defaultClass=false
 kubectl apply -f "${work_dir}/pools.yaml"
 
 assert_equal "installed chart" "shiftpv-${CHART_VERSION}" \
@@ -58,7 +65,9 @@ assert_equal "node image" "${NODE_IMAGE}" \
   "$(kubectl -n shiftpv-system get daemonset/shiftpv-node \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="shiftpv-node")].image}')"
 
-kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pvc.yaml"
+assert_equal "ShiftPV is not the cluster default" false \
+  "$(kubectl get storageclass/shiftpv -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}')"
+kubectl apply -f "${TEST_DIR}/pvc.yaml"
 kubectl wait --for=jsonpath='{.spec.storageClassName}'=shiftpv pvc/shiftpv-e2e --timeout=2m
 kubectl apply -f "${ROOT_DIR}/test/e2e/kind/pod.yaml"
 kubectl wait --for=condition=Ready pod/shiftpv-e2e --timeout=5m

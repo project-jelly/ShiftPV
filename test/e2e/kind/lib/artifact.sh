@@ -97,15 +97,14 @@ assert_equal() {
 }
 
 # Install the locked release from its verified package. Both the artifact smoke
-# and the upgrade suite start from exactly this state, so the image wiring lives
-# in one place; extra helm arguments are appended by the caller.
+# and the upgrade suite use the same image wiring with separate release locks;
+# extra helm arguments, including default StorageClass opt-in, belong to callers.
 # Requires CONTROLLER_IMAGE and NODE_IMAGE from the lock.
 install_published_release() {
 	local chart_package=$1 namespace=$2 release=$3
 	shift 3
 	helm upgrade --install "${release}" "${chart_package}" \
 		--namespace "${namespace}" --create-namespace \
-		--set storageClass.defaultClass=true \
 		--set-string controller.image.repository="${CONTROLLER_IMAGE%%:*}" \
 		--set-string controller.image.tag="${CONTROLLER_IMAGE#*:}" \
 		--set-string node.image.repository="${NODE_IMAGE%%:*}" \
