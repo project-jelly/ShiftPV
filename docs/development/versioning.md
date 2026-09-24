@@ -37,6 +37,16 @@ version을 채택하기 전까지 운영 배포를 의미하지 않는다.
 
 ## Existing installation upgrades
 
+Chart 0.6.0은 `storageClass.defaultClass` 기본값을 `true`에서 `false`로 변경한다.
+기존에 ShiftPV를 기본 StorageClass로 사용했다면 upgrade values에 다음 값을 명시한다.
+생략하면 upgrade 시 기본 class annotation이 해제될 수 있으며, 이후 class를 생략한 PVC의 배치가
+달라질 수 있다. 이미 바인딩된 PVC/PV의 class와 데이터는 이 annotation 변경으로 이동하지 않는다.
+
+```yaml
+storageClass:
+  defaultClass: true
+```
+
 `helm upgrade`는 Chart의 `crds/` schema를 갱신하지 않는다. 새 Controller가 사용하는 status field가
 기존 CRD에 없으면 API가 그 값을 제거하므로, target Chart의 CRD를 먼저 적용한 뒤 runtime을 올린다.
 특히 rollback generation fence를 도입한 버전은 `status.rollbackRequiredGeneration` schema가 필요하다.

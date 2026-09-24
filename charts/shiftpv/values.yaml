@@ -77,7 +77,8 @@ lifecycle:
 storageClass:
   create: true
   name: shiftpv
-  defaultClass: true
+  # Opt in explicitly; installing ShiftPV must not change where unrelated PVCs land.
+  defaultClass: false
   reclaimPolicy: Delete
 
 retainStorageClass:

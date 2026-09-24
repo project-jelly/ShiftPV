@@ -82,14 +82,14 @@ Chart는 directory, filesystem, mount, RAID, encryption과 backup을 만들거�
 ## StorageClass
 
 Chart는 같은 provisioner를 사용하는 두 StorageClass를 설치한다. `shiftpv`는 일반 PVC lifecycle에 맞춰
-삭제되는 기본 class이고, `shiftpv-retain`은 PVC 삭제 뒤에도 PV와 data를 보존해야 하는 workload가
+삭제되는 class이고, `shiftpv-retain`은 PVC 삭제 뒤에도 PV와 data를 보존해야 하는 workload가
 명시적으로 선택한다. 둘 다 `WaitForFirstConsumer`와 RWO filesystem을 사용한다.
 
 ```yaml
 storageClass:
   create: true
   name: shiftpv
-  defaultClass: true
+  defaultClass: false
   reclaimPolicy: Delete
 
 retainStorageClass:
@@ -98,6 +98,10 @@ retainStorageClass:
   defaultClass: false
   reclaimPolicy: Retain
 ```
+
+Chart 0.6.0부터 두 class 모두 기본 StorageClass로 지정하지 않는다. PVC에서 사용할 class를 명시한다.
+클러스터 기본값으로 쓰려는 운영자만 `storageClass.defaultClass=true`를 설정한다.
+기존 기본 StorageClass가 있다면 새 기본값을 추가하기 전에 클러스터의 기본 class 정책을 정한다.
 
 PVC 예시:
 
