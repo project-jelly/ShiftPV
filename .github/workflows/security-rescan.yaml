@@ -1,0 +1,141 @@
+name: Released Image Security Report
+
+on:
+  schedule:
+    # Daily at 09:43 Asia/Seoul (00:43 UTC); GitHub may delay scheduled runs.
+    - cron: "43 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: released-image-security-report
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve latest released images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      images: ${{ steps.images.outputs.images }}
+      chart: ${{ steps.images.outputs.chart }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Helm
+        uses: ./.github/actions/install-k8s-tools
+        with:
+          kind: "false"
+          kubectl: "false"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Resolve and validate the latest stable release
+        id: images
+        run: |
+          lock="${RUNNER_TEMP}/released-images.env"
+          ./test/e2e/kind/artifact/resolve-latest.sh > "${lock}"
+          source test/e2e/kind/lib/artifact.sh
+          load_artifact_lock "${lock}"
+          images=$(jq -cn --arg controller "${CONTROLLER_IMAGE}" --arg node "${NODE_IMAGE}" \
+            '[{component: "controller", ref: $controller}, {component: "node", ref: $node}]')
+          echo "images=${images}" >> "${GITHUB_OUTPUT}"
+          echo "chart=${CHART_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Preserve the exact release identities
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: released-image-lock
+          path: ${{ runner.temp }}/released-images.env
+          if-no-files-found: error
+          retention-days: 14
+
+  scan:
+    name: Report ${{ matrix.image.component }} (${{ matrix.arch }})
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.resolve.outputs.images) }}
+        arch: [amd64, arm64]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record scan target
+        env:
+          IMAGE: ${{ matrix.image.ref }}
+          PLATFORM: linux/${{ matrix.arch }}
+          CHART: ${{ needs.resolve.outputs.chart }}
+        run: |
+          mkdir -p reports
+          printf 'chart=%s\nimage=%s\nplatform=%s\n' "${CHART}" "${IMAGE}" "${PLATFORM}" > reports/target.txt
+
+      - name: Scan released image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/${{ matrix.arch }}
+          TRIVY_IMAGE_SRC: remote
+          TRIVY_IGNORE_UNFIXED: "false"
+          TRIVY_IGNOREFILE: /dev/null
+        with:
+          version: v0.74.0
+          scan-type: image
+          image-ref: ${{ matrix.image.ref }}
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+          format: json
+          output: reports/trivy.json
+          timeout: 10m
+          cache: "true"
+
+      - name: Generate SARIF and summary
+        run: |
+          trivy convert --format sarif --ignorefile /dev/null \
+            --output reports/trivy.sarif reports/trivy.json
+          {
+            echo '### Released image vulnerability report'
+            echo '```text'
+            cat reports/target.txt
+            echo '```'
+            echo 'HIGH and CRITICAL findings include vulnerabilities without a fix. This report does not block releases or deployments.'
+            jq -r '[.Results[]?.Vulnerabilities[]?] | "HIGH: \(map(select(.Severity == "HIGH")) | length)  CRITICAL: \(map(select(.Severity == "CRITICAL")) | length)"' reports/trivy.json
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Preserve reports even if scanning fails
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-released-${{ matrix.image.component }}-${{ matrix.arch }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload findings to GitHub Security
+        id: sarif
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          sarif_file: reports/trivy.sarif
+          category: trivy-released-${{ matrix.image.component }}-${{ matrix.arch }}
+
+      - name: Explain the report fallback
+        if: steps.sarif.outcome == 'failure'
+        run: |
+          echo '::warning::GitHub Security upload failed. JSON and SARIF reports remain available in the workflow artifacts.'
