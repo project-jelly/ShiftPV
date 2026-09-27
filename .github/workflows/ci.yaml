@@ -15,6 +15,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-context:
+    name: Preserve main push identity
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Record original push range
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          mkdir -p release-context
+          jq -n --arg before "$BEFORE" --arg sha "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
+            '{before: $before, sha: $sha, repository: $repository}' > release-context/push.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-context
+          path: release-context/push.json
+          retention-days: 30
+          if-no-files-found: error
+
+  vulnerability-check:
+    name: Vulnerability Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Check reachable Go vulnerabilities
+        run: |
+          GOTOOLCHAIN=local go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+          govulncheck ./...
+
   verify:
     name: verify
     runs-on: ubuntu-24.04
@@ -24,7 +59,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -175,7 +210,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true

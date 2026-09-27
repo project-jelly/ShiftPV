@@ -27,6 +27,12 @@ image version을 정확히 pin하며, Chart release gate는 그 image가 amd64�
 
 ## Release flow
 
+Production release는 이 repository의 main push `CI`가 성공한 정확한 SHA에서 시작한다.
+취소된 CI의 version 변경도 다음 성공한 main CI에서 published tag와 비교해 이어서 처리한다.
+Image는 digest로 먼저 빌드하고 두 architecture의 보안 검사와 provenance 검증이 통과한 뒤
+같은 digest를 version/latest tag로 발행한다. 자세한 gate와 예외 정책은
+[image-security.md](image-security.md)를 참조한다.
+
 1. 변경된 Controller 또는 Node version만 증가시켜 image를 publish한다.
 2. Chart가 채택할 검증된 image tag를 `values.yaml`에 pin한다.
 3. Chart version을 증가시키고 정확한 조합으로 repository와 E2E gate를 통과시킨다.

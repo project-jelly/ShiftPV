@@ -1,11 +1,10 @@
 name: Release Images
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths:
-      - versions/controller
-      - versions/node
 
 concurrency:
   group: release-images-main
@@ -13,13 +12,21 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
+  CI_RUN_ID: ${{ github.event.workflow_run.id }}
+  CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
   REGISTRY: ghcr.io
-  RELEASE_SHA: ${{ github.sha }}
+  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
 
 jobs:
   resolve:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     name: Resolve image releases
     runs-on: ubuntu-latest
     outputs:
@@ -33,6 +40,17 @@ jobs:
           ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0
 
+      - name: Download original main push identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-context
+          path: release-context
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Verify trusted successful CI and original push range
+        run: build/ci/release-context.sh release-context/push.json
+
       - name: Resolve changed component versions
         id: release
         run: |
@@ -42,29 +60,10 @@ jobs:
 
           for component in controller node; do
             version_file="versions/${component}"
-            if git diff --quiet "${{ github.event.before }}" "${RELEASE_SHA}" -- "${version_file}"; then
-              continue
-            fi
-
             version="$(tr -d '[:space:]' <"${version_file}")"
-            if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::${version_file} must use numeric major.minor.patch format"
-              exit 1
-            fi
-
-            previous_version="$(git show "${{ github.event.before }}:${version_file}" 2>/dev/null | tr -d '[:space:]' || true)"
-            if [[ -n "${previous_version}" ]] && \
-              ! build/ci/assert-version-increase.sh "${version}" "${previous_version}"; then
-              echo "::error::${version_file} version must increase"
-              exit 1
-            fi
-
+            should_release=$(build/ci/resolve-release-version.sh "$component" "$version" "$version_file")
+            [[ "$should_release" == true ]] || continue
             tag="${component}/v${version}"
-            if tagged_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null)" && \
-              [[ "${tagged_commit}" != "${RELEASE_SHA}" ]]; then
-              echo "::error::tag ${tag} already points to a different commit"
-              exit 1
-            fi
 
             version_arg="${component^^}_VERSION"
             component_json="$(jq -cn \
@@ -82,10 +81,10 @@ jobs:
             done
           done
 
-          [[ "$(jq 'length' <<<"${components}")" -gt 0 ]] || {
-            echo "::error::release workflow ran without a version change"
-            exit 1
-          }
+          if [[ "$(jq 'length' <<<"${components}")" -eq 0 ]]; then
+            echo "should_release=false" >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
           {
             echo "should_release=true"
             echo "components=${components}"
@@ -101,6 +100,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: true
       matrix:
@@ -139,7 +142,8 @@ jobs:
           cache-from: type=gha,scope=shiftpv-${{ matrix.component }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=shiftpv-${{ matrix.component }}-${{ matrix.arch }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
-          provenance: false
+          provenance: mode=max
+          sbom: true
 
       - name: Verify published platform image
         env:
@@ -156,6 +160,49 @@ jobs:
               -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-volume-helper"
           fi
 
+      - name: Scan candidate before promotion
+        uses: ./.github/actions/scan-image
+        with:
+          image: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          platform: ${{ matrix.platform }}
+          report-name: trivy-release-${{ matrix.component }}-${{ matrix.arch }}
+
+      - name: Record verified source and CI in provenance
+        run: python3 build/ci/release_provenance.py generate "$RUNNER_TEMP/provenance.json"
+
+      - name: Attest candidate provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ runner.temp }}/provenance.json
+
+      - name: Verify signed provenance before promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-images.yaml" \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --deny-self-hosted-runners --format json > "$RUNNER_TEMP/verified-provenance.json"
+          python3 build/ci/release_provenance.py verify "$RUNNER_TEMP/verified-provenance.json"
+
+      - name: Preserve provenance verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: provenance-${{ matrix.component }}-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/provenance.json
+            ${{ runner.temp }}/verified-provenance.json
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Export digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -169,7 +216,7 @@ jobs:
           name: digest-${{ matrix.component }}-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
 
   publish:
     name: Publish ${{ matrix.component }} v${{ matrix.version }}
@@ -238,7 +285,7 @@ jobs:
         run: |
           docker buildx imagetools inspect "${IMAGE}:${VERSION}"
           docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" \
-            | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' \
+            | jq -r '.manifests[].platform | select(.os != "unknown") | "\(.os)/\(.architecture)"' \
             | sort -u > /tmp/actual-platforms
           printf '%s\n' linux/amd64 linux/arm64 > /tmp/expected-platforms
           diff -u /tmp/expected-platforms /tmp/actual-platforms

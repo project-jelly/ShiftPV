@@ -34,3 +34,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Release policy test bytecode
+__pycache__/

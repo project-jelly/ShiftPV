@@ -17,6 +17,8 @@ fi
 
 if [[ "${FAKE_DOCKER_MODE}" == missing-platform ]]; then
 	printf '%s\n' '{"manifests":[{"platform":{"os":"linux","architecture":"amd64"}}]}'
+elif [[ "${FAKE_DOCKER_MODE}" == attestations ]]; then
+	printf '%s\n' '{"manifests":[{"platform":{"os":"linux","architecture":"amd64"}},{"platform":{"os":"linux","architecture":"arm64"}},{"platform":{"os":"unknown","architecture":"unknown"},"annotations":{"vnd.docker.reference.type":"attestation-manifest"}}]}'
 else
 	printf '%s\n' '{"manifests":[{"platform":{"os":"linux","architecture":"amd64"}},{"platform":{"os":"linux","architecture":"arm64"}}]}'
 fi

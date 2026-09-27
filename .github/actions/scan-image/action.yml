@@ -1,0 +1,67 @@
+name: Scan immutable image
+description: Enforce the shared HIGH/CRITICAL vulnerability and secret policy before promotion and on daily rescans.
+inputs:
+  image:
+    description: Immutable image reference including sha256 digest
+    required: true
+  platform:
+    description: Linux platform to inspect
+    required: true
+  report-name:
+    description: Unique artifact and SARIF category
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Record immutable target
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        mkdir -p reports
+        printf 'image=%s\nplatform=%s\n' "$IMAGE" "$PLATFORM" > reports/target.txt
+        [[ "$IMAGE" =~ @sha256:[a-f0-9]{64}$ ]]
+    - name: Scan image
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      env:
+        TRIVY_PLATFORM: ${{ inputs.platform }}
+        TRIVY_IMAGE_SRC: remote
+        TRIVY_IGNORE_UNFIXED: "false"
+        TRIVY_IGNOREFILE: /dev/null
+      with:
+        version: v0.74.0
+        scan-type: image
+        image-ref: ${{ inputs.image }}
+        scanners: vuln,secret
+        vuln-type: os,library
+        severity: HIGH,CRITICAL
+        ignore-unfixed: false
+        exit-code: "0"
+        format: json
+        output: reports/trivy.json
+        timeout: 10m
+        cache: "true"
+    - name: Generate reports
+      shell: bash
+      run: |
+        trivy convert --format sarif --ignorefile /dev/null --output reports/trivy.sarif reports/trivy.json
+        trivy convert --format table --ignorefile /dev/null --output reports/trivy.txt reports/trivy.json
+        cat reports/target.txt >> "$GITHUB_STEP_SUMMARY"
+    - name: Enforce findings policy
+      shell: bash
+      run: build/ci/check-trivy-report.sh reports/trivy.json
+    - name: Preserve scan evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.report-name }}
+        path: reports/
+        if-no-files-found: error
+        retention-days: 30
+    - name: Upload findings to GitHub Security
+      if: always() && hashFiles('reports/trivy.sarif') != ''
+      uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+      with:
+        sarif_file: reports/trivy.sarif
+        category: ${{ inputs.report-name }}

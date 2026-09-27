@@ -75,6 +75,8 @@ image-version-check:
 	done
 
 release-workflow-test:
+	python3 -m unittest discover -s build/ci -p 'test_*.py'
+	./test/release/security-policy.sh
 	./test/release/version-increase.sh
 	./test/release/wait-for-chart-images.sh
 	./test/release/validate-artifact-lock.sh
