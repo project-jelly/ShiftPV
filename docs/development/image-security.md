@@ -32,16 +32,57 @@ an ordinary reviewed push rather than bypassing identity validation.
 Images are built once for native amd64 and arm64 runners and pushed by digest.
 Both immutable candidates must pass the shared scan and signed-evidence checks
 before the publish job creates version/latest tags from those same digests.
-BuildKit attaches SBOM and maximum provenance to each platform image index.
-The signed provenance explicitly records the built source SHA and triggering CI,
-because `workflow_run`'s default event SHA can differ from the checked-out source.
-Both per-platform and final consumer-index attestations are verified against the
-repository, signing workflow and source commit before promotion. The final index
-is pushed by digest first; promotion verifies version/latest retain that digest.
-An existing version image blocks rebuilding or overwriting, including partial
-release retries; investigate and complete that release explicitly instead. This is repository-authored provenance, not a claim to
-any SLSA certification or level. Consumer-side verification and GitOps admission
-are separate controls; this change does not enforce them in the cluster.
+BuildKit attaches SBOM and maximum SLSA provenance to each platform image index.
+Separately, signed custom in-toto release evidence records the built source SHA,
+trusted CI run, signing workflow revision and invocation. It does not label a
+`workflow_run` invocation as the GitHub Actions SLSA workflow build type, whose
+[documented supported events](https://github.com/actions/buildtypes/blob/main/workflow/v1/README.md)
+do not include that trigger.
+
+Both per-platform and final consumer-index evidence are verified against the
+repository, signing workflow and exact predicate before promotion. The in-toto
+statement's subject binds the image name and digest; `gh attestation verify` checks
+that binding cryptographically for the exact OCI digest. The final index is pushed
+by digest first; promotion verifies version/latest retain that digest. An existing
+version image blocks rebuilding or overwriting, including partial-release retries;
+investigate and complete that release explicitly instead.
+
+This is repository-authored evidence, not a SLSA-level certification. Consumer-side
+verification and GitOps admission are separate controls; this change does not
+enforce them in the cluster.
+
+### Signed release-evidence schema
+
+The versioned predicate type identifier is
+`https://project-jelly.github.io/attestations/release-evidence/v1`. It identifies the
+schema below; it does not assert that a documentation page is hosted at that URL.
+All fields are required strings within the following objects:
+
+```json
+{
+  "source": {"repository": "https://github.com/owner/repo", "commit": "<built 40-character SHA>"},
+  "ci": {"runId": "<successful trusted CI run>", "runAttempt": "<CI attempt>"},
+  "workflow": {"ref": "owner/repo/.github/workflows/release.yaml@refs/heads/main", "commit": "<workflow 40-character SHA>"},
+  "invocation": {"id": "https://github.com/owner/repo/actions/runs/<run>/attempts/<attempt>", "event": "workflow_run", "runnerEnvironment": "github-hosted"}
+}
+```
+
+The shared helper accepts `workflow_run` or a separately guarded
+`workflow_dispatch`, requires GitHub-hosted runners, and keeps built source and
+workflow revisions distinct. Trusted successful-main-CI validation remains a
+separate mandatory gate. Verification requires an exact match for the entire
+predicate, not only a matching source SHA. The CLI accepts both known verified
+statement field spellings but rejects conflicting type fields.
+
+Consumers must explicitly select this predicate type when verifying evidence:
+
+```sh
+gh attestation verify "oci://ghcr.io/project-jelly/shiftpv-controller@sha256:<digest>" \
+  --repo project-jelly/ShiftPV \
+  --signer-workflow project-jelly/ShiftPV/.github/workflows/release-images.yaml \
+  --predicate-type https://project-jelly.github.io/attestations/release-evidence/v1 \
+  --deny-self-hosted-runners --format json
+```
 
 Chart publication still waits for both published image platforms, preserves
 immutable chart packages/checksums, and verifies the public chart repository.
