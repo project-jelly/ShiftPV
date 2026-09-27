@@ -91,4 +91,4 @@ REGISTRY_TEST=absent "$repo_root/build/ci/assert-unpublished-image.sh" registry.
 for result in existing dns credentials unauthorized; do
   REGISTRY_TEST=$result reject "$repo_root/build/ci/assert-unpublished-image.sh" registry.example/image:1.0.0
 done
-printf 'release security policy tests passed\n' 
+printf 'release security policy tests passed\n'
