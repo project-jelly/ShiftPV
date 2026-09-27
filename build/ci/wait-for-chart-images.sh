@@ -50,7 +50,7 @@ for component in controller node; do
 
 	for ((attempt = 1; attempt <= attempts; attempt++)); do
 		if manifest=$(docker buildx imagetools inspect --raw "${image}" 2>/dev/null); then
-			if platforms=$(jq -r '.manifests[]? | select(.platform.os != null and .platform.architecture != null) | "\(.platform.os)/\(.platform.architecture)"' <<<"${manifest}" 2>/dev/null | sort -u) &&
+			if platforms=$(jq -r '.manifests[]? | select(.platform.os != null and .platform.architecture != null and .platform.os != "unknown") | "\(.platform.os)/\(.platform.architecture)"' <<<"${manifest}" 2>/dev/null | sort -u) &&
 				[[ "${platforms}" == "${expected_platforms}" ]]; then
 				echo "chart image ready: ${image} (${platforms//$'\n'/, })"
 				available=true

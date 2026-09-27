@@ -21,6 +21,7 @@ run_wait() {
 
 rm -f "${fixture}/state"
 run_wait success 1
+run_wait attestations 1
 
 rm -f "${fixture}/state"
 run_wait retry 2
