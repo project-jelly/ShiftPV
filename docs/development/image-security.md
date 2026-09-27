@@ -35,8 +35,11 @@ before the publish job creates version/latest tags from those same digests.
 BuildKit attaches SBOM and maximum provenance to each platform image index.
 The signed provenance explicitly records the built source SHA and triggering CI,
 because `workflow_run`'s default event SHA can differ from the checked-out source.
-The attestation is verified against the repository, signing workflow and source
-commit before promotion. This is repository-authored provenance, not a claim to
+Both per-platform and final consumer-index attestations are verified against the
+repository, signing workflow and source commit before promotion. The final index
+is pushed by digest first; promotion verifies version/latest retain that digest.
+An existing version image blocks rebuilding or overwriting, including partial
+release retries; investigate and complete that release explicitly instead. This is repository-authored provenance, not a claim to
 any SLSA certification or level. Consumer-side verification and GitOps admission
 are separate controls; this change does not enforce them in the cluster.
 

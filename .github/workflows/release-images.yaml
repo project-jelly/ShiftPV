@@ -130,6 +130,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Reject overwriting an existing release image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ matrix.version }}
+        run: build/ci/assert-unpublished-image.sh "$IMAGE:$VERSION"
+
       - name: Build and push platform image by digest
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -226,6 +232,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: true
       matrix:
@@ -259,7 +268,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create multi-platform manifest
+      - name: Create multi-platform candidate by digest
+        id: index
         working-directory: /tmp/digests
         env:
           IMAGE: ${{ steps.image.outputs.name }}
@@ -273,10 +283,62 @@ jobs:
             echo "::error::expected two platform digests, found ${#images[@]}"
             exit 1
           fi
-          docker buildx imagetools create \
-            -t "${IMAGE}:${VERSION}" \
-            -t "${IMAGE}:latest" \
-            "${images[@]}"
+          build_context="$GITHUB_WORKSPACE/build/ci"
+          "$build_context/assert-unpublished-image.sh" "$IMAGE:$VERSION"
+          index=$(docker buildx imagetools create --dry-run "${images[@]}")
+          digest="sha256:$(printf '%s' "$index" | sha256sum | cut -d ' ' -f 1)"
+          docker buildx imagetools create -t "$IMAGE@$digest" "${images[@]}"
+          docker buildx imagetools inspect "$IMAGE@$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Record final index provenance
+        run: python3 build/ci/release_provenance.py generate "$RUNNER_TEMP/index-provenance.json"
+
+      - name: Attest the consumer image digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+          predicate-type: https://slsa.dev/provenance/v1
+          predicate-path: ${{ runner.temp }}/index-provenance.json
+
+      - name: Verify the consumer image provenance before tagging
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: |
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-images.yaml" \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --deny-self-hosted-runners --format json > "$RUNNER_TEMP/verified-index-provenance.json"
+          python3 build/ci/release_provenance.py verify "$RUNNER_TEMP/verified-index-provenance.json"
+
+      - name: Preserve final index evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: provenance-index-${{ matrix.component }}
+          path: |
+            ${{ runner.temp }}/index-provenance.json
+            ${{ runner.temp }}/verified-index-provenance.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Promote verified index to immutable release and latest tags
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ matrix.version }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: |
+          build/ci/assert-unpublished-image.sh "$IMAGE:$VERSION"
+          docker buildx imagetools create -t "$IMAGE:$VERSION" -t "$IMAGE:latest" "$IMAGE@$DIGEST"
+          for tag in "$VERSION" latest; do
+            actual=$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest}}' | jq -er .digest)
+            test "$actual" = "$DIGEST"
+          done
 
       - name: Verify multi-platform manifest
         env:

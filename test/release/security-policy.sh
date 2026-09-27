@@ -73,4 +73,22 @@ reject "$scan" invalid.json
 printf 'not json\n' > invalid.json
 reject "$scan" invalid.json
 reject "$scan" missing.json
-printf 'release security policy tests passed\n'
+mkdir -p bin
+cat > bin/docker <<'DOCKER'
+#!/usr/bin/env bash
+case "$REGISTRY_TEST" in
+  existing) exit 0 ;;
+  absent) echo "ERROR: $4: not found" >&2 ;;
+  dns) echo 'host not found' >&2 ;;
+  credentials) echo 'credential helper not found' >&2 ;;
+  unauthorized) echo 'unauthorized: authentication required' >&2 ;;
+esac
+exit 1
+DOCKER
+chmod +x bin/docker
+export PATH="$scratch/bin:$PATH"
+REGISTRY_TEST=absent "$repo_root/build/ci/assert-unpublished-image.sh" registry.example/image:1.0.0
+for result in existing dns credentials unauthorized; do
+  REGISTRY_TEST=$result reject "$repo_root/build/ci/assert-unpublished-image.sh" registry.example/image:1.0.0
+done
+printf 'release security policy tests passed\n' 
