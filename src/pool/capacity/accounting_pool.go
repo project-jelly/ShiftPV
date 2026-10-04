@@ -13,6 +13,14 @@ func ReservedBytesForPool(volumes map[string]volumeapi.State, moves []volumeapi.
 	if poolUID == "" {
 		return 0, fmt.Errorf("Pool UID is required")
 	}
+	total, err := ownedBytesForPool(volumes, poolUID)
+	if err != nil {
+		return 0, err
+	}
+	return moveHeldBytesForPool(total, volumes, moves, poolUID)
+}
+
+func ownedBytesForPool(volumes map[string]volumeapi.State, poolUID string) (int64, error) {
 	var total int64
 	for volumeID, state := range volumes {
 		if state.OwnerNode == "" || state.CapacityBytes <= 0 || state.CurrentCopy == nil ||
@@ -27,6 +35,10 @@ func ReservedBytesForPool(volumes map[string]volumeapi.State, moves []volumeapi.
 			}
 		}
 	}
+	return total, nil
+}
+
+func moveHeldBytesForPool(total int64, volumes map[string]volumeapi.State, moves []volumeapi.Move, poolUID string) (int64, error) {
 	for _, move := range moves {
 		if volumeapi.MoveCleanupSettled(move) || !move.Status.CapacityApproved {
 			continue
