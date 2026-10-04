@@ -94,6 +94,19 @@ func TestStatFSReturnsRegisteredPoolFilesystemCapacity(t *testing.T) {
 	}
 }
 
+func TestStatFSForPoolUsesExactPoolPathOnSharedNode(t *testing.T) {
+	client, created := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
+	runner := validRunner(client)
+	pool := volumeapi.Pool{Name: "pool-b", UID: "pool-b-uid", NodeName: "worker-a", MountPath: "/mnt/pool-b"}
+	runner.Pools = fakePoolResolver{pool: pool, nodeErr: errors.New("node has multiple Pools")}
+	if _, err := runner.StatFSForPool(context.Background(), pool); err != nil {
+		t.Fatal(err)
+	}
+	if got := created.pod.Spec.Volumes[0].HostPath.Path; got != pool.MountPath {
+		t.Fatalf("statfs helper used %q, want %q", got, pool.MountPath)
+	}
+}
+
 func TestStatFSRejectsMissingHelperResult(t *testing.T) {
 	client, _ := clientWithPodPhase(t, corev1.PodSucceeded, "")
 	runner := validRunner(client)

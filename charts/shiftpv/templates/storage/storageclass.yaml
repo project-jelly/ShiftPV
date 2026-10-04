@@ -1,8 +1,13 @@
 {{- if and .Values.storageClass.create .Values.retainStorageClass.create (eq .Values.storageClass.name .Values.retainStorageClass.name) }}
 {{- fail "storageClass.name and retainStorageClass.name must differ" }}
 {{- end }}
-{{- range $class := list .Values.storageClass .Values.retainStorageClass }}
+{{- $names := dict }}
+{{- range $class := concat (list .Values.storageClass .Values.retainStorageClass) .Values.additionalStorageClasses }}
 {{- if $class.create }}
+{{- if hasKey $names $class.name }}
+{{- fail (printf "StorageClass name %q is duplicated" $class.name) }}
+{{- end }}
+{{- $_ := set $names $class.name true }}
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -18,5 +23,8 @@ allowVolumeExpansion: false
 volumeBindingMode: WaitForFirstConsumer
 parameters:
   shiftpv.io/capacity-enforcement: none
+  {{- if $class.poolGroup }}
+  shiftpv.io/pool-group: {{ $class.poolGroup | quote }}
+  {{- end }}
 {{- end }}
 {{- end }}

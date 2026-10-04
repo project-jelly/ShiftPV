@@ -41,6 +41,19 @@ func CreationOperationID(volumeUID string) (string, error) {
 
 // BeginCreate persists the exact copy identity before node-local filesystem work.
 func (r *Registry) BeginCreate(ctx context.Context, volumeID, requestName, ownerNode string, capacityBytes int64) (State, error) {
+	return r.beginCreate(ctx, volumeID, requestName, ownerNode, capacityBytes, "", "")
+}
+
+// BeginCreateInPool anchors a new copy to the Pool selected by capacity
+// admission. A retry must name the same Pool incarnation as the durable copy.
+func (r *Registry) BeginCreateInPool(ctx context.Context, volumeID, requestName, ownerNode string, capacityBytes int64, poolName, poolUID string) (State, error) {
+	if poolName == "" || poolUID == "" {
+		return State{}, ErrPoolConfiguration
+	}
+	return r.beginCreate(ctx, volumeID, requestName, ownerNode, capacityBytes, poolName, poolUID)
+}
+
+func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, ownerNode string, capacityBytes int64, poolName, poolUID string) (State, error) {
 	if err := r.validate(); err != nil {
 		return State{}, err
 	}
@@ -56,13 +69,13 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, requestName, owner
 			return State{}, stateErr
 		}
 		if state.Phase != "" {
-			return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes)
+			return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes, poolName, poolUID)
 		}
 	} else if !apierrors.IsNotFound(err) {
 		return State{}, fmt.Errorf("read ShiftPVVolume creation intent: %w", err)
 	}
 
-	installationID, pool, err := r.freshCreationPlacement(ctx, volumeID, ownerNode)
+	installationID, pool, err := r.freshCreationPlacement(ctx, volumeID, ownerNode, poolName, poolUID)
 	if err != nil {
 		return State{}, err
 	}
@@ -95,17 +108,22 @@ func (r *Registry) BeginCreate(ctx context.Context, volumeID, requestName, owner
 			return State{}, err
 		}
 	}
-	return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes)
+	return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes, poolName, poolUID)
 }
 
 // freshCreationPlacement resolves the installation and the Ready Pool that a
 // first serving copy may be placed into.
-func (r *Registry) freshCreationPlacement(ctx context.Context, volumeID, ownerNode string) (string, Pool, error) {
+func (r *Registry) freshCreationPlacement(ctx context.Context, volumeID, ownerNode, poolName, poolUID string) (string, Pool, error) {
 	installationID, err := r.InstallationID(ctx)
 	if err != nil {
 		return "", Pool{}, err
 	}
-	pool, err := r.ReadyPoolForNode(ctx, ownerNode)
+	var pool Pool
+	if poolName == "" {
+		pool, err = r.ReadyPoolForNode(ctx, ownerNode)
+	} else {
+		pool, err = r.ReadyPoolForIdentity(ctx, poolName, poolUID, ownerNode)
+	}
 	if err != nil {
 		return "", Pool{}, err
 	}
@@ -167,7 +185,7 @@ func (r *Registry) recordCreationIntent(ctx context.Context, volumeID string, ne
 	return r.Get(ctx, volumeID)
 }
 
-func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstructured, state State, volumeID, requestName, ownerNode string, capacityBytes int64) (State, error) {
+func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstructured, state State, volumeID, requestName, ownerNode string, capacityBytes int64, poolName, poolUID string) (State, error) {
 	if !sameCreationIntent(object, state, volumeID, requestName, ownerNode, capacityBytes) {
 		return State{}, fmt.Errorf("%w: volume creation identity changed", ErrStateConflict)
 	}
@@ -179,7 +197,10 @@ func (r *Registry) resumeCreate(ctx context.Context, object *unstructured.Unstru
 	if err != nil {
 		return State{}, err
 	}
-	pool, err := r.protectedCreationPool(ctx, ownerNode)
+	if poolName != "" && (state.CurrentCopy.PoolName != poolName || state.CurrentCopy.PoolUID != poolUID) {
+		return State{}, fmt.Errorf("%w: volume creation Pool differs from selected Pool", ErrStateConflict)
+	}
+	pool, err := r.protectedCreationPool(ctx, *state.CurrentCopy)
 	if err != nil {
 		return State{}, err
 	}
@@ -211,8 +232,8 @@ func servingCopyFor(copy *volume.CopyIdentity, volumeID, volumeUID, nodeName str
 
 // protectedCreationPool reads the owner's Pool and requires the live protection
 // finalizer, so an in-flight creation cannot outlive its Pool.
-func (r *Registry) protectedCreationPool(ctx context.Context, ownerNode string) (Pool, error) {
-	pool, err := r.PoolForNode(ctx, ownerNode)
+func (r *Registry) protectedCreationPool(ctx context.Context, copy volume.CopyIdentity) (Pool, error) {
+	pool, err := r.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return Pool{}, err
 	}

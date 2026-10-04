@@ -48,6 +48,11 @@ spec:
           args:
             - --storage-class={{ .Values.storageClass.name }}
             - --storage-class={{ .Values.retainStorageClass.name }}
+            {{- range .Values.additionalStorageClasses }}
+            {{- if .create }}
+            - --storage-class={{ .name }}
+            {{- end }}
+            {{- end }}
             - --permit-namespace={{ .Release.Namespace }}
             - --permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --validation-webhook={{ include "shiftpv.validationWebhookConfigurationName" . }}

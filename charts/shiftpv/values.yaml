@@ -87,6 +87,9 @@ retainStorageClass:
   defaultClass: false
   reclaimPolicy: Retain
 
+# Additional classes select Pool groups without changing the two existing classes.
+additionalStorageClasses: []
+
 serviceAccount:
   controller:
     create: true

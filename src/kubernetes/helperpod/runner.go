@@ -78,7 +78,27 @@ func (r *Runner) FinalizeCreate(ctx context.Context, identity volume.CopyIdentit
 }
 
 func (r *Runner) StatFS(ctx context.Context, nodeName string) (poolcapacity.Filesystem, error) {
-	output, err := r.runForResult(ctx, nodeName, "pool-capacity", []string{
+	poolRoot, err := r.poolRoot(ctx, nodeName)
+	if err != nil {
+		return poolcapacity.Filesystem{}, err
+	}
+	return r.statFSAt(ctx, nodeName, poolRoot)
+}
+
+// StatFSForPool probes one exact capacity unit even when its node has others.
+func (r *Runner) StatFSForPool(ctx context.Context, pool volumeapi.Pool) (poolcapacity.Filesystem, error) {
+	if r.Pools == nil {
+		return poolcapacity.Filesystem{}, fmt.Errorf("ShiftPVPool registry is required")
+	}
+	current, err := r.Pools.PoolForIdentity(ctx, pool.Name, pool.UID, pool.NodeName)
+	if err != nil {
+		return poolcapacity.Filesystem{}, err
+	}
+	return r.statFSAt(ctx, pool.NodeName, current.MountPath)
+}
+
+func (r *Runner) statFSAt(ctx context.Context, nodeName, poolRoot string) (poolcapacity.Filesystem, error) {
+	output, err := r.runForResultAtPath(ctx, nodeName, "pool-capacity", poolRoot, []string{
 		"sh", "-c", "stat -f -c '%b %a %S %d' /pool > /dev/termination-log",
 	})
 	if err != nil {
@@ -117,6 +137,10 @@ func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, co
 	if err != nil {
 		return "", err
 	}
+	return r.runForResultAtPath(ctx, nodeName, volumeID, poolRoot, command)
+}
+
+func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string) (string, error) {
 	if !filepath.IsAbs(poolRoot) {
 		return "", fmt.Errorf("pool root must be absolute")
 	}

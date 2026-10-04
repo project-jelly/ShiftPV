@@ -57,6 +57,11 @@ spec:
             - --controller-service-account={{ include "shiftpv.controllerServiceAccount" . }}
             - --storage-class-name={{ .Values.storageClass.name }}
             - --storage-class-name={{ .Values.retainStorageClass.name }}
+            {{- range .Values.additionalStorageClasses }}
+            {{- if .create }}
+            - --storage-class-name={{ .name }}
+            {{- end }}
+            {{- end }}
             - --uninstall-permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}
             {{- if .Values.mobility.enabled }}

@@ -118,7 +118,20 @@ retainStorageClass:
   name: shiftpv-retain
   defaultClass: false
   reclaimPolicy: Retain
+
+# Optional: a class for Pools with spec.poolGroup: fast.
+additionalStorageClasses:
+  - create: true
+    name: shiftpv-fast
+    defaultClass: false
+    reclaimPolicy: Delete
+    poolGroup: fast
 ```
+
+`poolGroup`은 배치 대상을 고르는 값이며 용량을 합산하지 않는다. `spec.poolGroup`을 생략한
+Pool은 `default`에 속한다. 기존 두 class는 immutable parameter를 바꾸지 않고
+`default`를 계속 선택한다. 이 단계에서는 node당 Pool 등록을 하나만 허용한다.
+다른 node의 Pool에 그룹을 지정한 뒤 별도 StorageClass에서 선택할 수 있다.
 
 Chart 0.6.0부터 두 class 모두 기본 StorageClass로 지정하지 않는다. PVC에서 사용할 class를 명시한다.
 클러스터 기본값으로 쓰려는 운영자만 `storageClass.defaultClass=true`를 설정한다.

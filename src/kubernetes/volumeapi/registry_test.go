@@ -169,6 +169,47 @@ func TestRegistryLifecycleAndPoolNodes(t *testing.T) {
 	}
 }
 
+func TestPoolGroupDefaultsAndRejectsInvalidValues(t *testing.T) {
+	legacy := pool("pool-legacy", "node-a")
+	decoded, err := poolFrom(legacy)
+	if err != nil || decoded.PoolGroup != DefaultPoolGroup {
+		t.Fatalf("legacy Pool group = %q, err = %v", decoded.PoolGroup, err)
+	}
+	grouped := pool("pool-grouped", "node-b")
+	if err := unstructured.SetNestedField(grouped.Object, "fast", "spec", "poolGroup"); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err = poolFrom(grouped)
+	if err != nil || decoded.PoolGroup != "fast" {
+		t.Fatalf("grouped Pool group = %q, err = %v", decoded.PoolGroup, err)
+	}
+	if err := unstructured.SetNestedField(grouped.Object, "Invalid.Group", "spec", "poolGroup"); err != nil {
+		t.Fatal(err)
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{PoolResource: "ShiftPVPoolList"}, grouped)
+	if _, err := (&Registry{Client: client}).ListPools(context.Background()); !errors.Is(err, ErrPoolConfiguration) {
+		t.Fatalf("invalid Pool group accepted: %v", err)
+	}
+}
+
+func TestPoolNodesForGroupRestrictsAccessibleTopology(t *testing.T) {
+	defaultPool := pool("pool-default", "node-a")
+	fastPool := pool("pool-fast", "node-b")
+	if err := unstructured.SetNestedField(fastPool.Object, "fast", "spec", "poolGroup"); err != nil {
+		t.Fatal(err)
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		PoolResource: "ShiftPVPoolList",
+	}, defaultPool, fastPool)
+	registry := &Registry{Client: client}
+	for group, want := range map[string]string{DefaultPoolGroup: "node-a", "fast": "node-b"} {
+		nodes, err := registry.PoolNodesForGroup(context.Background(), group)
+		if err != nil || !reflect.DeepEqual(nodes, []string{want}) {
+			t.Fatalf("group %q nodes=%v want=%q err=%v", group, nodes, want, err)
+		}
+	}
+}
+
 func TestRegistryReturnsObjectIncarnationIdentity(t *testing.T) {
 	ctx := context.Background()
 	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
@@ -245,6 +286,36 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	}
 	if err := registry.CompleteCreate(ctx, volumeID, state.UID, *state.CurrentCopy); err != nil {
 		t.Fatalf("idempotent completion: %v", err)
+	}
+}
+
+func TestBeginCreateInPoolAnchorsSelectedPoolAcrossRetries(t *testing.T) {
+	ctx := context.Background()
+	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	identity := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": installationNamespace, "uid": "installation-uid"},
+	}}
+	poolA, poolB := pool("pool-a", "node-a"), pool("pool-b", "node-a")
+	poolA.SetUID("pool-a-uid")
+	poolB.SetUID("pool-b-uid")
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
+	}, identity, poolA, poolB)
+	client.PrependReactor("create", "shiftpvvolumes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		action.(k8stesting.CreateAction).GetObject().(*unstructured.Unstructured).SetUID("volume-uid")
+		return false, nil, nil
+	})
+	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
+	id := "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	state, err := registry.BeginCreateInPool(ctx, id, "pvc", "node-a", 64, "pool-b", "pool-b-uid")
+	if err != nil || state.CurrentCopy == nil || state.CurrentCopy.PoolUID != "pool-b-uid" {
+		t.Fatalf("selected Pool was not anchored: state=%#v err=%v", state, err)
+	}
+	if _, err := registry.BeginCreateInPool(ctx, id, "pvc", "node-a", 64, "pool-a", "pool-a-uid"); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("retry changed Pool identity: %v", err)
+	}
+	if _, err := registry.BeginCreateInPool(ctx, id, "pvc", "node-a", 64, "pool-b", "pool-b-uid"); err != nil {
+		t.Fatalf("retry in anchored Pool failed: %v", err)
 	}
 }
 

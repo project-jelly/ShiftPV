@@ -52,6 +52,10 @@ func (r *retryDeleteVolumeRegistry) BeginCreate(context.Context, string, string,
 	return r.state, nil
 }
 
+func (r *retryDeleteVolumeRegistry) BeginCreateInPool(ctx context.Context, id, request, node string, capacity int64, _, _ string) (volumeapi.State, error) {
+	return r.BeginCreate(ctx, id, request, node, capacity)
+}
+
 func (r *retryDeleteVolumeRegistry) CompleteCreate(context.Context, string, string, volume.CopyIdentity) error {
 	return nil
 }
@@ -109,6 +113,9 @@ func (r *retryDeleteVolumeRegistry) BeginDelete(_ context.Context, volumeID, uid
 }
 
 func (*retryDeleteVolumeRegistry) PoolNodes(context.Context) ([]string, error) { return nil, nil }
+func (r *retryDeleteVolumeRegistry) PoolNodesForGroup(ctx context.Context, _ string) ([]string, error) {
+	return r.PoolNodes(ctx)
+}
 
 func (f *fakeVolumeRegistry) Get(_ context.Context, id string) (volumeapi.State, error) {
 	if f.state.UID == "" && f.state.Phase == "" && f.state.CurrentCopy == nil && f.state.CapacityBytes == 0 {
@@ -135,6 +142,10 @@ func (f *fakeVolumeRegistry) PoolNodes(context.Context) ([]string, error) {
 	return []string{f.state.OwnerNode}, nil
 }
 
+func (f *fakeVolumeRegistry) PoolNodesForGroup(ctx context.Context, _ string) ([]string, error) {
+	return f.PoolNodes(ctx)
+}
+
 func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, requestName, nodeName string, capacityBytes int64) (volumeapi.State, error) {
 	if f.state.CurrentCopy == nil {
 		copy := volume.CopyIdentity{
@@ -150,6 +161,10 @@ func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, requestNam
 		return volumeapi.State{}, err
 	}
 	return f.state, nil
+}
+
+func (f *fakeVolumeRegistry) BeginCreateInPool(ctx context.Context, id, request, node string, capacity int64, _, _ string) (volumeapi.State, error) {
+	return f.BeginCreate(ctx, id, request, node, capacity)
 }
 
 func (f *fakeVolumeRegistry) CompleteCreate(_ context.Context, _ string, _ string, copy volume.CopyIdentity) error {
@@ -192,6 +207,10 @@ type durableCreateRegistry struct {
 func (r *durableCreateRegistry) BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error) {
 	*r.events = append(*r.events, "intent")
 	return r.state, r.beginErr
+}
+
+func (r *durableCreateRegistry) BeginCreateInPool(ctx context.Context, id, request, node string, capacity int64, _, _ string) (volumeapi.State, error) {
+	return r.BeginCreate(ctx, id, request, node, capacity)
 }
 
 func (r *durableCreateRegistry) CompleteCreate(context.Context, string, string, volume.CopyIdentity) error {

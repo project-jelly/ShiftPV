@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -22,6 +23,7 @@ type Pool struct {
 	Name                    string
 	UID                     string
 	NodeName                string
+	PoolGroup               string
 	MountPath               string
 	MountPolicy             string
 	CapacityLimit           string
@@ -31,6 +33,8 @@ type Pool struct {
 	IdentityReleaseApproval string
 	Status                  PoolStatus
 }
+
+const DefaultPoolGroup = "default"
 
 type PoolStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
@@ -81,7 +85,7 @@ func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
 	}
 	nodes := make(map[string]struct{}, len(pools))
 	for _, pool := range pools {
-		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" ||
+		if pool.NodeName == "" || len(validation.IsDNS1123Label(pool.PoolGroup)) != 0 || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" ||
 			(pool.MountPolicy != "" && pool.MountPolicy != PoolMountPolicyRequireMountPoint) {
 			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName, mountPath, or mountPolicy", ErrPoolConfiguration, pool.Name)
 		}
@@ -144,6 +148,12 @@ func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
 }
 
 func (r *Registry) PoolNodes(ctx context.Context) ([]string, error) {
+	return r.PoolNodesForGroup(ctx, "")
+}
+
+// PoolNodesForGroup returns topology nodes that register the requested
+// selection group. An empty group preserves the legacy all-Pool listing.
+func (r *Registry) PoolNodesForGroup(ctx context.Context, group string) ([]string, error) {
 	// Accessible topology is the durable mobility universe encoded into the PV.
 	// Keep every registered Pool here even if one is temporarily not Ready;
 	// current readiness is enforced when selecting a provisioning or move target.
@@ -153,6 +163,9 @@ func (r *Registry) PoolNodes(ctx context.Context) ([]string, error) {
 	}
 	nodes := make(map[string]struct{}, len(pools))
 	for _, pool := range pools {
+		if group != "" && pool.PoolGroup != group {
+			continue
+		}
 		nodes[pool.NodeName] = struct{}{}
 	}
 	result := make([]string, 0, len(nodes))
@@ -266,6 +279,18 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 	now, staleAfter := r.readiness()
 	if placeable, reason := poolReady(pool, now, staleAfter); !placeable {
 		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, pool.Name, nodeName, reason)
+	}
+	return pool, nil
+}
+
+func (r *Registry) ReadyPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
+	pool, err := r.PoolForIdentity(ctx, name, uid, nodeName)
+	if err != nil {
+		return Pool{}, err
+	}
+	now, staleAfter := r.readiness()
+	if placeable, reason := poolReady(pool, now, staleAfter); !placeable {
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, name, nodeName, reason)
 	}
 	return pool, nil
 }
@@ -519,11 +544,15 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 		}
 	}
 	nodeName, _, _ := unstructured.NestedString(object.Object, "spec", "nodeName")
+	poolGroup, found, _ := unstructured.NestedString(object.Object, "spec", "poolGroup")
+	if !found {
+		poolGroup = DefaultPoolGroup
+	}
 	mountPath, _, _ := unstructured.NestedString(object.Object, "spec", "mountPath")
 	mountPolicy, _, _ := unstructured.NestedString(object.Object, "spec", "mountPolicy")
 	capacityLimit, _, _ := unstructured.NestedString(object.Object, "spec", "capacity", "limit")
 	return Pool{
-		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy,
+		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, PoolGroup: poolGroup, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy,
 		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), DeletionTimestamp: object.GetDeletionTimestamp(),
 		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation], Status: status,
 	}, nil

@@ -7,6 +7,11 @@ StorageClasses:
 {{- if .Values.retainStorageClass.create }}
   {{ .Values.retainStorageClass.name }} ({{ .Values.retainStorageClass.reclaimPolicy }})
 {{- end }}
+{{- range .Values.additionalStorageClasses }}
+{{- if .create }}
+  {{ .name }} ({{ .reclaimPolicy }}, Pool group {{ .poolGroup }})
+{{- end }}
+{{- end }}
 Driver: csi.shiftpv.io
 
 Use the documentation and operational checks that match this exact chart and

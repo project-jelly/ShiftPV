@@ -25,7 +25,7 @@ subvolume, 외부 스토리지처럼 backing 독립성을 경로에서 증명할
 않는다.
 
 Pool의 `spec.poolGroup`은 StorageClass 선택 범위다. 생략하면 `default`이며 기존
-`shiftpv`와 `shiftpv-retain`은 그 그룹을 사용한다. StorageClass의 `poolGroup`
+`shiftpv`와 `shiftpv-retain`은 그 그룹을 사용한다. StorageClass의 `shiftpv.io/pool-group`
 parameter로 다른 그룹을 지정할 수 있다. 같은 그룹의 여러 Pool이 같은 node에
 있으면 요청량, 논리 예약 여유, 실제 filesystem 여유를 모두 충족하는 Pool 하나를
 선택하고 그 Pool name/UID를 Volume copy identity에 고정한다. 서로 다른 그룹이면
