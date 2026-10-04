@@ -78,7 +78,14 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && result.Mounted.OK && result.MountIdentity == nil {
 		result.Mounted = Check{Known: true, Reason: "MountIdentityMissing", Message: "mount probe did not return an identity"}
 	}
-	var releaseErr error
+	status, cleanupReady := r.observedStatus(ctx, pool, result, now)
+	releaseErr := r.recordIdentityRelease(ctx, pool, &status, cleanupReady, now)
+	return errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
+}
+
+// observedStatus records one node observation. A terminating Pool may remain
+// cleanup-ready even though it is no longer eligible for new placement.
+func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, result Result, now time.Time) (volumeapi.PoolStatus, bool) {
 	status := pool.Status
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
@@ -110,28 +117,36 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		status.MountIdentity = result.MountIdentity
 	}
 	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionIdentityReleased)
-	if pool.DeletionTimestamp != nil {
-		release := Check{Known: true, Reason: "PoolIdentityRetained", Message: "Pool identity remains until inventory is empty and complete"}
-		if pool.IdentityReleaseApproval != pool.UID {
-			release.Reason = "PoolIdentityReleasePending"
-			release.Message = "Pool identity remains until the controller approves exact release"
-		} else if cleanupReady && emptyInventory(status.Inventory) {
-			if r.Release == nil {
-				release.Reason = "PoolIdentityReleaseUnavailable"
-				release.Message = "node Pool identity release is not configured"
-			} else if err := r.Release(ctx, pool); err != nil {
-				releaseErr = err
-				release.Reason = "PoolIdentityReleaseFailed"
-				release.Message = err.Error()
-			} else {
-				release.OK = true
-				release.Reason = "PoolIdentityReleased"
-				release.Message = "exact empty Pool identity was released"
-			}
-		}
-		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionIdentityReleased, release, pool.Generation, now))
+	return status, cleanupReady
+}
+
+// recordIdentityRelease performs only the exact empty Pool release approved
+// by the controller, then records the node's release evidence in status.
+func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.Pool, status *volumeapi.PoolStatus, cleanupReady bool, now time.Time) error {
+	if pool.DeletionTimestamp == nil {
+		return nil
 	}
-	return errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
+	release := Check{Known: true, Reason: "PoolIdentityRetained", Message: "Pool identity remains until inventory is empty and complete"}
+	var releaseErr error
+	if pool.IdentityReleaseApproval != pool.UID {
+		release.Reason = "PoolIdentityReleasePending"
+		release.Message = "Pool identity remains until the controller approves exact release"
+	} else if cleanupReady && emptyInventory(status.Inventory) {
+		if r.Release == nil {
+			release.Reason = "PoolIdentityReleaseUnavailable"
+			release.Message = "node Pool identity release is not configured"
+		} else if err := r.Release(ctx, pool); err != nil {
+			releaseErr = err
+			release.Reason = "PoolIdentityReleaseFailed"
+			release.Message = err.Error()
+		} else {
+			release.OK = true
+			release.Reason = "PoolIdentityReleased"
+			release.Message = "exact empty Pool identity was released"
+		}
+	}
+	meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionIdentityReleased, release, pool.Generation, now))
+	return releaseErr
 }
 
 func emptyInventory(inventory *volumeapi.PoolInventory) bool {
