@@ -102,7 +102,9 @@ func servingRoot(t *testing.T) string {
 
 func newPublisher(poolRoot string, binder Binder, volumes VolumeRegistry, pools PoolResolver) Publisher {
 	if pools == nil {
-		pools = func(context.Context) (volumeapi.Pool, string, error) { return testPool(), poolRoot, nil }
+		pools = func(context.Context, volume.CopyIdentity) (volumeapi.Pool, string, error) {
+			return testPool(), poolRoot, nil
+		}
 	}
 	return Publisher{
 		NodeName: "worker-a", TargetRoot: "/var/lib/kubelet/pods",
@@ -160,7 +162,9 @@ func TestPublishFailsClosedWhenPoolChangesUnderLock(t *testing.T) {
 	volumes := &fakeRegistry{state: readyState()}
 	replacement := testPool()
 	replacement.UID = "replacement-pool-uid"
-	pools := func(context.Context) (volumeapi.Pool, string, error) { return replacement, poolRoot, nil }
+	pools := func(context.Context, volume.CopyIdentity) (volumeapi.Pool, string, error) {
+		return replacement, poolRoot, nil
+	}
 
 	err := newPublisher(poolRoot, binder, volumes, pools).Publish(context.Background(), publishRequest(poolRoot))
 	if !errors.Is(err, volumeapi.ErrStateConflict) {
@@ -174,7 +178,7 @@ func TestPublishFailsClosedWhenPoolChangesUnderLock(t *testing.T) {
 func TestPublishFailsClosedWhenPoolCannotBeRefreshed(t *testing.T) {
 	poolRoot := servingRoot(t)
 	volumes := &fakeRegistry{state: readyState()}
-	pools := func(context.Context) (volumeapi.Pool, string, error) {
+	pools := func(context.Context, volume.CopyIdentity) (volumeapi.Pool, string, error) {
 		return volumeapi.Pool{}, "", apierrors.NewTimeoutError("Pool read timed out", 1)
 	}
 
@@ -292,7 +296,7 @@ func TestUnpublishReportsLockThatWasNeverEntered(t *testing.T) {
 func TestUnpublishLeavesStateWhenPoolIdentityIsGone(t *testing.T) {
 	poolRoot := servingRoot(t)
 	volumes := &fakeRegistry{state: readyState()}
-	pools := func(context.Context) (volumeapi.Pool, string, error) {
+	pools := func(context.Context, volume.CopyIdentity) (volumeapi.Pool, string, error) {
 		return volumeapi.Pool{}, "", apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "shiftpvpools"}, "pool-a")
 	}
 
@@ -308,7 +312,7 @@ func TestUnpublishLeavesStateWhenPoolIdentityIsGone(t *testing.T) {
 func TestUnpublishRetriesWhenPoolReadIsTransient(t *testing.T) {
 	poolRoot := servingRoot(t)
 	volumes := &fakeRegistry{state: readyState()}
-	pools := func(context.Context) (volumeapi.Pool, string, error) {
+	pools := func(context.Context, volume.CopyIdentity) (volumeapi.Pool, string, error) {
 		return volumeapi.Pool{}, "", errors.New("pool down")
 	}
 
@@ -326,7 +330,9 @@ func TestUnpublishLeavesStateWhenPoolWasReplacedUnderLock(t *testing.T) {
 	volumes := &fakeRegistry{state: readyState()}
 	replacement := testPool()
 	replacement.UID = "replacement-pool-uid"
-	pools := func(context.Context) (volumeapi.Pool, string, error) { return replacement, poolRoot, nil }
+	pools := func(context.Context, volume.CopyIdentity) (volumeapi.Pool, string, error) {
+		return replacement, poolRoot, nil
+	}
 
 	_, err := newPublisher(poolRoot, &fakeBinder{}, volumes, pools).Unpublish(context.Background(), unpublishRequest(poolRoot))
 	if !errors.Is(err, ErrIdentityUnavailable) {

@@ -273,6 +273,17 @@ func (r *Runner) poolRoot(ctx context.Context, nodeName string) (string, error) 
 	return pool.MountPath, nil
 }
 
+func (r *Runner) poolRootForIdentity(ctx context.Context, identity volume.CopyIdentity) (string, error) {
+	if r.Pools == nil {
+		return "", fmt.Errorf("ShiftPVPool registry is required")
+	}
+	pool, err := r.Pools.PoolForIdentity(ctx, identity.PoolName, identity.PoolUID, identity.NodeName)
+	if err != nil {
+		return "", fmt.Errorf("resolve ShiftPVPool %q for copy: %w", identity.PoolName, err)
+	}
+	return pool.MountPath, nil
+}
+
 func classifyKubernetesAPIError(err error) error {
 	if apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 		return retryableError{err: err}

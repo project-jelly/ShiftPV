@@ -129,7 +129,7 @@ func (r *Runner) creationPod(ctx context.Context, identity volume.CopyIdentity, 
 	if identity.Validate() != nil || !volume.ValidIdentityToken(operationID) || len(command) == 0 {
 		return nil, fmt.Errorf("creation helper identity is incomplete")
 	}
-	poolRoot, err := r.poolRoot(ctx, identity.NodeName)
+	poolRoot, err := r.poolRootForIdentity(ctx, identity)
 	if err != nil {
 		return nil, err
 	}

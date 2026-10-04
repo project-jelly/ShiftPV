@@ -70,7 +70,7 @@ func main() {
 	if *metricsAddress != "" {
 		exporter = metrics.New("filesystem")
 		exporter.Start(ctx, *metricsAddress)
-		readinessReconciler.Observe = exporter.ObservePool
+		readinessReconciler.ObserveAll = exporter.ObservePools
 	}
 
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)

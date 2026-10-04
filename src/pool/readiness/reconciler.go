@@ -14,20 +14,28 @@ import (
 )
 
 type Repository interface {
-	PoolForNodeLifecycle(context.Context, string) (volumeapi.Pool, error)
+	ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error)
 	SetPoolStatus(context.Context, string, string, string, volumeapi.PoolStatus) error
 }
 
 type Reconciler struct {
-	NodeName  string
-	Pools     Repository
-	Inspector Inspector
-	Interval  time.Duration
-	Wake      <-chan struct{}
-	Now       func() time.Time
-	Observe   func(volumeapi.Pool, Result, error)
-	Inventory func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
-	Release   func(context.Context, volumeapi.Pool) error
+	NodeName   string
+	Pools      Repository
+	Inspector  Inspector
+	Interval   time.Duration
+	Wake       <-chan struct{}
+	Now        func() time.Time
+	Observe    func(volumeapi.Pool, Result, error)
+	ObserveAll func([]Observation, error)
+	Inventory  func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
+	Release    func(context.Context, volumeapi.Pool) error
+}
+
+// Observation is one Pool's result from a node reconciliation pass.
+type Observation struct {
+	Pool   volumeapi.Pool
+	Result Result
+	Err    error
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -56,16 +64,36 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	pool, err := r.Pools.PoolForNodeLifecycle(ctx, r.NodeName)
-	var result Result
+	var observations []Observation
+	if r.ObserveAll != nil {
+		defer func() { r.ObserveAll(observations, reconcileErr) }()
+	}
+	pools, err := r.Pools.ListPoolRegistrations(ctx)
+	if err != nil {
+		if r.Observe != nil {
+			r.Observe(volumeapi.Pool{}, Result{}, err)
+		}
+		return err
+	}
+	observed := false
+	for _, pool := range pools {
+		if pool.NodeName != r.NodeName {
+			continue
+		}
+		observed = true
+		result, err := r.reconcilePool(ctx, pool)
+		observations = append(observations, Observation{Pool: pool, Result: result, Err: err})
+		reconcileErr = errors.Join(reconcileErr, err)
+	}
+	if !observed && r.Observe != nil {
+		r.Observe(volumeapi.Pool{}, Result{}, nil)
+	}
+	return reconcileErr
+}
+
+func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool) (result Result, reconcileErr error) {
 	if r.Observe != nil {
 		defer func() { r.Observe(pool, result, reconcileErr) }()
-	}
-	if errors.Is(err, volumeapi.ErrPoolNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
 	}
 	now := time.Now().UTC()
 	if r.Now != nil {
@@ -80,7 +108,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	}
 	status, cleanupReady := r.observedStatus(ctx, pool, result, now)
 	releaseErr := r.recordIdentityRelease(ctx, pool, &status, cleanupReady, now)
-	return errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
+	return result, errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
 }
 
 // observedStatus records one node observation. A terminating Pool may remain
