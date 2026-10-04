@@ -13,6 +13,7 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/pool/capacityunit"
 )
 
 type Check struct {
@@ -23,6 +24,8 @@ type Check struct {
 }
 
 type Result struct {
+	Independent      Check
+	CapacityUnit     *volumeapi.PoolCapacityUnit
 	Accessible       Check
 	Mounted          Check
 	Writable         Check
@@ -36,6 +39,9 @@ type Inspector interface {
 }
 
 type Probe struct {
+	allocations interface {
+		Resolve(string) ([]capacityunit.Extent, error)
+	}
 	HostRoot   string
 	inspect    func(string) error
 	write      func(string) error
@@ -45,9 +51,10 @@ type Probe struct {
 
 func NewProbe(hostRoot string) *Probe {
 	return &Probe{
-		HostRoot: hostRoot,
-		inspect:  inspectDirectory,
-		write:    writeProbe,
+		HostRoot:    hostRoot,
+		allocations: capacityunit.NewResolver(filepath.Join(hostRoot, "sys"), filepath.Join(hostRoot, "dev/mapper/control")),
+		inspect:     inspectDirectory,
+		write:       writeProbe,
 		listMounts: func() ([]mountutils.MountInfo, error) {
 			return mountutils.ParseMountInfo("/proc/self/mountinfo")
 		},
@@ -86,6 +93,16 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 		}
 		result.MountIdentity = &identity
 	}
+	if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
+		result.CapacityUnit, result.Independent = p.InspectCapacityUnit(pool)
+		if !result.Independent.OK {
+			result.Writable, result.CapacityReadable = skipped(), skipped()
+			return result
+		}
+	} else if pool.CapacityPolicy != "" {
+		result.Independent = capacityFailure("CapacityPolicyInvalid", fmt.Errorf("unsupported capacity policy"))
+		return result
+	}
 	if err := p.write(path); err != nil {
 		result.Writable = failure(err)
 	} else {
@@ -105,6 +122,11 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 		if !check.OK {
 			result.Mounted = check
 		}
+	}
+	if result.CapacityUnit != nil {
+		candidate := pool
+		candidate.Status.CapacityUnit = result.CapacityUnit
+		_, result.Independent = p.InspectCapacityUnit(candidate)
 	}
 	return result
 }
@@ -157,6 +179,9 @@ func (p *Probe) inspectMount(path string, expected *volumeapi.PoolMountIdentity)
 // VerifyMountedPath checks the live mount at a node path or helper Pod bind
 // root before an opted-in Pool performs a storage operation. It is read-only.
 func VerifyMountedPath(path string, pool volumeapi.Pool) error {
+	if err := verifyCapacityMountedPath(path, pool); err != nil {
+		return err
+	}
 	if pool.MountPolicy == "" {
 		return nil
 	}

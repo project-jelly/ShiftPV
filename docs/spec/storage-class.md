@@ -52,8 +52,11 @@ parameters:
   shiftpv.io/pool-group: fast
 ```
 
-그룹과 용량 계산의 선행 변경 단계에서는 node당 Pool 하나의 등록 제한을 유지한다.
-여러 Pool/node 허용은 등록 용량의 독립성과 이동·복구 경로 검증이 완료된 뒤 활성화한다.
+한 node의 여러 Pool은 모두 `capacityPolicy: FixedBlock`으로 독립 용량을 검증해야 한다.
+지원하는 ext4/xfs의 fixed block backing 구간과 경로가 겹치면 배치할 수 없다.
+같은 그룹에서는 각 Pool의 한도·예약·filesystem 여유를 따로 검사해 수용 가능한 Pool
+하나를 선택한다. PVC를 여러 Pool로 나누거나 그룹 용량을 합산하지 않는다.
+지원 구성과 등록 절차는 [Chart guide](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.
 기존 class에 parameter를 추가하려면 Kubernetes의 immutable parameter 제약을 고려해
 새 class를 생성한다.
 

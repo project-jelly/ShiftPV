@@ -20,7 +20,7 @@
 | 영역 | 0.4 계약 |
 |---|---|
 | Volume | Linux filesystem의 node-local RWO PVC |
-| Pool | 참여 node마다 운영자가 준비한 absolute non-root host directory 하나 |
+| Pool | 운영자가 준비한 absolute non-root host directory; 다중 Pool/node는 FixedBlock 검증 필수 |
 | Placement | `WaitForFirstConsumer`; 현재 owner node에만 publish |
 | Mobility | source와 destination이 다시 사용 가능해지는 계획된 cold move |
 | Consistency | 일시 장애와 재시작 뒤 동일 transaction이 eventually converge |

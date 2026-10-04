@@ -75,13 +75,14 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		}
 		return err
 	}
+	isolation := r.capacityIsolation(pools)
 	observed := false
 	for _, pool := range pools {
 		if pool.NodeName != r.NodeName {
 			continue
 		}
 		observed = true
-		result, err := r.reconcilePool(ctx, pool)
+		result, err := r.reconcilePool(ctx, pool, isolation[pool.UID])
 		observations = append(observations, Observation{Pool: pool, Result: result, Err: err})
 		reconcileErr = errors.Join(reconcileErr, err)
 	}
@@ -91,7 +92,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	return reconcileErr
 }
 
-func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool) (result Result, reconcileErr error) {
+func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, allocation allocationObservation) (result Result, reconcileErr error) {
 	if r.Observe != nil {
 		defer func() { r.Observe(pool, result, reconcileErr) }()
 	}
@@ -99,7 +100,14 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool) (re
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
-	result = r.Inspector.Inspect(pool)
+	if allocation.check.Reason != "" && !allocation.check.OK {
+		result = Result{Independent: allocation.check, Accessible: skipped(), Writable: skipped(), CapacityReadable: skipped()}
+	} else {
+		result = r.Inspector.Inspect(pool)
+		if allocation.unit != nil && !volumeapi.SameCapacityUnit(allocation.unit, result.CapacityUnit) {
+			result.Independent = capacityFailure("CapacityIdentityChanged", fmt.Errorf("capacity allocation changed during node observation"))
+		}
+	}
 	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.Known && result.Mounted.Reason == "" {
 		result.Mounted = skipped()
 	}
@@ -127,25 +135,43 @@ func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, re
 			Known: true, Reason: "PoolDeregistering", Message: "Pool rejects new placement while deregistration converges",
 		}, pool.Generation, now))
 	}
-	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.OK {
-		status.Inventory = &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "MountUnavailable: " + result.Mounted.Reason}
-	} else if r.Inventory != nil {
-		inventoryPool := pool
-		if inventoryPool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && inventoryPool.Status.MountIdentity == nil {
-			// The first scan must verify the same candidate identity observed by
-			// the probe before that identity can be durably anchored.
-			inventoryPool.Status.MountIdentity = result.MountIdentity
+	status.Inventory = r.observedInventory(ctx, pool, result, status, now)
+	if cleanupReady && completeInventory(status.Inventory) {
+		if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && status.MountIdentity == nil {
+			status.MountIdentity = result.MountIdentity
 		}
-		inventory := r.Inventory(ctx, inventoryPool, now)
-		status.Inventory = &inventory
-	}
-	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && status.MountIdentity == nil &&
-		result.Accessible.OK && result.Mounted.OK && result.Writable.OK && result.CapacityReadable.OK &&
-		status.Inventory != nil && status.Inventory.Valid && !status.Inventory.Truncated && status.Inventory.Message == "" {
-		status.MountIdentity = result.MountIdentity
+		if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock && status.CapacityUnit == nil && result.Independent.OK {
+			status.CapacityUnit = result.CapacityUnit
+		}
 	}
 	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionIdentityReleased)
 	return status, cleanupReady
+}
+
+func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool, result Result, status volumeapi.PoolStatus, now time.Time) *volumeapi.PoolInventory {
+	if result.Independent.Reason != "" && !result.Independent.OK {
+		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "CapacityUnavailable: " + result.Independent.Reason}
+	}
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.OK {
+		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "MountUnavailable: " + result.Mounted.Reason}
+	}
+	if r.Inventory == nil {
+		return status.Inventory
+	}
+	candidate := pool
+	if candidate.Status.MountIdentity == nil {
+		candidate.Status.MountIdentity = result.MountIdentity
+	}
+	if candidate.Status.CapacityUnit == nil {
+		candidate.Status.CapacityUnit = result.CapacityUnit
+	}
+	candidate.Status.Conditions = status.Conditions
+	inventory := r.Inventory(ctx, candidate, now)
+	return &inventory
+}
+
+func completeInventory(inventory *volumeapi.PoolInventory) bool {
+	return inventory != nil && inventory.Valid && !inventory.Truncated && inventory.Message == ""
 }
 
 // recordIdentityRelease performs only the exact empty Pool release approved
@@ -201,8 +227,15 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 	writable := condition(volumeapi.PoolConditionWritable, result.Writable, generation, now)
 	capacity := condition(volumeapi.PoolConditionCapacityReadable, result.CapacityReadable, generation, now)
 	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and capacity-readable"}
-	checks := []Check{result.Accessible}
+	checks := []Check{}
+	if result.Independent.Reason != "" {
+		checks = append(checks, result.Independent)
+	}
+	checks = append(checks, result.Accessible)
 	conditions := []metav1.Condition{accessible}
+	if result.Independent.Reason != "" {
+		conditions = append(conditions, condition(volumeapi.PoolConditionCapacityIndependent, result.Independent, generation, now))
+	}
 	if result.Mounted.Reason != "" {
 		checks = append(checks, result.Mounted)
 		conditions = append(conditions, condition(volumeapi.PoolConditionMounted, result.Mounted, generation, now))

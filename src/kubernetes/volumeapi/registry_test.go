@@ -298,6 +298,8 @@ func TestBeginCreateInPoolAnchorsSelectedPoolAcrossRetries(t *testing.T) {
 	poolA, poolB := pool("pool-a", "node-a"), pool("pool-b", "node-a")
 	poolA.SetUID("pool-a-uid")
 	poolB.SetUID("pool-b-uid")
+	enableFixedCapacity(t, poolA, "8:1", 0)
+	enableFixedCapacity(t, poolB, "8:2", 1024)
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		VolumeResource: "ShiftPVVolumeList", PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
 	}, identity, poolA, poolB)

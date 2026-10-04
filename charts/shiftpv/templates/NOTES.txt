@@ -15,8 +15,9 @@ StorageClasses:
 Driver: csi.shiftpv.io
 
 Use the documentation and operational checks that match this exact chart and
-image version. Register one ShiftPVPool per participating node and verify its
-version-specific Ready contract before creating PVCs.
+image version. Register ShiftPVPools and verify their version-specific Ready
+contract before creating PVCs. Multiple Pools on one node require FixedBlock
+capacity verification on every Pool.
 {{- if .Values.mobility.enabled }}
 Opt in workload namespaces with:
   kubectl label namespace <name> shiftpv.io/admission=enabled

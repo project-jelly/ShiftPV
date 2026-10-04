@@ -173,7 +173,7 @@ func (r *Reconciler) observeDestination(ctx context.Context, move volumeapi.Move
 		if staleAfter <= 0 {
 			staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 		}
-		if exists && registeredPool.NodeName == result.DestinationNode && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
+		if exists && registeredPool.NodeName == result.DestinationNode && pools.capacityIndependent(registeredPool) && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
 			readyPool, ready, repaired = registeredPool, true, true
 		}
 	}
@@ -255,4 +255,15 @@ func sourceCopyPresent(pool volumeapi.Pool, copy *volume.CopyIdentity) bool {
 		}
 	}
 	return false
+}
+
+// A repair may bypass only its own inventory problem, never missing or
+// contradictory peer capacity evidence.
+func (p poolIndex) capacityIndependent(pool volumeapi.Pool) bool {
+	peers := make([]volumeapi.Pool, 0, len(p.registered))
+	for _, registered := range p.registered {
+		peers = append(peers, registered)
+	}
+	independent, _ := volumeapi.PoolCapacityIndependent(pool, peers)
+	return independent
 }

@@ -29,15 +29,16 @@ var (
 )
 
 const (
-	PoolConditionReady             = "Ready"
-	PoolConditionAccessible        = "Accessible"
-	PoolConditionMounted           = "Mounted"
-	PoolConditionIdentityReleased  = "IdentityReleased"
-	PoolProtectionFinalizer        = "shiftpv.io/pool-protection"
-	PoolIdentityReleaseAnnotation  = "shiftpv.io/release-pool-identity"
-	PoolConditionWritable          = "Writable"
-	PoolConditionCapacityReadable  = "CapacityReadable"
-	DefaultPoolReadinessStaleAfter = 3 * time.Minute
+	PoolConditionReady               = "Ready"
+	PoolConditionAccessible          = "Accessible"
+	PoolConditionCapacityIndependent = "CapacityIndependent"
+	PoolConditionMounted             = "Mounted"
+	PoolConditionIdentityReleased    = "IdentityReleased"
+	PoolProtectionFinalizer          = "shiftpv.io/pool-protection"
+	PoolIdentityReleaseAnnotation    = "shiftpv.io/release-pool-identity"
+	PoolConditionWritable            = "Writable"
+	PoolConditionCapacityReadable    = "CapacityReadable"
+	DefaultPoolReadinessStaleAfter   = 3 * time.Minute
 )
 
 const PoolMountPolicyRequireMountPoint = "RequireMountPoint"

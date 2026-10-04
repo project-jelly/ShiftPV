@@ -146,15 +146,15 @@ func TestReconcileRequiredMountPointKeepsAnchorAndInvalidatesInventory(t *testin
 func TestReconcileObservesEveryRegistrationOnNode(t *testing.T) {
 	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
 	repository := &fakeRepository{pools: []volumeapi.Pool{
-		{Name: "pool-a", UID: "uid-a", NodeName: "node-a", MountPath: "/pool-a", Generation: 1},
-		{Name: "pool-b", UID: "uid-b", NodeName: "node-a", MountPath: "/pool-b", Generation: 1},
-		{Name: "pool-c", UID: "uid-c", NodeName: "node-b", MountPath: "/pool-c", Generation: 1},
+		{Name: "pool-a", UID: "uid-a", NodeName: "node-a", MountPath: "/pool-a", Generation: 1, CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock},
+		{Name: "pool-b", UID: "uid-b", NodeName: "node-a", MountPath: "/pool-b", Generation: 1, CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock},
+		{Name: "pool-c", UID: "uid-c", NodeName: "node-b", MountPath: "/pool-c", Generation: 1, CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock},
 	}}
 	observed := map[string]bool{}
 	scanned := map[string]bool{}
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Interval: time.Minute,
-		Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
 		Now:       func() time.Time { return testTime },
 		Inventory: func(_ context.Context, pool volumeapi.Pool, _ time.Time) volumeapi.PoolInventory {
 			scanned[pool.Name] = true
