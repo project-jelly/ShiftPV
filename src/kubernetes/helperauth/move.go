@@ -36,7 +36,7 @@ func SourceAuthority(client kubernetes.Interface, registry *volumeapi.Registry, 
 		if installationID != identity.InstallationID {
 			return fmt.Errorf("source installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
-		pool, err := registry.PoolForNode(ctx, identity.NodeName)
+		pool, err := registry.PoolForIdentity(ctx, identity.PoolName, identity.PoolUID, identity.NodeName)
 		if err != nil {
 			return fmt.Errorf("read source Pool: %w", err)
 		}
@@ -127,7 +127,7 @@ func MoveAuthority(client kubernetes.Interface, registry *volumeapi.Registry, op
 		if installationID != target.InstallationID {
 			return fmt.Errorf("installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
-		pool, err := registry.PoolForNode(ctx, target.NodeName)
+		pool, err := registry.PoolForIdentity(ctx, target.PoolName, target.PoolUID, target.NodeName)
 		if err != nil {
 			return fmt.Errorf("read target Pool: %w", err)
 		}
@@ -206,7 +206,7 @@ func RecoveryAuthority(client kubernetes.Interface, registry *volumeapi.Registry
 		if installationID != identity.InstallationID {
 			return fmt.Errorf("recovery installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
-		pool, err := registry.PoolForNode(checkCtx, identity.NodeName)
+		pool, err := registry.PoolForIdentity(checkCtx, identity.PoolName, identity.PoolUID, identity.NodeName)
 		if err != nil {
 			return fmt.Errorf("read recovery Pool: %w", err)
 		}

@@ -113,13 +113,26 @@ func (m *memoryRepository) ReadyPools(context.Context) ([]volumeapi.Pool, error)
 	}
 	return identifiedReadyTestPools(m.pools, m.volumes, m.pools), nil
 }
-func (m *memoryRepository) ReadyPoolForNode(_ context.Context, nodeName string) (volumeapi.Pool, error) {
-	pools := m.pools
-	if m.readyPoolsConfigured {
-		pools = m.readyPools
+func (m *memoryRepository) PoolForIdentity(ctx context.Context, name, uid, nodeName string) (volumeapi.Pool, error) {
+	pools, err := m.Pools(ctx)
+	if err != nil {
+		return volumeapi.Pool{}, err
 	}
-	for _, pool := range identifiedReadyTestPools(pools, m.volumes, m.pools) {
-		if pool.NodeName == nodeName {
+	for _, pool := range pools {
+		if pool.Name == name && pool.UID == uid && pool.NodeName == nodeName {
+			return pool, nil
+		}
+	}
+	return volumeapi.Pool{}, volumeapi.ErrStateConflict
+}
+
+func (m *memoryRepository) ReadyPoolForIdentity(ctx context.Context, name, uid, nodeName string) (volumeapi.Pool, error) {
+	pools, err := m.ReadyPools(ctx)
+	if err != nil {
+		return volumeapi.Pool{}, err
+	}
+	for _, pool := range pools {
+		if pool.Name == name && pool.UID == uid && pool.NodeName == nodeName {
 			return pool, nil
 		}
 	}
@@ -842,7 +855,7 @@ func TestObserveKeepsTerminatingPlacementReservedUntilNotFound(t *testing.T) {
 	}
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{volumeID: {UID: destination.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name, CurrentCopy: &destination}},
-		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", NodeName: "destination", MountPath: "/destination-pool"}},
+		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/source-pool"}, {Name: destination.PoolName, UID: destination.PoolUID, NodeName: "destination", MountPath: "/destination-pool"}},
 		moves:   []volumeapi.Move{move},
 	}
 	fixture := newMobilityFixture(volumeID)

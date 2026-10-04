@@ -13,6 +13,7 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 const (
@@ -37,7 +38,7 @@ func (r *Reconciler) reconcileRecovery(ctx context.Context, move volumeapi.Move)
 	if reason, guardErr := recoveryGuards(move, state); guardErr != nil {
 		return r.recoveryError(ctx, move, reason, guardErr)
 	}
-	if err := r.recoveryNodes(ctx, move, state.OwnerNode); err != nil {
+	if err := r.recoveryNodes(ctx, move, state); err != nil {
 		return r.recoveryError(ctx, move, "NodeNotReady", err)
 	}
 	claim, err := r.recoveryClaim(ctx, move)
@@ -162,7 +163,7 @@ func (r *Reconciler) recoveryCompleteStep(ctx context.Context, move volumeapi.Mo
 	return r.recoveryAdvance(ctx, move, recoveryRecovered)
 }
 
-func (r *Reconciler) recoveryNodes(ctx context.Context, move volumeapi.Move, owner string) error {
+func (r *Reconciler) recoveryNodes(ctx context.Context, move volumeapi.Move, state volumeapi.State) error {
 	for _, name := range []string{move.Spec.SourceNode, move.Status.DestinationNode} {
 		if name == "" {
 			continue
@@ -174,10 +175,18 @@ func (r *Reconciler) recoveryNodes(ctx context.Context, move volumeapi.Move, own
 		if !admission.NodeReady(node) || node.DeletionTimestamp != nil {
 			return fmt.Errorf("node %q must be Ready", name)
 		}
-		if name == owner && node.Spec.Unschedulable {
+		if name == state.OwnerNode && node.Spec.Unschedulable {
 			return fmt.Errorf("uncordon current owner %q before requesting service recovery", name)
 		}
-		if _, err := r.poolMountPath(ctx, name); err != nil {
+	}
+	if state.CurrentCopy == nil {
+		return fmt.Errorf("recovery owner copy identity is missing")
+	}
+	for _, copy := range []*volume.CopyIdentity{state.CurrentCopy, move.Status.SourceCopy, move.Status.IncomingCopy, move.Status.DestinationCopy} {
+		if copy == nil {
+			continue
+		}
+		if _, err := r.poolMountPath(ctx, copy); err != nil {
 			return err
 		}
 	}

@@ -130,6 +130,22 @@ func TestVolumeUsageReturnsQuiescedDirectoryBytes(t *testing.T) {
 	}
 }
 
+func TestVolumeUsageForCopyUsesExactPoolOnSharedNode(t *testing.T) {
+	client, created := clientWithPodTerminationMessage(t, "12345\n")
+	runner := validRunner(client)
+	pool := volumeapi.Pool{Name: "pool-b", UID: "pool-b-uid", NodeName: "worker-a", MountPath: "/mnt/pool-b"}
+	runner.Pools = fakePoolResolver{pool: pool, nodeErr: errors.New("node has multiple Pools")}
+	copy := volume.CopyIdentity{InstallationID: "installation", PoolName: pool.Name, PoolUID: pool.UID,
+		VolumeID: testVolumeID, VolumeUID: "volume-uid", CopyID: "copy-id", NodeName: pool.NodeName, Role: volume.RoleServing}
+	bytes, err := runner.VolumeUsageForCopy(context.Background(), copy)
+	if err != nil || bytes != 12345 {
+		t.Fatalf("usage=%d err=%v", bytes, err)
+	}
+	if got := created.pod.Spec.Volumes[0].HostPath.Path; got != pool.MountPath {
+		t.Fatalf("usage helper used %q, want %q", got, pool.MountPath)
+	}
+}
+
 func TestRunForResultRejectsReplacementPod(t *testing.T) {
 	client, created := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
 	client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {

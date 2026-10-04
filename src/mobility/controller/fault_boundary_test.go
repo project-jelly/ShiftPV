@@ -173,6 +173,10 @@ func TestCopyResourcesConvergeAfterCreateResponseLost(t *testing.T) {
 		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
 		Status: volumeapi.MoveStatus{DestinationNode: "destination"},
 	}
+	if move.Status.SourceCopy == nil {
+		source, _, _ := testCopyIdentities(move.Spec.VolumeID, "source", "destination")
+		move.Status.SourceCopy = &source
+	}
 	names := namesFor(move.Name)
 	tests := []struct {
 		name     string
@@ -189,8 +193,8 @@ func TestCopyResourcesConvergeAfterCreateResponseLost(t *testing.T) {
 			client := fake.NewSimpleClientset()
 			injectAcceptedCreateTimeout(t, client, test.resource, test.object)
 			repository := &memoryRepository{pools: []volumeapi.Pool{
-				{Name: "source", NodeName: "source", MountPath: "/source-pool"},
-				{Name: "destination", NodeName: "destination", MountPath: "/destination-pool"},
+				{Name: "source-pool", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool"},
+				{Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool"},
 			}}
 			reconciler := newTestReconciler(client, repository)
 
@@ -228,8 +232,8 @@ func TestMobilityJobsConvergeAfterCreateResponseLost(t *testing.T) {
 			injectAcceptedCreateTimeout(t, client, "jobs", test.jobName)
 			assignJobUIDs(client)
 			repository := &memoryRepository{volumes: map[string]volumeapi.State{move.Spec.VolumeID: {Phase: "Ready", OwnerNode: "destination", ActiveMove: move.Name, PublishedNodes: []string{"destination"}}}, pools: []volumeapi.Pool{
-				{Name: "source", NodeName: "source", MountPath: "/source-pool"},
-				{Name: "destination", NodeName: "destination", MountPath: "/destination-pool"},
+				{Name: "source-pool", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool"},
+				{Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool"},
 			}}
 			reconciler := newTestReconciler(client, repository)
 

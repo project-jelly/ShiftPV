@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	"k8s.io/klog/v2"
 
@@ -32,6 +33,9 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 		return r.recordMoveError(ctx, &move, previous, "ActionFailed", "failed to decide the next mobility action", err)
 	}
 	if err := r.execute(ctx, &move, observed, decision); err != nil {
+		if errors.Is(err, errCapacityApprovalPersistence) {
+			return err
+		}
 		return r.recordMoveError(ctx, &move, previous, "ActionFailed", "failed to execute the current mobility action", err)
 	}
 	move.Status.Phase = string(decision.Next)

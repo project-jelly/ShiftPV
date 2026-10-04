@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 type resourceNames struct {
@@ -64,23 +65,17 @@ func podNameEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}}}
 }
 
-func (r *Reconciler) poolMountPath(ctx context.Context, nodeName string) (string, error) {
-	pools, err := r.Repository.Pools(ctx)
+func (r *Reconciler) poolMountPath(ctx context.Context, copy *volume.CopyIdentity) (string, error) {
+	if copy == nil || copy.Validate() != nil {
+		return "", fmt.Errorf("Pool copy identity is missing")
+	}
+	pool, err := r.Repository.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return "", err
 	}
-	var result string
-	for _, pool := range pools {
-		if pool.NodeName != nodeName {
-			continue
-		}
-		if result != "" {
-			return "", fmt.Errorf("multiple ShiftPVPools are registered for node %q", nodeName)
-		}
-		result = filepath.Clean(pool.MountPath)
-	}
+	result := filepath.Clean(pool.MountPath)
 	if !filepath.IsAbs(result) || result == "/" {
-		return "", fmt.Errorf("node %q has no valid ShiftPVPool mountPath", nodeName)
+		return "", fmt.Errorf("Pool %q has no valid mountPath", pool.Name)
 	}
 	return result, nil
 }

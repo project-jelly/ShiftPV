@@ -22,6 +22,8 @@ import (
 func TestTransferResourcesRejectPreviousMoveIncarnation(t *testing.T) {
 	ctx := context.Background()
 	move := volumeapi.Move{Name: "move-test", UID: "current-uid", Spec: volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"}}
+	source, _, _ := testCopyIdentities(move.Spec.VolumeID, "source", "destination")
+	move.Status.SourceCopy = &source
 	previous := move
 	previous.UID = "previous-uid"
 	names := namesFor(move.Name)
@@ -78,6 +80,8 @@ func TestSourcePodAcceptsOnlyKubernetesServiceAccountProjection(t *testing.T) {
 		Spec:   volumeapi.MoveSpec{VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
 		Status: volumeapi.MoveStatus{CopyOperationID: "copy-operation"},
 	}
+	source, _, _ := testCopyIdentities(move.Spec.VolumeID, "source", "destination")
+	move.Status.SourceCopy = &source
 	names := namesFor(move.Name)
 	client := fake.NewSimpleClientset()
 	reconciler := &Reconciler{
@@ -150,7 +154,7 @@ func TestMoveJobsUseIdentityHelperAndRejectReplacement(t *testing.T) {
 	assignJobUIDs(client)
 	reconciler := &Reconciler{
 		Client: client, Namespace: "system", ServiceAccountName: "shiftpv-controller", HelperImage: "helper:test",
-		Repository: &memoryRepository{pools: []volumeapi.Pool{
+		Repository: &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {OwnerNode: source.NodeName, CurrentCopy: &source}}, pools: []volumeapi.Pool{
 			{Name: source.PoolName, UID: source.PoolUID, NodeName: source.NodeName, MountPath: "/source"},
 			{Name: incoming.PoolName, UID: incoming.PoolUID, NodeName: incoming.NodeName, MountPath: "/destination"},
 		}},
@@ -195,8 +199,8 @@ func TestMoveJobsUseIdentityHelperAndRejectReplacement(t *testing.T) {
 
 // TestMoveHelperContainersOmitPoolReadinessBudget pins the blast radius of the
 // forwarded probe staleness budget. Only the cleanup helper consumes it: its
-// publication proof calls ReadyPoolForNode, while serve-source, copy, promote
-// and verify-owner recheck authority through PoolForNode and never judge probe
+// publication proof calls ReadyPoolForIdentity, while serve-source, copy, promote
+// and verify-owner recheck authority through PoolForIdentity and never judge probe
 // freshness. Keeping the argument out of these four containers keeps
 // sameSourcePod and sameOperationJob stable, so re-tuning
 // poolReadiness.staleAfter cannot strand an in-flight Move.
@@ -221,7 +225,7 @@ func TestMoveHelperContainersOmitPoolReadinessBudget(t *testing.T) {
 	reconciler := &Reconciler{
 		Client: client, Namespace: "system", ServiceAccountName: "shiftpv-controller", HelperImage: "helper:test",
 		PoolReadinessStaleAfter: 7 * time.Minute,
-		Repository: &memoryRepository{pools: []volumeapi.Pool{
+		Repository: &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {OwnerNode: source.NodeName, CurrentCopy: &source}}, pools: []volumeapi.Pool{
 			{Name: source.PoolName, UID: source.PoolUID, NodeName: source.NodeName, MountPath: "/source"},
 			{Name: incoming.PoolName, UID: incoming.PoolUID, NodeName: incoming.NodeName, MountPath: "/destination"},
 		}},

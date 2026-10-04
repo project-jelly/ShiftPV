@@ -37,10 +37,6 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 	}
 
 	unlock := s.poolLifecycles.Lock(nodeName)
-	if s.PoolLocks != nil {
-		unlock()
-		unlock = s.PoolLocks.Lock(nodeName)
-	}
 	defer unlock()
 
 	existing, err = s.Volumes.Get(ctx, id)
@@ -111,12 +107,12 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 			continue
 		}
 		found = true
-		fit, err := s.poolFits(ctx, pool, requestName, requestedBytes, parameters)
+		created, fit, err := s.attemptCreateInPool(ctx, pool, id, requestName, requestedBytes, parameters)
 		if err != nil {
 			return volumeapi.State{}, err
 		}
 		if fit.allowed {
-			return s.Volumes.BeginCreateInPool(ctx, id, requestName, nodeName, requestedBytes, pool.Name, pool.UID)
+			return created, nil
 		}
 		if denied == nil || status.Code(fit.denial) == codes.Unavailable {
 			denied = fit.denial
@@ -126,6 +122,21 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 		return volumeapi.State{}, status.Errorf(codes.FailedPrecondition, "node %q has no Ready Pool in group %q", nodeName, group)
 	}
 	return volumeapi.State{}, denied
+}
+
+// Admission and the durable creation intent share the same Pool UID lock as
+// mobility holds. Node serialization alone cannot protect independent Pools.
+func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, id, requestName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, poolFit, error) {
+	if s.PoolLocks != nil {
+		unlock := s.PoolLocks.Lock(pool.UID)
+		defer unlock()
+	}
+	fit, err := s.poolFits(ctx, pool, requestName, requestedBytes, parameters)
+	if err != nil || !fit.allowed {
+		return volumeapi.State{}, fit, err
+	}
+	created, err := s.Volumes.BeginCreateInPool(ctx, id, requestName, pool.NodeName, requestedBytes, pool.Name, pool.UID)
+	return created, fit, err
 }
 
 type poolFit struct {

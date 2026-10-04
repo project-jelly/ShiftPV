@@ -7,6 +7,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -588,6 +589,41 @@ func TestCreateVolumeSerializesPoolReservationAdmission(t *testing.T) {
 	}
 	if counts[codes.OK] != 1 || counts[codes.ResourceExhausted] != 1 {
 		t.Fatalf("result codes = %v", counts)
+	}
+}
+
+func TestCreateVolumeUsesSharedPoolUIDCapacityLock(t *testing.T) {
+	probe := &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}}
+	service := capacityService(fake.NewClientset(), "64Mi", nil, probe)
+	service.PoolLocks = &poolcapacity.Locker{}
+	unlock := service.PoolLocks.Lock("pool-uid")
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("provisioning bypassed held Pool UID lock: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if probe.callCount() != 0 {
+		t.Fatal("capacity was probed outside the shared lock")
+	}
+	unlock()
+	unlock = nil
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provisioning did not resume after Pool unlock")
 	}
 }
 

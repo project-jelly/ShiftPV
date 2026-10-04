@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,12 +16,30 @@ import (
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
-// poolIndex is the Pool half of one observation snapshot, indexed by node name.
+// poolIndex is the Pool half of one observation snapshot, indexed by Pool UID.
 // registered holds every validated ShiftPVPool; ready holds only those whose
 // inventory is currently publishable.
 type poolIndex struct {
 	registered map[string]volumeapi.Pool
 	ready      map[string]volumeapi.Pool
+}
+
+func moveSourceCopy(move volumeapi.Move, state volumeapi.State) *volume.CopyIdentity {
+	if move.Status.SourceCopy != nil {
+		return move.Status.SourceCopy
+	}
+	if state.CurrentCopy != nil && state.CurrentCopy.NodeName == move.Spec.SourceNode {
+		return state.CurrentCopy
+	}
+	return nil
+}
+
+func indexedCopyPool(pools map[string]volumeapi.Pool, copy *volume.CopyIdentity) (volumeapi.Pool, bool) {
+	if copy == nil || copy.Validate() != nil {
+		return volumeapi.Pool{}, false
+	}
+	pool, exists := pools[copy.PoolUID]
+	return pool, exists && pool.Name == copy.PoolName && pool.NodeName == copy.NodeName
 }
 
 func (r *Reconciler) observeVolume(ctx context.Context, move volumeapi.Move, result *observation) (bool, error) {
@@ -57,15 +76,18 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || filepath.Clean(pool.MountPath) == "/" {
 			return index, fmt.Errorf("ShiftPVPool %q has invalid nodeName or mountPath", pool.Name)
 		}
-		if _, duplicate := index.registered[pool.NodeName]; duplicate {
-			return index, fmt.Errorf("multiple ShiftPVPools are registered for node %q", pool.NodeName)
+		if pool.UID == "" {
+			return index, fmt.Errorf("ShiftPVPool %q has no UID", pool.Name)
 		}
-		index.registered[pool.NodeName] = pool
+		if _, duplicate := index.registered[pool.UID]; duplicate {
+			return index, fmt.Errorf("multiple ShiftPVPools share UID %q", pool.UID)
+		}
+		index.registered[pool.UID] = pool
 	}
 	readyPools := snapshot.Ready
 	index.ready = make(map[string]volumeapi.Pool, len(readyPools))
 	for _, pool := range readyPools {
-		index.ready[pool.NodeName] = pool
+		index.ready[pool.UID] = pool
 	}
 	return index, nil
 }
@@ -76,7 +98,7 @@ func (r *Reconciler) observeSource(ctx context.Context, move volumeapi.Move, poo
 	if err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("read source Node: %w", err)
 	}
-	sourcePool, sourceReady := pools.ready[move.Spec.SourceNode]
+	sourcePool, sourceReady := indexedCopyPool(pools.ready, moveSourceCopy(move, state))
 	sourceHealthy := err == nil && admission.NodeReady(sourceNode) && sourceReady && sourceCopyPresent(sourcePool, state.CurrentCopy)
 	result.FSM.SourceHealthy = sourceHealthy
 	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
@@ -98,15 +120,17 @@ func (r *Reconciler) observeSource(ctx context.Context, move volumeapi.Move, poo
 }
 
 func (r *Reconciler) observeCandidates(ctx context.Context, move volumeapi.Move, pools poolIndex, result *observation) error {
-	sourcePool, sourceRegistered := pools.registered[move.Spec.SourceNode]
-	for nodeName, registeredPool := range pools.registered {
+	sourcePool, sourceRegistered := indexedCopyPool(pools.registered, moveSourceCopy(move, result.Volume))
+	nodes := make(map[string]bool)
+	for poolUID, registeredPool := range pools.registered {
+		nodeName := registeredPool.NodeName
 		if nodeName == move.Spec.SourceNode {
 			continue
 		}
 		if !sourceRegistered || registeredPool.PoolGroup != sourcePool.PoolGroup {
 			continue
 		}
-		readyPool, ready := pools.ready[nodeName]
+		readyPool, ready := pools.ready[poolUID]
 		if !ready || volumeapi.PoolHasConflictingServingVolume(readyPool, move.Spec.VolumeID, move.Status.DestinationCopy) {
 			continue
 		}
@@ -117,10 +141,12 @@ func (r *Reconciler) observeCandidates(ctx context.Context, move volumeapi.Move,
 			}
 			return fmt.Errorf("read destination Node %q: %w", nodeName, nodeErr)
 		}
-		if admission.NodeReady(node) && !node.Spec.Unschedulable {
+		if admission.NodeReady(node) && !node.Spec.Unschedulable && !nodes[nodeName] {
 			result.CandidateNodes = append(result.CandidateNodes, nodeName)
+			nodes[nodeName] = true
 		}
 	}
+	sort.Strings(result.CandidateNodes)
 	if len(move.Status.CandidateNodes) != 0 {
 		// CandidateNodes is the immutable eligibility snapshot taken before
 		// eviction. Keep it stable so a transient Pool outage after placement
@@ -140,14 +166,14 @@ func (r *Reconciler) observeDestination(ctx context.Context, move volumeapi.Move
 		return false, nil
 	}
 	repaired := false
-	readyPool, ready := pools.ready[result.DestinationNode]
+	readyPool, ready := destinationObservationPool(move, pools, result)
 	if !ready {
-		registeredPool, exists := pools.registered[result.DestinationNode]
+		registeredPool, exists := pools.registered[move.Status.DestinationPoolUID]
 		staleAfter := r.PoolReadinessStaleAfter
 		if staleAfter <= 0 {
 			staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 		}
-		if exists && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
+		if exists && registeredPool.NodeName == result.DestinationNode && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
 			readyPool, ready, repaired = registeredPool, true, true
 		}
 	}
@@ -160,16 +186,62 @@ func (r *Reconciler) observeDestination(ctx context.Context, move volumeapi.Move
 	if copyConflict {
 		result.FSM.UnsafeReason = "DestinationServingCopyPresent"
 	}
-	if move.Status.CapacityApproved && ready &&
-		(move.Status.DestinationPoolUID == "" || readyPool.UID != move.Status.DestinationPoolUID) {
+	registered, exists := pools.registered[move.Status.DestinationPoolUID]
+	if move.Status.CapacityApproved && (!exists || registered.NodeName != result.DestinationNode) {
 		result.FSM.DestinationBlocked = true
+		result.FSM.DestinationUnavailable = false
 		result.FSM.UnsafeReason = "DestinationPoolIdentityChanged"
 	}
-	if sourcePool, exists := pools.registered[move.Spec.SourceNode]; exists && ready && sourcePool.PoolGroup != readyPool.PoolGroup {
+	if destinationGroupMismatch(move, pools, result, readyPool, ready) {
 		result.FSM.DestinationBlocked = true
+		result.FSM.DestinationUnavailable = false
 		result.FSM.UnsafeReason = "DestinationPoolGroupMismatch"
 	}
 	return repaired, nil
+}
+
+func destinationGroupMismatch(move volumeapi.Move, pools poolIndex, result *observation, selected volumeapi.Pool, ready bool) bool {
+	source, exists := indexedCopyPool(pools.registered, moveSourceCopy(move, result.Volume))
+	if !exists {
+		return false
+	}
+	if ready {
+		return selected.PoolGroup != source.PoolGroup
+	}
+	if move.Status.DestinationPoolUID != "" {
+		selected, exists = pools.registered[move.Status.DestinationPoolUID]
+		return exists && selected.PoolGroup != source.PoolGroup
+	}
+	found := false
+	for _, pool := range pools.registered {
+		if pool.NodeName == result.DestinationNode {
+			found = true
+			if pool.PoolGroup == source.PoolGroup {
+				return false
+			}
+		}
+	}
+	return found
+}
+
+// Before capacity admission the selected node may have several eligible Pools.
+// Once approved, observation follows only the pinned destination incarnation.
+func destinationObservationPool(move volumeapi.Move, pools poolIndex, result *observation) (volumeapi.Pool, bool) {
+	if uid := move.Status.DestinationPoolUID; uid != "" {
+		pool, ready := pools.ready[uid]
+		return pool, ready && pool.NodeName == result.DestinationNode
+	}
+	source, exists := indexedCopyPool(pools.registered, moveSourceCopy(move, result.Volume))
+	if !exists {
+		return volumeapi.Pool{}, false
+	}
+	for _, pool := range pools.ready {
+		if pool.NodeName == result.DestinationNode && pool.PoolGroup == source.PoolGroup &&
+			!volumeapi.PoolHasConflictingServingVolume(pool, move.Spec.VolumeID, move.Status.DestinationCopy) {
+			return pool, true
+		}
+	}
+	return volumeapi.Pool{}, false
 }
 
 func sourceCopyPresent(pool volumeapi.Pool, copy *volume.CopyIdentity) bool {

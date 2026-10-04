@@ -36,7 +36,8 @@ type Repository interface {
 	Pools(context.Context) ([]volumeapi.Pool, error)
 	ObservePools(context.Context) (volumeapi.PoolSnapshot, error)
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
-	ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error)
+	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
+	ReadyPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	CreateMove(context.Context, string, volumeapi.MoveSpec) (volumeapi.Move, error)
 	AddMoveFinalizer(context.Context, string, string) error
 	RemoveMoveFinalizer(context.Context, string, string) error
@@ -46,8 +47,8 @@ type Repository interface {
 }
 
 type CapacityProbe interface {
-	StatFS(context.Context, string) (poolcapacity.Filesystem, error)
-	VolumeUsage(context.Context, string, string) (int64, error)
+	StatFSForPool(context.Context, volumeapi.Pool) (poolcapacity.Filesystem, error)
+	VolumeUsageForCopy(context.Context, volume.CopyIdentity) (int64, error)
 }
 
 type Reconciler struct {

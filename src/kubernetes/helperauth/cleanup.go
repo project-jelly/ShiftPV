@@ -128,7 +128,8 @@ func verifyMoveSourceCleanupAuthority(ctx context.Context, registry *volumeapi.R
 	if !settling || !destinationOwnsPublishedCopy(move, state) {
 		return fmt.Errorf("move source cleanup authority changed: %w", volumeapi.ErrStateConflict)
 	}
-	destinationPool, err := registry.ReadyPoolForNode(ctx, move.Status.DestinationNode)
+	copy := move.Status.DestinationCopy
+	destinationPool, err := registry.ReadyPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return fmt.Errorf("destination Pool publication proof unavailable: %w", err)
 	}
