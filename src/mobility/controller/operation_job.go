@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 func (r *Reconciler) ensureCopyJob(ctx context.Context, move volumeapi.Move, names resourceNames) error {
@@ -43,7 +44,10 @@ func (r *Reconciler) ensurePromotionJob(ctx context.Context, move volumeapi.Move
 
 func (r *Reconciler) ensureJob(ctx context.Context, move volumeapi.Move, name, nodeName string, names resourceNames, command, args []string, env []corev1.EnvVar, extraMounts []corev1.VolumeMount, extraVolumes []corev1.Volume) error {
 	env = append(append([]corev1.EnvVar{}, env...), podNameEnvironment()...)
-	job, err := r.operationJob(ctx, name, nodeName, names, env, extraMounts, extraVolumes)
+	if move.Status.IncomingCopy == nil || move.Status.IncomingCopy.NodeName != nodeName {
+		return fmt.Errorf("operation Pool copy identity is missing")
+	}
+	job, err := r.operationJob(ctx, name, move.Status.IncomingCopy, names, env, extraMounts, extraVolumes)
 	if err != nil {
 		return err
 	}
@@ -66,11 +70,11 @@ func (r *Reconciler) ensureJob(ctx context.Context, move volumeapi.Move, name, n
 	return nil
 }
 
-func (r *Reconciler) operationJob(ctx context.Context, name, nodeName string, names resourceNames, env []corev1.EnvVar, extraMounts []corev1.VolumeMount, extraVolumes []corev1.Volume) (*batchv1.Job, error) {
+func (r *Reconciler) operationJob(ctx context.Context, name string, copy *volume.CopyIdentity, names resourceNames, env []corev1.EnvVar, extraMounts []corev1.VolumeMount, extraVolumes []corev1.Volume) (*batchv1.Job, error) {
 	backoff := int32(2)
 	ttl := int32(600)
 	deadline := int64(300)
-	poolRoot, err := r.poolMountPath(ctx, nodeName)
+	poolRoot, err := r.poolMountPath(ctx, copy)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +86,7 @@ func (r *Reconciler) operationJob(ctx context.Context, name, nodeName string, na
 			BackoffLimit: &backoff, TTLSecondsAfterFinished: &ttl, ActiveDeadlineSeconds: &deadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: transferLabels(names)},
-				Spec: corev1.PodSpec{NodeName: nodeName, ServiceAccountName: r.ServiceAccountName, RestartPolicy: corev1.RestartPolicyNever,
+				Spec: corev1.PodSpec{NodeName: copy.NodeName, ServiceAccountName: r.ServiceAccountName, RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{{Name: "operation", Image: r.HelperImage, Env: env, VolumeMounts: mounts,
 						SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: boolPointer(false), RunAsUser: int64Pointer(0)}}},
 					Volumes: volumes,

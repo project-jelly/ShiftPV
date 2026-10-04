@@ -72,7 +72,14 @@ func recoveryNames(move volumeapi.Move) resourceNames {
 // verifyOwnerJob builds the single recovery owner-verification Job spec used
 // both to create the Job and to compare an existing one against it.
 func (r *Reconciler) verifyOwnerJob(ctx context.Context, move volumeapi.Move, names resourceNames, name, node string) (*batchv1.Job, error) {
-	job, err := r.operationJob(ctx, name, node, names, nil, nil, nil)
+	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
+	if err != nil {
+		return nil, err
+	}
+	if state.CurrentCopy == nil || state.CurrentCopy.NodeName != node || state.CurrentCopy.Role != "Serving" {
+		return nil, fmt.Errorf("recovery owner copy identity is missing")
+	}
+	job, err := r.operationJob(ctx, name, state.CurrentCopy, names, nil, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -104,11 +111,6 @@ func (r *Reconciler) recoveryJob(ctx context.Context, move volumeapi.Move) (bool
 		job, err = r.verifyOwnerJob(ctx, move, names, name, node)
 		if err != nil {
 			return false, err
-		}
-		if state, stateErr := r.Repository.Get(ctx, move.Spec.VolumeID); stateErr != nil {
-			return false, stateErr
-		} else if state.CurrentCopy == nil || state.CurrentCopy.NodeName != node || state.CurrentCopy.Role != "Serving" {
-			return false, fmt.Errorf("recovery owner copy identity is missing")
 		}
 		_, err = r.Client.BatchV1().Jobs(r.Namespace).Create(ctx, job, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {

@@ -85,7 +85,7 @@ secrets file = /auth/secrets
 func (r *Reconciler) ensureSourcePod(ctx context.Context, move volumeapi.Move, names resourceNames) error {
 	secretMode := int32(0o400)
 	configMode := int32(0o644)
-	poolRoot, err := r.poolMountPath(ctx, move.Spec.SourceNode)
+	poolRoot, err := r.poolMountPath(ctx, move.Status.SourceCopy)
 	if err != nil {
 		return err
 	}

@@ -59,7 +59,7 @@ const (
 // ReadyPoolForNode, so the parent controller forwards its own configured value
 // there instead of letting the child silently fall back to
 // DefaultPoolReadinessStaleAfter. The other helper subcommands recheck
-// authority through PoolForNode and accept the flag only for forward
+// authority through PoolForIdentity and accept the flag only for forward
 // compatibility.
 const PoolReadinessStaleAfterFlag = "pool-readiness-stale-after"
 

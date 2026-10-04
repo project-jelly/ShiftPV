@@ -112,11 +112,30 @@ func (r *Runner) statFSAt(ctx context.Context, nodeName, poolRoot string) (poolc
 }
 
 func (r *Runner) VolumeUsage(ctx context.Context, nodeName, volumeID string) (int64, error) {
+	poolRoot, err := r.poolRoot(ctx, nodeName)
+	if err != nil {
+		return 0, err
+	}
+	return r.volumeUsageAt(ctx, nodeName, volumeID, poolRoot)
+}
+
+func (r *Runner) VolumeUsageForCopy(ctx context.Context, copy volume.CopyIdentity) (int64, error) {
+	if err := copy.Validate(); err != nil {
+		return 0, err
+	}
+	poolRoot, err := r.poolRootForIdentity(ctx, copy)
+	if err != nil {
+		return 0, err
+	}
+	return r.volumeUsageAt(ctx, copy.NodeName, copy.VolumeID, poolRoot)
+}
+
+func (r *Runner) volumeUsageAt(ctx context.Context, nodeName, volumeID, poolRoot string) (int64, error) {
 	path, err := volume.Path(mountPath, volumeID)
 	if err != nil {
 		return 0, err
 	}
-	output, err := r.runForResult(ctx, nodeName, volumeID, []string{
+	output, err := r.runForResultAtPath(ctx, nodeName, volumeID, poolRoot, []string{
 		"sh", "-c", "du -sb \"$1\" | awk '{print $1}' > /dev/termination-log", "shiftpv-du", path,
 	})
 	if err != nil {
@@ -129,18 +148,10 @@ func (r *Runner) VolumeUsage(ctx context.Context, nodeName, volumeID string) (in
 	return bytes, nil
 }
 
-func (r *Runner) runForResult(ctx context.Context, nodeName, volumeID string, command []string) (string, error) {
+func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string) (string, error) {
 	if nodeName == "" {
 		return "", fmt.Errorf("node name is required")
 	}
-	poolRoot, err := r.poolRoot(ctx, nodeName)
-	if err != nil {
-		return "", err
-	}
-	return r.runForResultAtPath(ctx, nodeName, volumeID, poolRoot, command)
-}
-
-func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string) (string, error) {
 	if !filepath.IsAbs(poolRoot) {
 		return "", fmt.Errorf("pool root must be absolute")
 	}

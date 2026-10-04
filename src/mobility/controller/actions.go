@@ -273,16 +273,13 @@ func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volume
 		return err
 	}
 	for _, candidate := range pools {
-		if candidate.NodeName == move.Status.DestinationNode {
+		if candidate.NodeName == move.Status.DestinationNode && candidate.UID == move.Status.DestinationPoolUID {
 			pool = candidate
 			break
 		}
 	}
 	if pool.Name == "" || pool.UID == "" {
-		return fmt.Errorf("destination Pool identity is missing")
-	}
-	if pool.UID != move.Status.DestinationPoolUID {
-		return fmt.Errorf("destination Pool identity changed")
+		return fmt.Errorf("destination Pool identity changed or is missing")
 	}
 	incoming, destination := volumeapi.MoveTransactionCopies(move.UID, move.Spec.VolumeID, volumeapi.MoveDestinationAnchor{
 		InstallationID: move.Status.SourceCopy.InstallationID, PoolName: pool.Name, PoolUID: pool.UID,

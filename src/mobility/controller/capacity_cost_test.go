@@ -10,6 +10,7 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 type measuredCapacityProbe struct {
@@ -24,13 +25,21 @@ func (p measuredCapacityProbe) StatFS(context.Context, string) (poolcapacity.Fil
 	return p.stat()
 }
 
+func (p measuredCapacityProbe) StatFSForPool(context.Context, volumeapi.Pool) (poolcapacity.Filesystem, error) {
+	return p.stat()
+}
+
+func (p measuredCapacityProbe) VolumeUsageForCopy(ctx context.Context, _ volume.CopyIdentity) (int64, error) {
+	return p.usage(ctx)
+}
+
 func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *testing.T) {
 	r, repo, move := capacityCostFixture()
 	r.CapacityProbe = measuredCapacityProbe{
 		usage: func(ctx context.Context) (int64, error) {
 			acquired := make(chan func())
 			go func() {
-				unlock := r.PoolLocks.Lock("destination")
+				unlock := r.PoolLocks.Lock("destination-uid")
 				select {
 				case acquired <- unlock:
 				case <-ctx.Done():

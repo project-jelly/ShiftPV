@@ -11,6 +11,7 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 type fakeMoveCapacityProbe struct {
@@ -24,6 +25,14 @@ func (f fakeMoveCapacityProbe) StatFS(context.Context, string) (poolcapacity.Fil
 
 func (f fakeMoveCapacityProbe) VolumeUsage(context.Context, string, string) (int64, error) {
 	return f.usage, nil
+}
+
+func (f fakeMoveCapacityProbe) StatFSForPool(ctx context.Context, pool volumeapi.Pool) (poolcapacity.Filesystem, error) {
+	return f.StatFS(ctx, pool.NodeName)
+}
+
+func (f fakeMoveCapacityProbe) VolumeUsageForCopy(ctx context.Context, copy volume.CopyIdentity) (int64, error) {
+	return f.VolumeUsage(ctx, copy.NodeName, copy.VolumeID)
 }
 
 func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
@@ -107,7 +116,7 @@ func TestDestinationCapacityRetainsRecoveredMoveUntilSettled(t *testing.T) {
 	recovered := volumeapi.Move{
 		Name: "move-recovered", Spec: volumeapi.MoveSpec{VolumeID: recoveredID, SourceNode: "source"},
 		Status: volumeapi.MoveStatus{
-			Phase: "Blocked", DestinationNode: "destination", CapacityApproved: true,
+			Phase: "Blocked", DestinationNode: "destination", DestinationPoolUID: "destination-uid", CapacityApproved: true,
 			SourceBytes: 32 << 20, RecoveryPhase: "Recovered",
 		},
 	}
@@ -117,11 +126,13 @@ func TestDestinationCapacityRetainsRecoveredMoveUntilSettled(t *testing.T) {
 			recoveredID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: recovered.Name, CapacityBytes: 32 << 20},
 		},
 		pools: []volumeapi.Pool{
-			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
-			{Name: "destination", NodeName: "destination", MountPath: "/destination", CapacityLimit: "64Mi"},
+			{Name: "source", UID: "source-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
+			{Name: "destination", UID: "destination-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: "64Mi"},
 		},
 		moves: []volumeapi.Move{current, recovered},
 	}
+	sourceState, _ := repository.Get(context.Background(), recoveredID)
+	repository.moves[1].Status.SourceCopy = sourceState.CurrentCopy
 	client := fake.NewSimpleClientset()
 	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system"}
 	requested, logicalReserved, physicalPending, limit, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
@@ -147,8 +158,8 @@ func TestDestinationCapacityIgnoresMoveAfterVolumeAndReservationDeletion(t *test
 			currentID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name, CapacityBytes: 32 << 20},
 		},
 		pools: []volumeapi.Pool{
-			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
-			{Name: "destination", NodeName: "destination", MountPath: "/destination", CapacityLimit: "64Mi"},
+			{Name: "source", UID: "source-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
+			{Name: "destination", UID: "destination-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: "64Mi"},
 		},
 		moves: []volumeapi.Move{current, deleted},
 	}
@@ -178,8 +189,8 @@ func TestDestinationCapacityRejectsMoveWithReservationButNoVolume(t *testing.T) 
 			currentID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: current.Name, CapacityBytes: 8 << 20},
 		},
 		pools: []volumeapi.Pool{
-			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
-			{Name: "destination", NodeName: "destination", MountPath: "/destination", CapacityLimit: "64Mi"},
+			{Name: "source", UID: "source-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
+			{Name: "destination", UID: "destination-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: "64Mi"},
 		},
 		moves: []volumeapi.Move{current, incomplete},
 	}
@@ -212,8 +223,13 @@ func TestDestinationCapacityRejectsPhysicalPendingOverflow(t *testing.T) {
 			firstID:   {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: first.Name, CapacityBytes: 1},
 			secondID:  {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: second.Name, CapacityBytes: 1},
 		},
-		pools: []volumeapi.Pool{{Name: "destination", NodeName: "destination", CapacityLimit: "1Ti"}},
+		pools: []volumeapi.Pool{{Name: "destination", UID: "destination-uid", NodeName: "destination", CapacityLimit: "1Ti"}, {Name: "source", UID: "source-uid", NodeName: "source"}},
 		moves: []volumeapi.Move{current, first, second},
+	}
+	for i := 1; i < len(repository.moves); i++ {
+		state, _ := repository.Get(context.Background(), repository.moves[i].Spec.VolumeID)
+		repository.moves[i].Status.SourceCopy = state.CurrentCopy
+		repository.moves[i].Status.DestinationPoolUID = "destination-uid"
 	}
 	reconciler := &Reconciler{Repository: repository}
 	_, _, _, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[0])
@@ -230,7 +246,7 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 			volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CapacityBytes: 32 << 20},
 		},
 		pools: []volumeapi.Pool{
-			{Name: "source", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
+			{Name: "source", UID: "source-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "64Mi"},
 			{Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination"},
 		},
 		moves: []volumeapi.Move{move},

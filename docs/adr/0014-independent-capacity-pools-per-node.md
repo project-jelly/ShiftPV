@@ -59,3 +59,15 @@ StorageClass의 동작은 유지한다. 다중 Pool을 실제로 열기 전에�
 헬퍼·publication 경로, Move recovery, topology, 용량 독립성 거부 검사를 함께
 검증해야 한다. 이 결정은 replication, HA, RWX 또는 그룹 간 자동 이동을 추가하지
 않는다.
+
+## Implementation progress
+
+Pool group 선택, 정확한 copy identity 기반 생성·게시 경로, Pool UID 기준 용량
+예약을 단계적으로 연결한다. Move의 source usage, destination admission, 복사·승격
+helper, scanner publication proof와 recovery도 정확한 Pool incarnation을 따른다.
+생성과 이동은 같은 Pool UID lock으로 예약과 durable intent를 함께 기록한다.
+승인된 Move는 재시도에서 다른 Pool로 바뀌지 않는다.
+
+현재 다중 Pool 등록 제한은 유지한다. 독립 용량 검증과 Pool별 metrics를 연결하고
+실제 다중 Pool E2E를 통과한 뒤 등록 제한을 해제한다. 서로 다른 그룹 또는 같은
+node 안의 수동 이동은 이 단계의 구현 범위에 포함되지 않는다.

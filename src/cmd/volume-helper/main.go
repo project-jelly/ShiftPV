@@ -94,7 +94,7 @@ func runServeSource(arguments []string) error {
 // helperPoolReadinessFlag registers the probe staleness budget a node-bound
 // helper judges Pool readiness with. Only the cleanup helper consumes it today,
 // through the move source publication proof in helperauth; every other
-// subcommand rechecks authority through PoolForNode and accepts the flag only
+// subcommand rechecks authority through PoolForIdentity and accepts the flag only
 // so a controller may forward it without version-skewing the CLI. The name and
 // default are shared with the controller so parent and child agree.
 func helperPoolReadinessFlag(flags *flag.FlagSet, staleAfter *time.Duration) {
@@ -107,7 +107,7 @@ type moveOptions struct {
 	sourceService, passwordFile, root string
 	// poolReadinessStaleAfter is accepted for forward compatibility. No move
 	// subcommand judges probe freshness today: each rechecks authority through
-	// PoolForNode, which never consults the budget.
+	// PoolForIdentity, which never consults the budget.
 	poolReadinessStaleAfter time.Duration
 }
 
@@ -349,7 +349,7 @@ func runCreate(arguments []string) error {
 		if installationID != identity.InstallationID {
 			return fmt.Errorf("installation authority changed: %w", volumeapi.ErrStateConflict)
 		}
-		pool, err := registry.PoolForNode(checkCtx, identity.NodeName)
+		pool, err := registry.PoolForIdentity(checkCtx, identity.PoolName, identity.PoolUID, identity.NodeName)
 		if err != nil {
 			return fmt.Errorf("read Pool: %w", err)
 		}

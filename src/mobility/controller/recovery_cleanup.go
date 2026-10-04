@@ -108,7 +108,8 @@ func (r *Reconciler) settleDestinationCleanup(ctx context.Context, move *volumea
 	}
 	// The read failure and the ordinary not-yet-published wait are separate
 	// facts. Only the first one carries a cause, so only the first one wraps.
-	destinationPool, err := r.Repository.ReadyPoolForNode(ctx, move.Status.DestinationNode)
+	copy := move.Status.DestinationCopy
+	destinationPool, err := r.Repository.ReadyPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return false, fmt.Errorf("waiting for exact destination scanner publication before source cleanup: %w", err)
 	}
@@ -166,7 +167,7 @@ func rollbackDestinationPool(move volumeapi.Move, pools []volumeapi.Pool) (*volu
 	var destination *volumeapi.Pool
 	for index := range pools {
 		pool := &pools[index]
-		if pool.NodeName != move.Status.DestinationNode {
+		if pool.NodeName != move.Status.DestinationNode || pool.UID != move.Status.DestinationPoolUID {
 			continue
 		}
 		if destination != nil {
