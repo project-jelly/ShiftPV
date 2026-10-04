@@ -48,6 +48,8 @@ func TestCreateCopyRunsIdentityAwareHelper(t *testing.T) {
 	client, created := clientWithPodPhase(t, corev1.PodSucceeded, "")
 	runner := validRunner(client)
 	runner.ServiceAccountName = "shiftpv-controller"
+	runner.Pools = fakePoolResolver{pool: volumeapi.Pool{Name: "pool-a", UID: "pool-uid", NodeName: "worker-a", MountPath: "/mnt/shiftpv-a"},
+		nodeErr: errors.New("node has multiple Pools")}
 	identity := volume.CopyIdentity{
 		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
 		VolumeID: testVolumeID, VolumeUID: "volume-uid", CopyID: "copy-id",
@@ -58,6 +60,9 @@ func TestCreateCopyRunsIdentityAwareHelper(t *testing.T) {
 	}
 	if created.pod.Spec.ServiceAccountName != "shiftpv-controller" {
 		t.Fatalf("serviceAccountName=%q", created.pod.Spec.ServiceAccountName)
+	}
+	if got := created.pod.Spec.Volumes[0].HostPath.Path; got != "/mnt/shiftpv-a" {
+		t.Fatalf("creation Pool path = %q", got)
 	}
 	command := created.pod.Spec.Containers[0].Command
 	joined := strings.Join(command, "\x00")

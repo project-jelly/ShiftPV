@@ -30,7 +30,7 @@ type (
 )
 
 type PoolRegistry interface {
-	PoolForNode(context.Context, string) (volumeapi.Pool, error)
+	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 }
 
 type Service struct {
@@ -85,7 +85,7 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	if copy.NodeName != s.NodeName || copy.Role != volume.RoleServing {
 		return nil, status.Error(codes.FailedPrecondition, "serving copy identity does not match this node")
 	}
-	pool, poolRoot, err := s.poolRoot(ctx)
+	pool, poolRoot, err := s.poolRoot(ctx, copy)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "resolve node pool: %v", err)
 	}
@@ -180,7 +180,7 @@ func (s *Service) unpublishTarget(ctx context.Context, volumeID string) (unpubli
 		return unpublishTarget{}, false, nil
 	}
 	copy := *state.CurrentCopy
-	pool, poolRoot, err := s.poolRoot(ctx)
+	pool, poolRoot, err := s.poolRoot(ctx, copy)
 	if err != nil {
 		if publication.PoolIdentityUnavailable(err) {
 			return unpublishTarget{}, false, nil
@@ -255,8 +255,11 @@ func (s *Service) lockPublication(volumeID string) func() {
 	return func() { _ = s.publicationLocks.UnlockKey(volumeID) }
 }
 
-func (s *Service) poolRoot(ctx context.Context) (volumeapi.Pool, string, error) {
-	pool, err := s.Pools.PoolForNode(ctx, s.NodeName)
+func (s *Service) poolRoot(ctx context.Context, copy volume.CopyIdentity) (volumeapi.Pool, string, error) {
+	if copy.NodeName != s.NodeName {
+		return volumeapi.Pool{}, "", fmt.Errorf("copy node does not match this node: %w", volumeapi.ErrStateConflict)
+	}
+	pool, err := s.Pools.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return volumeapi.Pool{}, "", err
 	}

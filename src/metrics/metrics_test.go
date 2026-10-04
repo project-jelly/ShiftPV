@@ -254,6 +254,26 @@ func TestNodeSnapshotAndDiscovery(t *testing.T) {
 	contains(t, output(t, empty), "shiftpv_metrics_snapshot_last_success_timestamp_seconds{source=\"filesystem\"} 0")
 }
 
+func TestNodeFilesystemSnapshotIncludesEveryPool(t *testing.T) {
+	e := New("filesystem")
+	observations := []readiness.Observation{
+		{Pool: volumeapi.Pool{Name: "pool-a", NodeName: "node"}, Result: readiness.Result{
+			CapacityReadable: readiness.Check{OK: true}, Filesystem: capacity.Filesystem{AvailableBytes: 10},
+		}},
+		{Pool: volumeapi.Pool{Name: "pool-b", NodeName: "node"}, Result: readiness.Result{
+			CapacityReadable: readiness.Check{OK: true}, Filesystem: capacity.Filesystem{AvailableBytes: 20},
+		}},
+	}
+	e.ObservePools(observations, nil)
+	contains(t, output(t, e),
+		"shiftpv_pool_filesystem_available_bytes{node=\"node\",pool=\"pool-a\"} 10",
+		"shiftpv_pool_filesystem_available_bytes{node=\"node\",pool=\"pool-b\"} 20")
+	e.ObservePools(observations[:1], nil)
+	if strings.Contains(output(t, e), "pool=\"pool-b\"") {
+		t.Fatal("removed Pool retained in filesystem snapshot")
+	}
+}
+
 func TestCSIInterceptor(t *testing.T) {
 	e := New()
 	wantErr := status.Error(codes.ResourceExhausted, "private-volume-name")

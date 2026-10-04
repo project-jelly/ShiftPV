@@ -43,8 +43,8 @@ type VolumeRegistry interface {
 	ReconcilePublished(context.Context, string, string, volume.CopyIdentity, bool) error
 }
 
-// PoolResolver returns the registered node Pool and its host-visible root.
-type PoolResolver func(context.Context) (volumeapi.Pool, string, error)
+// PoolResolver returns the exact Pool named by a copy and its host-visible root.
+type PoolResolver func(context.Context, volume.CopyIdentity) (volumeapi.Pool, string, error)
 
 // Publisher runs publish and unpublish effects for one node.
 type Publisher struct {
@@ -78,7 +78,7 @@ type UnpublishRequest struct {
 // under the storage lock.
 func (p Publisher) Publish(ctx context.Context, req PublishRequest) error {
 	return ownership.WithLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, func(store *ownership.Store) error {
-		freshPool, freshPoolRoot, poolErr := p.Pools(ctx)
+		freshPool, freshPoolRoot, poolErr := p.Pools(ctx, req.Copy)
 		if poolErr != nil {
 			return fmt.Errorf("refresh node pool before publish: %w", poolErr)
 		}
@@ -116,7 +116,7 @@ func (p Publisher) Unpublish(ctx context.Context, req UnpublishRequest) (bool, e
 	enteredLock := false
 	err := ownership.WithLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, func(*ownership.Store) error {
 		enteredLock = true
-		freshPool, freshPoolRoot, poolErr := p.Pools(ctx)
+		freshPool, freshPoolRoot, poolErr := p.Pools(ctx, req.Copy)
 		if poolErr != nil {
 			if PoolIdentityUnavailable(poolErr) {
 				return ErrIdentityUnavailable

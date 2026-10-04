@@ -20,21 +20,44 @@ func (f fakeInspector) Inspect(volumeapi.Pool) Result { return f.result }
 
 type fakeRepository struct {
 	pool       volumeapi.Pool
+	pools      []volumeapi.Pool
 	currentUID string
 	err        error
 	status     volumeapi.PoolStatus
+	statuses   map[string]volumeapi.PoolStatus
 	statusSets int
 }
 
-func (f *fakeRepository) PoolForNodeLifecycle(context.Context, string) (volumeapi.Pool, error) {
-	return f.pool, f.err
+func (f *fakeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
+	if errors.Is(f.err, volumeapi.ErrPoolNotFound) {
+		return nil, nil
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.pools != nil {
+		return f.pools, nil
+	}
+	return []volumeapi.Pool{f.pool}, nil
 }
 
 func (f *fakeRepository) SetPoolStatus(_ context.Context, name, uid, node string, status volumeapi.PoolStatus) error {
-	if name != f.pool.Name || uid != f.pool.UID || node != f.pool.NodeName || f.currentUID != "" && uid != f.currentUID {
+	pools := f.pools
+	if pools == nil {
+		pools = []volumeapi.Pool{f.pool}
+	}
+	valid := false
+	for _, pool := range pools {
+		valid = valid || name == pool.Name && uid == pool.UID && node == pool.NodeName
+	}
+	if !valid || f.currentUID != "" && uid != f.currentUID {
 		return errors.New("identity mismatch")
 	}
 	f.status = status
+	if f.statuses == nil {
+		f.statuses = map[string]volumeapi.PoolStatus{}
+	}
+	f.statuses[name] = status
 	f.statusSets++
 	return nil
 }
@@ -117,6 +140,45 @@ func TestReconcileRequiredMountPointKeepsAnchorAndInvalidatesInventory(t *testin
 		repository.status.MountIdentity == nil || *repository.status.MountIdentity != *identity ||
 		repository.status.Inventory == nil || repository.status.Inventory.Valid || scans != 2 {
 		t.Fatalf("unmounted status = %#v, scans=%d", repository.status, scans)
+	}
+}
+
+func TestReconcileObservesEveryRegistrationOnNode(t *testing.T) {
+	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
+	repository := &fakeRepository{pools: []volumeapi.Pool{
+		{Name: "pool-a", UID: "uid-a", NodeName: "node-a", MountPath: "/pool-a", Generation: 1},
+		{Name: "pool-b", UID: "uid-b", NodeName: "node-a", MountPath: "/pool-b", Generation: 1},
+		{Name: "pool-c", UID: "uid-c", NodeName: "node-b", MountPath: "/pool-c", Generation: 1},
+	}}
+	observed := map[string]bool{}
+	scanned := map[string]bool{}
+	reconciler := &Reconciler{
+		NodeName: "node-a", Pools: repository, Interval: time.Minute,
+		Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		Now:       func() time.Time { return testTime },
+		Inventory: func(_ context.Context, pool volumeapi.Pool, _ time.Time) volumeapi.PoolInventory {
+			scanned[pool.Name] = true
+			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true}
+		},
+		Observe: func(pool volumeapi.Pool, _ Result, err error) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed[pool.Name] = true
+		},
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repository.statusSets != 2 || len(scanned) != 2 || len(observed) != 2 ||
+		!scanned["pool-a"] || !scanned["pool-b"] || !observed["pool-a"] || !observed["pool-b"] {
+		t.Fatalf("status sets=%d scans=%v observations=%v", repository.statusSets, scanned, observed)
+	}
+	for _, name := range []string{"pool-a", "pool-b"} {
+		ready := meta.FindStatusCondition(repository.statuses[name].Conditions, volumeapi.PoolConditionReady)
+		if ready == nil || ready.Status != metav1.ConditionTrue {
+			t.Fatalf("%s readiness = %#v", name, ready)
+		}
 	}
 }
 

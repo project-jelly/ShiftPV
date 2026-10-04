@@ -25,8 +25,8 @@ func (i *blockedInspector) Inspect(volumeapi.Pool) readiness.Result {
 
 type localPool struct{}
 
-func (localPool) PoolForNodeLifecycle(context.Context, string) (volumeapi.Pool, error) {
-	return volumeapi.Pool{Name: "pool", UID: "pool-uid", NodeName: "node"}, nil
+func (localPool) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
+	return []volumeapi.Pool{{Name: "pool", UID: "pool-uid", NodeName: "node"}}, nil
 }
 func (localPool) SetPoolStatus(context.Context, string, string, string, volumeapi.PoolStatus) error {
 	return nil
@@ -35,7 +35,7 @@ func (localPool) SetPoolStatus(context.Context, string, string, string, volumeap
 func TestBlockedProbeDoesNotBlockScrapeOrSpawnProbes(t *testing.T) {
 	e := New("filesystem")
 	inspector := &blockedInspector{entered: make(chan struct{}), release: make(chan struct{})}
-	r := &readiness.Reconciler{NodeName: "node", Pools: localPool{}, Inspector: inspector, Interval: time.Millisecond, Observe: e.ObservePool}
+	r := &readiness.Reconciler{NodeName: "node", Pools: localPool{}, Inspector: inspector, Interval: time.Millisecond, ObserveAll: e.ObservePools}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()

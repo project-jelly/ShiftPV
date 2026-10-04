@@ -37,13 +37,23 @@ func TestNodePoolRootRejectsUnmountedRequiredMountPoint(t *testing.T) {
 			Device: "8:2", Root: "/", Source: "/dev/disk-a", Filesystem: "ext4",
 		}}}
 	service := &Service{NodeName: "node-a", HostRoot: hostRoot, Pools: fakePoolRegistry{pool: pool}}
-	if _, _, err := service.poolRoot(context.Background()); err == nil {
+	if _, _, err := service.poolRoot(context.Background(), volume.CopyIdentity{NodeName: "node-a", PoolName: "pool-a", PoolUID: "pool-a-uid"}); err == nil {
 		t.Fatal("unmounted Pool path was accepted for publication")
 	}
 }
 
-func (f fakePoolRegistry) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+func (f fakePoolRegistry) PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error) {
 	return f.pool, f.err
+}
+
+type poolsByIdentity map[string]volumeapi.Pool
+
+func (p poolsByIdentity) PoolForIdentity(_ context.Context, name, uid, node string) (volumeapi.Pool, error) {
+	pool, found := p[name]
+	if !found || pool.UID != uid || pool.NodeName != node {
+		return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
+	}
+	return pool, nil
 }
 
 type sequencedPoolRegistry struct {
@@ -51,7 +61,7 @@ type sequencedPoolRegistry struct {
 	calls atomic.Int32
 }
 
-func (f *sequencedPoolRegistry) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
+func (f *sequencedPoolRegistry) PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error) {
 	call := int(f.calls.Add(1)) - 1
 	if call >= len(f.pools) {
 		call = len(f.pools) - 1
@@ -180,6 +190,25 @@ func TestNodePublishUsesRegisteredNodeMountPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := filepath.Join(service.HostRoot, "srv", "storage-a", "volumes", validPublishRequest().VolumeId)
+	if binder.publishedSource != want {
+		t.Fatalf("published source = %q, want %q", binder.publishedSource, want)
+	}
+}
+
+func TestNodePublishResolvesExactPoolWithTwoRegistrationsOnNode(t *testing.T) {
+	binder := &fakeBinder{}
+	service := configuredService(t, binder)
+	copy := *service.Volumes.(*fakeVolumeRegistry).state.CurrentCopy
+	poolA := volumeapi.Pool{Name: copy.PoolName, UID: copy.PoolUID, NodeName: copy.NodeName, MountPath: "/pool"}
+	poolB := volumeapi.Pool{Name: "pool-b", UID: "pool-b-uid", NodeName: copy.NodeName, MountPath: "/pool-b"}
+	service.Pools = poolsByIdentity{poolA.Name: poolA, poolB.Name: poolB}
+	if err := os.Mkdir(filepath.Join(service.HostRoot, "pool-b"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.NodePublishVolume(context.Background(), validPublishRequest()); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(service.HostRoot, "pool", "volumes", copy.VolumeID)
 	if binder.publishedSource != want {
 		t.Fatalf("published source = %q, want %q", binder.publishedSource, want)
 	}
