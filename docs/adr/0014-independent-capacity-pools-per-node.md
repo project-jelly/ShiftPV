@@ -60,7 +60,7 @@ StorageClass의 동작은 유지한다. 다중 Pool을 실제로 열기 전에�
 검증해야 한다. 이 결정은 replication, HA, RWX 또는 그룹 간 자동 이동을 추가하지
 않는다.
 
-## Implementation progress
+### Implementation progress
 
 Pool group 선택, 정확한 copy identity 기반 생성·게시 경로, Pool UID 기준 용량
 예약을 단계적으로 연결한다. Move의 source usage, destination admission, 복사·승격
