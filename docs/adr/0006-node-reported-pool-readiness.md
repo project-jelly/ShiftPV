@@ -33,7 +33,11 @@ Node Plugin은 자기 Pool의 generation, 삭제 요청, identity release 승인
 | `Accessible` | 기존 directory에 접근 가능 |
 | `Writable` | 임시 쓰기, sync, 정리 성공 |
 | `CapacityReadable` | filesystem capacity 조회 성공 |
-| `Ready` | 위 세 Condition과 current generation, freshness 충족 |
+| `Mounted` | [0013](0013-opt-in-pool-mount-identity.md)의 opt-in Pool에서 mount point와 기록된 identity 확인 |
+| `Ready` | 해당 Pool에 필요한 Condition과 current generation, freshness 충족 |
+
+`Mounted`는 `spec.mountPolicy: RequireMountPoint`인 Pool에만 필요하다. 일반 directory
+Pool은 기존 세 검사로 Ready를 판정한다.
 
 Inventory completeness는 별도 Condition이 아니라 `status.inventory.valid`, `truncated`, `message`로
 판정한다. Rsync metadata compatibility는 Node readiness가 아니라 배포 전 filesystem acceptance

@@ -23,6 +23,7 @@ type Pool struct {
 	UID                     string
 	NodeName                string
 	MountPath               string
+	MountPolicy             string
 	CapacityLimit           string
 	Generation              int64
 	DeletionTimestamp       *metav1.Time
@@ -34,8 +35,18 @@ type Pool struct {
 type PoolStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	LastProbeTime      metav1.Time        `json:"lastProbeTime,omitempty"`
+	MountIdentity      *PoolMountIdentity `json:"mountIdentity,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 	Inventory          *PoolInventory     `json:"inventory,omitempty"`
+}
+
+// PoolMountIdentity anchors an opted-in Pool to the mounted filesystem first
+// observed at its path. A changed source must not silently become this Pool.
+type PoolMountIdentity struct {
+	Device     string `json:"device"`
+	Root       string `json:"root"`
+	Source     string `json:"source"`
+	Filesystem string `json:"filesystem"`
 }
 
 type PoolInventory struct {
@@ -70,8 +81,9 @@ func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
 	}
 	nodes := make(map[string]struct{}, len(pools))
 	for _, pool := range pools {
-		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" {
-			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName or mountPath", ErrPoolConfiguration, pool.Name)
+		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" ||
+			(pool.MountPolicy != "" && pool.MountPolicy != PoolMountPolicyRequireMountPoint) {
+			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName, mountPath, or mountPolicy", ErrPoolConfiguration, pool.Name)
 		}
 		if _, duplicate := nodes[pool.NodeName]; duplicate {
 			return nil, duplicatePoolError(pool.NodeName)
@@ -441,6 +453,21 @@ func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 	if p.Status.LastProbeTime.IsZero() || staleAfter <= 0 || now.Sub(p.Status.LastProbeTime.Time) > staleAfter || now.Before(p.Status.LastProbeTime.Time) {
 		return false, "ProbeStale"
 	}
+	if p.MountPolicy == PoolMountPolicyRequireMountPoint {
+		if p.Status.MountIdentity == nil {
+			return false, "MountIdentityMissing"
+		}
+		mounted := meta.FindStatusCondition(p.Status.Conditions, PoolConditionMounted)
+		if mounted != nil && mounted.ObservedGeneration != p.Generation {
+			return false, "MountProbeOutdated"
+		}
+		if mounted == nil || mounted.Status != metav1.ConditionTrue {
+			if mounted != nil && mounted.Reason != "" {
+				return false, mounted.Reason
+			}
+			return false, "MountProbePending"
+		}
+	}
 	return true, condition.Reason
 }
 
@@ -451,10 +478,17 @@ func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, str
 	if p.DeletionTimestamp == nil {
 		return p.ReadyAt(now, staleAfter)
 	}
+	if p.MountPolicy == PoolMountPolicyRequireMountPoint && p.Status.MountIdentity == nil {
+		return false, "MountIdentityMissing"
+	}
 	if p.Status.ObservedGeneration != p.Generation {
 		return false, "ProbeOutdated"
 	}
-	for _, conditionType := range []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable} {
+	conditionTypes := []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable}
+	if p.MountPolicy == PoolMountPolicyRequireMountPoint {
+		conditionTypes = append(conditionTypes, PoolConditionMounted)
+	}
+	for _, conditionType := range conditionTypes {
 		condition := meta.FindStatusCondition(p.Status.Conditions, conditionType)
 		if condition == nil {
 			return false, "ProbePending"
@@ -486,9 +520,10 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 	}
 	nodeName, _, _ := unstructured.NestedString(object.Object, "spec", "nodeName")
 	mountPath, _, _ := unstructured.NestedString(object.Object, "spec", "mountPath")
+	mountPolicy, _, _ := unstructured.NestedString(object.Object, "spec", "mountPolicy")
 	capacityLimit, _, _ := unstructured.NestedString(object.Object, "spec", "capacity", "limit")
 	return Pool{
-		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, MountPath: filepath.Clean(mountPath),
+		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy,
 		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), DeletionTimestamp: object.GetDeletionTimestamp(),
 		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation], Status: status,
 	}, nil

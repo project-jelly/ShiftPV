@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 
+	mountutils "k8s.io/mount-utils"
+
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
@@ -22,9 +24,11 @@ type Check struct {
 
 type Result struct {
 	Accessible       Check
+	Mounted          Check
 	Writable         Check
 	CapacityReadable Check
 	Filesystem       poolcapacity.Filesystem
+	MountIdentity    *volumeapi.PoolMountIdentity
 }
 
 type Inspector interface {
@@ -32,10 +36,11 @@ type Inspector interface {
 }
 
 type Probe struct {
-	HostRoot string
-	inspect  func(string) error
-	write    func(string) error
-	statFS   func(string) (poolcapacity.Filesystem, error)
+	HostRoot   string
+	inspect    func(string) error
+	write      func(string) error
+	statFS     func(string) (poolcapacity.Filesystem, error)
+	listMounts func() ([]mountutils.MountInfo, error)
 }
 
 func NewProbe(hostRoot string) *Probe {
@@ -43,6 +48,9 @@ func NewProbe(hostRoot string) *Probe {
 		HostRoot: hostRoot,
 		inspect:  inspectDirectory,
 		write:    writeProbe,
+		listMounts: func() ([]mountutils.MountInfo, error) {
+			return mountutils.ParseMountInfo("/proc/self/mountinfo")
+		},
 		statFS: func(path string) (poolcapacity.Filesystem, error) {
 			var stat syscall.Statfs_t
 			if err := syscall.Statfs(path, &stat); err != nil {
@@ -54,6 +62,9 @@ func NewProbe(hostRoot string) *Probe {
 }
 
 func (p *Probe) Inspect(pool volumeapi.Pool) Result {
+	if pool.MountPolicy != "" && pool.MountPolicy != volumeapi.PoolMountPolicyRequireMountPoint {
+		return Result{Accessible: Check{Known: true, Reason: "MountPolicyInvalid", Message: "unsupported Pool mount policy"}}
+	}
 	path, err := hostPath(p.HostRoot, pool.MountPath)
 	if err != nil {
 		failed := failure(err)
@@ -65,6 +76,15 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 	}
 	result := Result{
 		Accessible: Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: fmt.Sprintf("%s is an accessible directory", pool.MountPath)},
+	}
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint {
+		identity, check := p.inspectMount(path, pool.Status.MountIdentity)
+		result.Mounted = check
+		if !check.OK {
+			result.Writable, result.CapacityReadable = skipped(), skipped()
+			return result
+		}
+		result.MountIdentity = &identity
 	}
 	if err := p.write(path); err != nil {
 		result.Writable = failure(err)
@@ -78,7 +98,89 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 		result.Filesystem = stats
 		result.CapacityReadable = Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "filesystem capacity is readable"}
 	}
+	if result.MountIdentity != nil {
+		// Detect a mount replaced during the write and statfs probes before
+		// publishing a successful readiness observation.
+		_, check := p.inspectMount(path, result.MountIdentity)
+		if !check.OK {
+			result.Mounted = check
+		}
+	}
 	return result
+}
+
+func (p *Probe) inspectMount(path string, expected *volumeapi.PoolMountIdentity) (volumeapi.PoolMountIdentity, Check) {
+	if p.listMounts == nil {
+		return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountInspectionFailed", Message: "mount table reader is unavailable"}
+	}
+	mounts, err := p.listMounts()
+	if err != nil {
+		return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountInspectionFailed", Message: err.Error()}
+	}
+	var target *mountutils.MountInfo
+	var parent *mountutils.MountInfo
+	for i := range mounts {
+		entry := &mounts[i]
+		point := unescapeMountPath(entry.MountPoint)
+		if point == path {
+			if target != nil {
+				return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountAmbiguous", Message: "multiple mounts occupy the Pool path"}
+			}
+			target = entry
+		} else if strings.HasPrefix(path, strings.TrimSuffix(point, "/")+"/") &&
+			(parent == nil || len(point) > len(unescapeMountPath(parent.MountPoint))) {
+			parent = entry
+		}
+	}
+	if target == nil {
+		return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountMissing", Message: "Pool path is not a mount point"}
+	}
+	if parent == nil {
+		return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountInspectionFailed", Message: "Pool parent mount is missing"}
+	}
+	if target.Root != "/" {
+		return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountNotFilesystemRoot", Message: "Pool mount is a filesystem subdirectory"}
+	}
+	if target.Major == parent.Major && target.Minor == parent.Minor {
+		return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountSharesParent", Message: "Pool mount shares the parent filesystem capacity"}
+	}
+	identity := volumeapi.PoolMountIdentity{
+		Device: fmt.Sprintf("%d:%d", target.Major, target.Minor), Root: target.Root,
+		Source: target.Source, Filesystem: target.FsType,
+	}
+	if expected != nil && identity != *expected {
+		return volumeapi.PoolMountIdentity{}, Check{Known: true, Reason: "MountIdentityChanged", Message: "mounted filesystem no longer matches the Pool's recorded identity"}
+	}
+	return identity, Check{OK: true, Known: true, Reason: "MountVerified", Message: "Pool path is the expected filesystem mount point"}
+}
+
+// VerifyMountedPath checks the live mount at a node path or helper Pod bind
+// root before an opted-in Pool performs a storage operation. It is read-only.
+func VerifyMountedPath(path string, pool volumeapi.Pool) error {
+	if pool.MountPolicy == "" {
+		return nil
+	}
+	if pool.MountPolicy != volumeapi.PoolMountPolicyRequireMountPoint {
+		return fmt.Errorf("unsupported Pool mount policy %q", pool.MountPolicy)
+	}
+	if pool.Status.MountIdentity == nil {
+		return fmt.Errorf("Pool mount identity has not been recorded")
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) == "/" {
+		return fmt.Errorf("Pool root %q must be an absolute non-root path", path)
+	}
+	if err := inspectDirectory(path); err != nil {
+		return fmt.Errorf("inspect Pool root: %w", err)
+	}
+	_, check := NewProbe("/").inspectMount(filepath.Clean(path), pool.Status.MountIdentity)
+	if !check.OK {
+		return fmt.Errorf("verify Pool mount at %q: %s: %s", path, check.Reason, check.Message)
+	}
+	return nil
+}
+
+func unescapeMountPath(path string) string {
+	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(path)
 }
 
 func inspectDirectory(path string) error {

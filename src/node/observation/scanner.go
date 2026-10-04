@@ -16,6 +16,7 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
+	"github.com/project-jelly/ShiftPV/src/pool/readiness"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -46,6 +47,9 @@ func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
 		return err
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
+	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+		return err
+	}
 	return ownership.ReleaseEmptyPool(ctx, root, ownership.PoolIdentity{InstallationID: installationID, PoolUID: pool.UID})
 }
 
@@ -71,6 +75,10 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 		return result
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
+	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+		result.Message = "MountUnavailable: " + err.Error()
+		return result
+	}
 	known := map[string]struct{}{}
 	store, err := ownership.OpenExisting(root, ownership.PoolIdentity{InstallationID: installationID, PoolUID: pool.UID})
 	if err == nil {
@@ -94,6 +102,10 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	}
 	result.Copies = append(result.Copies, unknown...)
 	result.Truncated = result.Truncated || truncated
+	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+		result.Message = "MountUnavailable: " + err.Error()
+		return result
+	}
 	if result.Message == "" {
 		result.Message = copyProblemMessage(result.Copies)
 	}

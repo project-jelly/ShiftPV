@@ -71,6 +71,55 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 	}
 }
 
+func TestReconcileRequiredMountPointKeepsAnchorAndInvalidatesInventory(t *testing.T) {
+	identity := &volumeapi.PoolMountIdentity{Device: "8:2", Root: "/", Source: "/dev/disk-a", Filesystem: "ext4"}
+	repository := &fakeRepository{pool: volumeapi.Pool{
+		Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1,
+		MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
+	}}
+	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
+	inspector := fakeInspector{Result{Accessible: ok, Mounted: ok, Writable: ok, CapacityReadable: ok, MountIdentity: identity}}
+	scans := 0
+	reconciler := &Reconciler{
+		NodeName: "node-a", Pools: repository, Inspector: inspector,
+		Interval: time.Minute, Now: func() time.Time { return testTime },
+		Inventory: func(_ context.Context, pool volumeapi.Pool, _ time.Time) volumeapi.PoolInventory {
+			if pool.Status.MountIdentity == nil || *pool.Status.MountIdentity != *identity {
+				t.Fatalf("first inventory did not receive verified mount identity: %#v", pool.Status.MountIdentity)
+			}
+			scans++
+			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Message: "InventoryInvalid"}
+		},
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repository.status.MountIdentity != nil || scans != 1 {
+		t.Fatalf("invalid inventory anchored mount: status=%#v scans=%d", repository.status, scans)
+	}
+	reconciler.Inventory = func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+		scans++
+		return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true}
+	}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repository.status.MountIdentity == nil || *repository.status.MountIdentity != *identity || scans != 2 {
+		t.Fatalf("initial status = %#v, scans=%d", repository.status, scans)
+	}
+	repository.pool.Status = repository.status
+	reconciler.Inspector = fakeInspector{Result{Accessible: ok, Mounted: Check{Known: true, Reason: "MountMissing", Message: "unmounted"}}}
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ready := meta.FindStatusCondition(repository.status.Conditions, volumeapi.PoolConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "MountMissing" ||
+		repository.status.MountIdentity == nil || *repository.status.MountIdentity != *identity ||
+		repository.status.Inventory == nil || repository.status.Inventory.Valid || scans != 2 {
+		t.Fatalf("unmounted status = %#v, scans=%d", repository.status, scans)
+	}
+}
+
 func TestReconcileRecordsFailureAndAllowsMissingRegistration(t *testing.T) {
 	repository := &fakeRepository{pool: volumeapi.Pool{Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a", Generation: 1}}
 	reconciler := &Reconciler{

@@ -72,6 +72,12 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		now = r.Now().UTC()
 	}
 	result = r.Inspector.Inspect(pool)
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.Known && result.Mounted.Reason == "" {
+		result.Mounted = skipped()
+	}
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && result.Mounted.OK && result.MountIdentity == nil {
+		result.Mounted = Check{Known: true, Reason: "MountIdentityMissing", Message: "mount probe did not return an identity"}
+	}
 	var releaseErr error
 	status := pool.Status
 	status.ObservedGeneration = pool.Generation
@@ -86,9 +92,22 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 			Known: true, Reason: "PoolDeregistering", Message: "Pool rejects new placement while deregistration converges",
 		}, pool.Generation, now))
 	}
-	if r.Inventory != nil {
-		inventory := r.Inventory(ctx, pool, now)
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.OK {
+		status.Inventory = &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "MountUnavailable: " + result.Mounted.Reason}
+	} else if r.Inventory != nil {
+		inventoryPool := pool
+		if inventoryPool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && inventoryPool.Status.MountIdentity == nil {
+			// The first scan must verify the same candidate identity observed by
+			// the probe before that identity can be durably anchored.
+			inventoryPool.Status.MountIdentity = result.MountIdentity
+		}
+		inventory := r.Inventory(ctx, inventoryPool, now)
 		status.Inventory = &inventory
+	}
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && status.MountIdentity == nil &&
+		result.Accessible.OK && result.Mounted.OK && result.Writable.OK && result.CapacityReadable.OK &&
+		status.Inventory != nil && status.Inventory.Valid && !status.Inventory.Truncated && status.Inventory.Message == "" {
+		status.MountIdentity = result.MountIdentity
 	}
 	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionIdentityReleased)
 	if pool.DeletionTimestamp != nil {
@@ -139,7 +158,15 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 	writable := condition(volumeapi.PoolConditionWritable, result.Writable, generation, now)
 	capacity := condition(volumeapi.PoolConditionCapacityReadable, result.CapacityReadable, generation, now)
 	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and capacity-readable"}
-	for _, candidate := range []Check{result.Accessible, result.Writable, result.CapacityReadable} {
+	checks := []Check{result.Accessible}
+	conditions := []metav1.Condition{accessible}
+	if result.Mounted.Reason != "" {
+		checks = append(checks, result.Mounted)
+		conditions = append(conditions, condition(volumeapi.PoolConditionMounted, result.Mounted, generation, now))
+	}
+	checks = append(checks, result.Writable, result.CapacityReadable)
+	conditions = append(conditions, writable, capacity)
+	for _, candidate := range checks {
 		if !candidate.Known || !candidate.OK {
 			readyCheck.OK = false
 			readyCheck.Reason = candidate.Reason
@@ -147,7 +174,7 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 			break
 		}
 	}
-	return []metav1.Condition{accessible, writable, capacity, condition(volumeapi.PoolConditionReady, readyCheck, generation, now)}
+	return append(conditions, condition(volumeapi.PoolConditionReady, readyCheck, generation, now))
 }
 
 func condition(conditionType string, check Check, generation int64, now time.Time) metav1.Condition {

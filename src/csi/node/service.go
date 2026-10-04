@@ -18,6 +18,7 @@ import (
 	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
 	"github.com/project-jelly/ShiftPV/src/node/publication"
+	"github.com/project-jelly/ShiftPV/src/pool/readiness"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -267,7 +268,11 @@ func (s *Service) poolRoot(ctx context.Context) (volumeapi.Pool, string, error) 
 	if !filepath.IsAbs(hostRoot) {
 		return volumeapi.Pool{}, "", fmt.Errorf("host root %q must be absolute", s.HostRoot)
 	}
-	return pool, filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator))), nil
+	root := filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator)))
+	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+		return volumeapi.Pool{}, "", err
+	}
+	return pool, root, nil
 }
 
 func validateCapability(capability *csi.VolumeCapability) error {

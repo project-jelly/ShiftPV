@@ -22,6 +22,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperauth"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
+	"github.com/project-jelly/ShiftPV/src/pool/readiness"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -72,7 +73,7 @@ func runServeSource(arguments []string) error {
 		return fmt.Errorf("source service intent identity changed: %w", volumeapi.ErrStateConflict)
 	}
 	identity := *move.Status.SourceCopy
-	authority := helperauth.SourceAuthority(client, registry, options.MoveOptions, identity)
+	authority := withMountAuthority(registry, options.root, identity, helperauth.SourceAuthority(client, registry, options.MoveOptions, identity))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := authority(ctx); err != nil {
@@ -156,7 +157,10 @@ func runMoveCopy(arguments []string) error {
 	identity := *move.Status.IncomingCopy
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	authority := helperauth.MoveAuthority(client, registry, options.MoveOptions, "copy", identity)
+	authority := withMountAuthority(registry, options.root, identity, helperauth.MoveAuthority(client, registry, options.MoveOptions, "copy", identity))
+	if err := authority(ctx); err != nil {
+		return err
+	}
 	return ownership.PopulateIncoming(ctx, options.root, identity, options.OperationID, authority, func(copyCtx context.Context, target string) error {
 		password, err := os.ReadFile(options.passwordFile)
 		if err != nil {
@@ -216,7 +220,11 @@ func runMovePromote(arguments []string) error {
 	incoming, destination := *move.Status.IncomingCopy, *move.Status.DestinationCopy
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return ownership.PromoteIncoming(ctx, options.root, incoming, destination, options.OperationID, helperauth.MoveAuthority(client, registry, options.MoveOptions, "promote", incoming))
+	authority := withMountAuthority(registry, options.root, incoming, helperauth.MoveAuthority(client, registry, options.MoveOptions, "promote", incoming))
+	if err := authority(ctx); err != nil {
+		return err
+	}
+	return ownership.PromoteIncoming(ctx, options.root, incoming, destination, options.OperationID, authority)
 }
 
 func runVerifyOwner(arguments []string) error {
@@ -246,7 +254,10 @@ func runVerifyOwner(arguments []string) error {
 	identity := *state.CurrentCopy
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	authority := helperauth.RecoveryAuthority(client, registry, options.MoveOptions, identity)
+	authority := withMountAuthority(registry, options.root, identity, helperauth.RecoveryAuthority(client, registry, options.MoveOptions, identity))
+	if err := authority(ctx); err != nil {
+		return err
+	}
 	return ownership.WithExistingLock(ctx, options.root, ownership.PoolIdentity{InstallationID: identity.InstallationID, PoolUID: identity.PoolUID}, identity.VolumeID, func(store *ownership.Store) error {
 		if err := authority(ctx); err != nil {
 			return err
@@ -272,6 +283,25 @@ func inClusterClients() (dynamic.Interface, kubernetes.Interface, error) {
 		return nil, nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
 	return dynamicClient, client, nil
+}
+
+// withMountAuthority checks the helper's bound Pool root against the node's
+// recorded mount identity. It runs before storage is opened and on each live
+// authority recheck made by the operation.
+func withMountAuthority(registry *volumeapi.Registry, root string, identity volume.CopyIdentity, authority func(context.Context) error) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if err := authority(ctx); err != nil {
+			return err
+		}
+		pool, err := registry.PoolForIdentity(ctx, identity.PoolName, identity.PoolUID, identity.NodeName)
+		if err != nil {
+			return fmt.Errorf("read Pool mount identity: %w", err)
+		}
+		if pool.Name != identity.PoolName || pool.UID != identity.PoolUID {
+			return fmt.Errorf("Pool mount authority changed: %w", volumeapi.ErrStateConflict)
+		}
+		return readiness.VerifyMountedPath(root, pool)
+	}
 }
 
 func runCreate(arguments []string) error {
@@ -337,6 +367,7 @@ func runCreate(arguments []string) error {
 		}
 		return nil
 	}
+	authority = withMountAuthority(registry, *root, identity, authority)
 	return ownership.PrepareServing(ctx, *root, identity, authority)
 }
 
@@ -397,9 +428,17 @@ func runCleanup(arguments []string) error {
 		return err
 	}
 	approved := executor.approved
-	authority := helperauth.CleanupAuthority(cleanups, registry, helperauth.CleanupOptions{
+	baseAuthority := helperauth.CleanupAuthority(cleanups, registry, helperauth.CleanupOptions{
 		Authority: options.authority, Approved: approved, JobName: executor.jobName, JobUID: executor.jobUID, Pod: executor.pod,
 	})
+	authority := func(checkCtx context.Context, effectStarted bool) error {
+		return withMountAuthority(registry, options.root, approved.Spec.Target, func(ctx context.Context) error {
+			return baseAuthority(ctx, effectStarted)
+		})(checkCtx)
+	}
+	if err := authority(ctx, false); err != nil {
+		return err
+	}
 	localReceipt, digest, err := ownership.ReclaimWithResume(ctx, options.root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
 		return err

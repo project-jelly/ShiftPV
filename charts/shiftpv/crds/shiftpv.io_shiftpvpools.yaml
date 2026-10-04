@@ -37,6 +37,9 @@ spec:
             spec:
               type: object
               required: [nodeName, mountPath, capacity]
+              x-kubernetes-validations:
+                - rule: has(self.mountPolicy) == has(oldSelf.mountPolicy)
+                  message: mountPolicy cannot be added or removed after Pool creation
               properties:
                 nodeName:
                   type: string
@@ -53,6 +56,13 @@ spec:
                       message: mountPath is immutable
                     - rule: self != '/'
                       message: mountPath must not be the filesystem root
+                mountPolicy:
+                  description: RequireMountPoint opts into a mounted filesystem identity guard. Omitted preserves ordinary directory Pools.
+                  type: string
+                  enum: [RequireMountPoint]
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: mountPolicy is immutable
                 capacity:
                   type: object
                   required: [limit]
@@ -74,6 +84,14 @@ spec:
                 lastProbeTime:
                   type: string
                   format: date-time
+                mountIdentity:
+                  type: object
+                  required: [device, root, source, filesystem]
+                  properties:
+                    device: {type: string}
+                    root: {type: string}
+                    source: {type: string}
+                    filesystem: {type: string}
                 conditions:
                   type: array
                   x-kubernetes-list-type: map

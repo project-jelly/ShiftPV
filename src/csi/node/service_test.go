@@ -27,6 +27,21 @@ type fakePoolRegistry struct {
 	err  error
 }
 
+func TestNodePoolRootRejectsUnmountedRequiredMountPoint(t *testing.T) {
+	hostRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(hostRoot, "pool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pool := volumeapi.Pool{NodeName: "node-a", MountPath: "/pool", MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
+		Status: volumeapi.PoolStatus{MountIdentity: &volumeapi.PoolMountIdentity{
+			Device: "8:2", Root: "/", Source: "/dev/disk-a", Filesystem: "ext4",
+		}}}
+	service := &Service{NodeName: "node-a", HostRoot: hostRoot, Pools: fakePoolRegistry{pool: pool}}
+	if _, _, err := service.poolRoot(context.Background()); err == nil {
+		t.Fatal("unmounted Pool path was accepted for publication")
+	}
+}
+
 func (f fakePoolRegistry) PoolForNode(context.Context, string) (volumeapi.Pool, error) {
 	return f.pool, f.err
 }

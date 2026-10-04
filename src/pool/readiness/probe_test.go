@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 
+	mountutils "k8s.io/mount-utils"
+
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
@@ -68,6 +70,69 @@ func TestNewProbeAcceptsOrdinaryDirectory(t *testing.T) {
 	entries, err := os.ReadDir(poolPath)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("probe leftovers = %v err=%v", entries, err)
+	}
+}
+
+func TestRequiredMountPointAnchorsIdentityAndSkipsWritesOnMismatch(t *testing.T) {
+	base := []mountutils.MountInfo{
+		{MountPoint: "/host", Major: 8, Minor: 1, Root: "/", Source: "/dev/root", FsType: "ext4"},
+		{MountPoint: "/host/pool", Major: 8, Minor: 2, Root: "/", Source: "/dev/disk-a", FsType: "ext4"},
+	}
+	writes, stats := 0, 0
+	mounts := append([]mountutils.MountInfo(nil), base...)
+	probe := &Probe{
+		HostRoot: "/host",
+		inspect:  func(string) error { return nil },
+		write: func(string) error {
+			writes++
+			return nil
+		},
+		statFS: func(string) (poolcapacity.Filesystem, error) {
+			stats++
+			return poolcapacity.Filesystem{}, nil
+		},
+		listMounts: func() ([]mountutils.MountInfo, error) { return mounts, nil },
+	}
+	pool := volumeapi.Pool{MountPath: "/pool", MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint}
+	first := probe.Inspect(pool)
+	if !first.Mounted.OK || first.MountIdentity == nil || first.MountIdentity.Device != "8:2" || writes != 1 || stats != 1 {
+		t.Fatalf("initial mount probe = %#v, writes=%d stats=%d", first, writes, stats)
+	}
+	pool.Status.MountIdentity = first.MountIdentity
+	mounts[1].Source = "/dev/disk-b"
+	changed := probe.Inspect(pool)
+	if changed.Mounted.Reason != "MountIdentityChanged" || writes != 1 || stats != 1 {
+		t.Fatalf("replacement mount probe = %#v, writes=%d stats=%d", changed, writes, stats)
+	}
+	mounts = mounts[:1]
+	missing := probe.Inspect(pool)
+	if missing.Mounted.Reason != "MountMissing" || writes != 1 || stats != 1 {
+		t.Fatalf("unmounted path probe = %#v, writes=%d stats=%d", missing, writes, stats)
+	}
+}
+
+func TestRequiredMountPointRejectsSharedAndSubdirectoryMounts(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		device int
+		root   string
+		reason string
+	}{
+		{name: "parent filesystem alias", device: 1, root: "/", reason: "MountSharesParent"},
+		{name: "filesystem subdirectory", device: 2, root: "/subdir", reason: "MountNotFilesystemRoot"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probe := &Probe{listMounts: func() ([]mountutils.MountInfo, error) {
+				return []mountutils.MountInfo{
+					{MountPoint: "/host", Major: 8, Minor: 1},
+					{MountPoint: "/host/pool", Major: 8, Minor: test.device, Root: test.root},
+				}, nil
+			}}
+			_, check := probe.inspectMount("/host/pool", nil)
+			if check.Reason != test.reason {
+				t.Fatalf("mount check = %#v", check)
+			}
+		})
 	}
 }
 
