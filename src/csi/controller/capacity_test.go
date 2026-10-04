@@ -230,6 +230,8 @@ func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *tes
 	for name, test := range map[string]struct {
 		change func(*corev1.PersistentVolumeClaim, *corev1.Pod)
 		size   int64
+		limit  string
+		total  int64
 	}{
 		"no Pod owner":             {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.OwnerReferences = nil }},
 		"consumer not scheduled":   {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) { pod.Spec.NodeName = "" }},
@@ -239,16 +241,28 @@ func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *tes
 			pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other"
 		}},
 		"wrong PVC identity": {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.UID = "other" }},
-		"oversized request":  {size: 129 << 20},
+		"selected node mismatch": {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) {
+			pvc.Annotations[selectedNodeAnnotation] = "worker-b"
+		}},
+		"oversized request": {size: 129 << 20},
+		"larger than filesystem after reservation denial": {size: 192 << 20, limit: "256Mi", total: 128 << 20},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pvc, pod := scheduledScratchPVC("worker-a"), scratchConsumerPod("worker-a")
 			if test.change != nil {
 				test.change(pvc, pod)
 			}
-			service := capacityService(fake.NewClientset(pvc, pod), "128Mi", map[string]volumeapi.State{
+			limit := test.limit
+			if limit == "" {
+				limit = "128Mi"
+			}
+			total := test.total
+			if total == 0 {
+				total = 1 << 30
+			}
+			service := capacityService(fake.NewClientset(pvc, pod), limit, map[string]volumeapi.State{
 				"shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {UID: "existing-uid", Phase: volumeapi.PhaseReady, OwnerNode: "worker-a", CapacityBytes: 80 << 20},
-			}, &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{TotalBytes: 1 << 30, AvailableBytes: 1 << 30}})
+			}, &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{TotalBytes: total, AvailableBytes: total}})
 			req := validCreateRequest("worker-a")
 			req.Parameters = map[string]string{PVCNameKey: "scratch", PVCNamespaceKey: "vmtest"}
 			if test.size != 0 {

@@ -79,7 +79,7 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 		logicalFree = limitBytes - reservedBytes
 	}
 	if requestedBytes > logicalFree {
-		return volumeapi.State{}, s.capacityDenied(ctx, parameters, requestName, nodeName, requestedBytes <= limitBytes,
+		return volumeapi.State{}, s.capacityDenied(ctx, parameters, requestName, nodeName, requestedBytes, limitBytes, nil,
 			"Pool %q reservation limit exceeded: requested=%d reserved=%d limit=%d",
 			pool.Name, requestedBytes, reservedBytes, limitBytes)
 	}
@@ -89,7 +89,7 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 		return volumeapi.State{}, capacityProbeError("inspect Pool filesystem capacity", err)
 	}
 	if requestedBytes > stats.AvailableBytes {
-		return volumeapi.State{}, s.capacityDenied(ctx, parameters, requestName, nodeName, stats.TotalBytes == 0 || requestedBytes <= stats.TotalBytes,
+		return volumeapi.State{}, s.capacityDenied(ctx, parameters, requestName, nodeName, requestedBytes, limitBytes, &stats,
 			"Pool %q filesystem space is insufficient: requested=%d available=%d",
 			pool.Name, requestedBytes, stats.AvailableBytes)
 	}
@@ -100,9 +100,9 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 // A Pod-owned PVC created after its consumer was assigned a node cannot: CDI
 // scratch PVCs are one example. Keep its selected node so provisioning retries
 // there when a reservation or filesystem space becomes available.
-func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, requestName, nodeName string, canFitLater bool, format string, args ...any) error {
+func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, requestName, nodeName string, requestedBytes, limitBytes int64, stats *poolcapacity.Filesystem, format string, args ...any) error {
 	message := fmt.Sprintf(format, args...)
-	if !canFitLater {
+	if requestedBytes > limitBytes {
 		return status.Error(codes.ResourceExhausted, message)
 	}
 	fixed, err := s.hasScheduledPodConsumer(ctx, parameters, requestName, nodeName)
@@ -110,6 +110,16 @@ func (s *Service) capacityDenied(ctx context.Context, parameters map[string]stri
 		return status.Errorf(codes.Unavailable, "%s; inspect PVC consumer: %v", message, err)
 	}
 	if fixed {
+		if stats == nil {
+			observed, err := s.CapacityProbe.StatFS(ctx, nodeName)
+			if err != nil {
+				return capacityProbeError("inspect Pool filesystem capacity", err)
+			}
+			stats = &observed
+		}
+		if stats.TotalBytes > 0 && requestedBytes > stats.TotalBytes {
+			return status.Error(codes.ResourceExhausted, message)
+		}
 		return status.Errorf(codes.Unavailable, "%s; scheduled consumer on node %q requires same-node retry", message, nodeName)
 	}
 	return status.Error(codes.ResourceExhausted, message)
