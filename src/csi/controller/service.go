@@ -92,7 +92,7 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		return nil, err
 	}
 
-	state, beginErr := s.beginCreate(ctx, request.id, request.name, request.nodeName, request.capacity)
+	state, beginErr := s.beginCreate(ctx, request.id, request.name, request.nodeName, request.capacity, req.GetParameters())
 	if beginErr != nil {
 		if errors.Is(beginErr, volumeapi.ErrPoolCopyConflict) {
 			return nil, status.Error(codes.FailedPrecondition, beginErr.Error())
@@ -319,12 +319,12 @@ func (s *Service) ValidateVolumeCapabilities(_ context.Context, req *csi.Validat
 	}}, nil
 }
 
-func (s *Service) beginCreate(ctx context.Context, id, requestName, nodeName string, capacity int64) (volumeapi.State, error) {
+func (s *Service) beginCreate(ctx context.Context, id, requestName, nodeName string, capacity int64, parameters map[string]string) (volumeapi.State, error) {
 	if s.CapacityPools != nil || s.CapacityProbe != nil {
 		if s.CapacityPools == nil || s.CapacityProbe == nil {
 			return volumeapi.State{}, status.Error(codes.Internal, "Pool capacity admission is incompletely configured")
 		}
-		return s.beginCreateWithinPool(ctx, id, requestName, nodeName, capacity)
+		return s.beginCreateWithinPool(ctx, id, requestName, nodeName, capacity, parameters)
 	}
 	return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, capacity)
 }
