@@ -98,8 +98,12 @@ func (r *Reconciler) observeSource(ctx context.Context, move volumeapi.Move, poo
 }
 
 func (r *Reconciler) observeCandidates(ctx context.Context, move volumeapi.Move, pools poolIndex, result *observation) error {
-	for nodeName := range pools.registered {
+	sourcePool, sourceRegistered := pools.registered[move.Spec.SourceNode]
+	for nodeName, registeredPool := range pools.registered {
 		if nodeName == move.Spec.SourceNode {
+			continue
+		}
+		if !sourceRegistered || registeredPool.PoolGroup != sourcePool.PoolGroup {
 			continue
 		}
 		readyPool, ready := pools.ready[nodeName]
@@ -160,6 +164,10 @@ func (r *Reconciler) observeDestination(ctx context.Context, move volumeapi.Move
 		(move.Status.DestinationPoolUID == "" || readyPool.UID != move.Status.DestinationPoolUID) {
 		result.FSM.DestinationBlocked = true
 		result.FSM.UnsafeReason = "DestinationPoolIdentityChanged"
+	}
+	if sourcePool, exists := pools.registered[move.Spec.SourceNode]; exists && ready && sourcePool.PoolGroup != readyPool.PoolGroup {
+		result.FSM.DestinationBlocked = true
+		result.FSM.UnsafeReason = "DestinationPoolGroupMismatch"
 	}
 	return repaired, nil
 }

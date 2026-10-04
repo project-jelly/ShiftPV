@@ -40,6 +40,8 @@ spec:
               x-kubernetes-validations:
                 - rule: has(self.mountPolicy) == has(oldSelf.mountPolicy)
                   message: mountPolicy cannot be added or removed after Pool creation
+                - rule: has(self.poolGroup) == has(oldSelf.poolGroup)
+                  message: poolGroup cannot be added or removed after Pool creation
               properties:
                 nodeName:
                   type: string
@@ -47,6 +49,15 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: nodeName is immutable
+                poolGroup:
+                  description: StorageClass selection group; omitted means default.
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: poolGroup is immutable
                 mountPath:
                   type: string
                   minLength: 2

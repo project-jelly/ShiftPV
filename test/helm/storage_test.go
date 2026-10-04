@@ -69,9 +69,28 @@ func TestDefaultStorageClassesExpressDeleteAndRetainLifecycles(t *testing.T) {
 			class.Metadata.Annotations["storageclass.kubernetes.io/is-default-class"] != want.defaultClass ||
 			class.Provisioner != "csi.shiftpv.io" ||
 			class.VolumeBindingMode != "WaitForFirstConsumer" ||
+			len(class.Parameters) != 1 ||
 			class.Parameters["shiftpv.io/capacity-enforcement"] != "none" {
 			t.Fatalf("unexpected StorageClass %q: %+v", name, class)
 		}
+	}
+}
+
+func TestAdditionalStorageClassesSelectGroupsAndReceiveLifecycleProtection(t *testing.T) {
+	output, err := render(t, "--set-json", `additionalStorageClasses=[{"create":true,"name":"shiftpv-fast","defaultClass":false,"reclaimPolicy":"Retain","poolGroup":"fast"}]`)
+	if err != nil {
+		t.Fatalf("%v: %s", err, output)
+	}
+	for _, expected := range []string{
+		"name: shiftpv-fast", `shiftpv.io/pool-group: "fast"`, "- --storage-class-name=shiftpv-fast", "- --storage-class=shiftpv-fast",
+	} {
+		if strings.Count(output, expected) != 1 {
+			t.Fatalf("expected one %q in rendered chart", expected)
+		}
+	}
+	output, err = render(t, "--set-json", `additionalStorageClasses=[{"create":true,"name":"shiftpv","defaultClass":false,"reclaimPolicy":"Delete","poolGroup":"fast"}]`)
+	if err == nil || !strings.Contains(output, "duplicated") {
+		t.Fatalf("duplicate additional class accepted: %v %s", err, output)
 	}
 }
 

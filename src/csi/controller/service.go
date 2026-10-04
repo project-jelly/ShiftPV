@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
@@ -24,6 +25,7 @@ const (
 	TopologyKey             = volume.TopologyKey
 	NodeContextKey          = "shiftpv.io/node"
 	CapacityEnforcementKey  = "shiftpv.io/capacity-enforcement"
+	PoolGroupKey            = "shiftpv.io/pool-group"
 	PVCNameKey              = "csi.storage.k8s.io/pvc/name"
 	PVCNamespaceKey         = "csi.storage.k8s.io/pvc/namespace"
 	PVNameKey               = "csi.storage.k8s.io/pv/name"
@@ -42,7 +44,9 @@ type VolumeRegistry interface {
 	Delete(context.Context, string, string) error
 	RemoveVolumeFinalizer(context.Context, string, string) error
 	PoolNodes(context.Context) ([]string, error)
+	PoolNodesForGroup(context.Context, string) ([]string, error)
 	BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error)
+	BeginCreateInPool(context.Context, string, string, string, int64, string, string) (volumeapi.State, error)
 	CompleteCreate(context.Context, string, string, volume.CopyIdentity) error
 	BeginDelete(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error)
 }
@@ -105,7 +109,7 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	if err := s.createServingCopy(ctx, request.id, state); err != nil {
 		return nil, err
 	}
-	poolNodes, poolErr := s.Volumes.PoolNodes(ctx)
+	poolNodes, poolErr := s.Volumes.PoolNodesForGroup(ctx, requestedPoolGroup(req.GetParameters()))
 	if poolErr != nil {
 		return nil, kubernetesAPIError("list volume topology", poolErr)
 	}
@@ -326,6 +330,9 @@ func (s *Service) beginCreate(ctx context.Context, id, requestName, nodeName str
 		}
 		return s.beginCreateWithinPool(ctx, id, requestName, nodeName, capacity, parameters)
 	}
+	if requestedPoolGroup(parameters) != volumeapi.DefaultPoolGroup {
+		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "Pool group selection requires Pool capacity admission")
+	}
 	return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, capacity)
 }
 
@@ -397,6 +404,10 @@ func validateParameters(parameters map[string]string) error {
 			// Kept as a no-op because StorageClass parameters are immutable.
 			if value != capacityEnforcementNone {
 				return fmt.Errorf("unsupported StorageClass parameter %q value %q", key, value)
+			}
+		case PoolGroupKey:
+			if len(validation.IsDNS1123Label(value)) != 0 {
+				return fmt.Errorf("invalid StorageClass pool group %q", value)
 			}
 		default:
 			return fmt.Errorf("unsupported StorageClass parameter %q", key)

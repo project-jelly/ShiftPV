@@ -916,6 +916,28 @@ func newMobilityWalk() *mobilityWalk {
 	}
 }
 
+func TestObserveExcludesDifferentPoolGroupFromAutomaticMove(t *testing.T) {
+	w := newMobilityWalk()
+	w.repository.pools[1].PoolGroup = "other"
+	observed, err := w.reconciler.observe(w.ctx, w.move)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.CandidateNodes) != 0 {
+		t.Fatalf("different Pool group appeared as Move candidate: %v", observed.CandidateNodes)
+	}
+	w.move.Status.CandidateNodes = []string{"destination"}
+	w.move.Status.DestinationNode = "destination"
+	w.move.Status.Phase = string(fsm.PhaseCopying)
+	state := w.repository.volumes[w.volumeID]
+	state.Phase, state.ActiveMove = volumeapi.PhaseMoving, w.move.Name
+	w.repository.volumes[w.volumeID] = state
+	observed, err = w.reconciler.observe(w.ctx, w.move)
+	if err != nil || !observed.FSM.DestinationBlocked || observed.FSM.UnsafeReason != "DestinationPoolGroupMismatch" {
+		t.Fatalf("persisted cross-group destination was not blocked: observed=%#v err=%v", observed.FSM, err)
+	}
+}
+
 func (w *mobilityWalk) execute(t *testing.T, action fsm.Action) error {
 	t.Helper()
 	return w.reconciler.execute(w.ctx, &w.move, w.observed, fsm.Decision{Action: action})

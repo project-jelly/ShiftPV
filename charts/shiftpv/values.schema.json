@@ -212,6 +212,21 @@
         "reclaimPolicy": {"const": "Retain"}
       }
     },
+    "additionalStorageClasses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["create", "name", "defaultClass", "reclaimPolicy", "poolGroup"],
+        "additionalProperties": false,
+        "properties": {
+          "create": {"type": "boolean"},
+          "name": {"type": "string", "minLength": 1},
+          "defaultClass": {"const": false},
+          "reclaimPolicy": {"enum": ["Delete", "Retain"]},
+          "poolGroup": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}
+        }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,

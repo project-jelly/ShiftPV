@@ -27,13 +27,35 @@ volumeBindingMode: WaitForFirstConsumer
 
 | Class | Default | Reclaim | 용도 |
 |---|---:|---|---|
-| `shiftpv` | yes | `Delete` | PVC와 함께 data lifecycle을 끝내는 일반 workload와 DR 시험 |
+| `shiftpv` | no | `Delete` | PVC와 함께 data lifecycle을 끝내는 일반 workload와 DR 시험 |
 | `shiftpv-retain` | no | `Retain` | PVC 삭제 뒤에도 PV와 원본 data를 보존해야 하는 workload |
 
 두 class의 provisioner는 `csi.shiftpv.io`, access/mode는 `ReadWriteOnce`/`Filesystem`, binding은
 `WaitForFirstConsumer`다. Expansion은 범위 밖이다.
 
 ## Placement and admission
+
+StorageClass의 `shiftpv.io/pool-group` parameter는 `ShiftPVPool.spec.poolGroup`을 선택한다.
+두 필드를 생략하면 `default`다. 그룹은 배치와 자동 이동의 범위이며 각 Pool의 용량은
+Pool UID별로 계산한다. 예를 들어 `fast` 그룹을 선택하는 class는 다음과 같다.
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: shiftpv-fast
+provisioner: csi.shiftpv.io
+reclaimPolicy: Delete
+allowVolumeExpansion: false
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  shiftpv.io/pool-group: fast
+```
+
+그룹과 용량 계산의 선행 변경 단계에서는 node당 Pool 하나의 등록 제한을 유지한다.
+여러 Pool/node 허용은 등록 용량의 독립성과 이동·복구 경로 검증이 완료된 뒤 활성화한다.
+기존 class에 parameter를 추가하려면 Kubernetes의 immutable parameter 제약을 고려해
+새 class를 생성한다.
 
 첫 consumer가 정한 topology 안에서 Ready Pool을 선택한다. 할당은 다음을 모두 확인해야 한다.
 
