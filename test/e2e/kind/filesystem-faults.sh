@@ -85,7 +85,7 @@ wait_for_not_ready_event() {
     messages=$(kubectl get events \
       --field-selector "involvedObject.kind=PersistentVolumeClaim,involvedObject.name=${name}" \
       -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)
-    if grep -Fq 'Pool is not ready' <<<"${messages}"; then
+    if grep -Eq 'Pool is not ready|has no Ready Pool in group' <<<"${messages}"; then
       return
     fi
     sleep 1
