@@ -29,6 +29,7 @@ flowchart LR
 | 이동 | [0010](0010-operator-visible-mobility-diagnostics.md) | parent journal과 finalizer를 truth로 사용 | 0.4 target |
 | 운영 | [0011](0011-fail-closed-uninstall-guard.md) | unresolved Volume, Move, hold가 있으면 uninstall 실패 | 0.4 target |
 | 운영 | [0012](0012-controller-managed-webhook-certificates.md) | Controller가 admission 인증서 관리 | Accepted |
+| Pool | [0013](0013-opt-in-pool-mount-identity.md) | 기존 directory를 유지하며 전용 mount identity 검증 선택 | Accepted |
 
 모든 ADR은 `Context → Decision → Alternatives considered → Consequences` 순서를 사용한다.
 파일명은 `NNNN-kebab-title.md` 형식이며 서비스 경계에서 세부 운영 결정 순으로 정렬한다.

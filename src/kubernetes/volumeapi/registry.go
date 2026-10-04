@@ -31,6 +31,7 @@ var (
 const (
 	PoolConditionReady             = "Ready"
 	PoolConditionAccessible        = "Accessible"
+	PoolConditionMounted           = "Mounted"
 	PoolConditionIdentityReleased  = "IdentityReleased"
 	PoolProtectionFinalizer        = "shiftpv.io/pool-protection"
 	PoolIdentityReleaseAnnotation  = "shiftpv.io/release-pool-identity"
@@ -38,6 +39,8 @@ const (
 	PoolConditionCapacityReadable  = "CapacityReadable"
 	DefaultPoolReadinessStaleAfter = 3 * time.Minute
 )
+
+const PoolMountPolicyRequireMountPoint = "RequireMountPoint"
 
 const (
 	VolumeProtectionFinalizer = "shiftpv.io/volume-protection"

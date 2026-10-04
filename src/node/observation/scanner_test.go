@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,29 @@ type publications struct {
 }
 
 func (p publications) HasPublishedTarget(string, string) (bool, error) { return p.published, p.err }
+
+func TestScannerRejectsUnmountedRequiredPoolBeforeInventoryOrRelease(t *testing.T) {
+	host := t.TempDir()
+	root := filepath.Join(host, "pool")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pool := volumeapi.Pool{UID: "pool-uid", MountPath: "/pool", MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
+		Status: volumeapi.PoolStatus{MountIdentity: &volumeapi.PoolMountIdentity{
+			Device: "8:2", Root: "/", Source: "/dev/disk-a", Filesystem: "ext4",
+		}}}
+	scanner := &Scanner{HostRoot: host, TargetRoot: host, Installation: installation{id: "installation"}, Publications: publications{}, Limit: 8}
+	inventory := scanner.Scan(context.Background(), pool, time.Now())
+	if inventory.Valid || !strings.HasPrefix(inventory.Message, "MountUnavailable:") {
+		t.Fatalf("unmounted Pool inventory = %#v", inventory)
+	}
+	if err := scanner.ReleasePool(context.Background(), pool); err == nil {
+		t.Fatal("unmounted Pool identity was released")
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("unmounted directory was modified: entries=%v err=%v", entries, err)
+	}
+}
 
 func TestScannerReleasesExactEmptyPoolForReregistration(t *testing.T) {
 	host := t.TempDir()

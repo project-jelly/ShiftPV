@@ -72,7 +72,20 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		now = r.Now().UTC()
 	}
 	result = r.Inspector.Inspect(pool)
-	var releaseErr error
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.Known && result.Mounted.Reason == "" {
+		result.Mounted = skipped()
+	}
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && result.Mounted.OK && result.MountIdentity == nil {
+		result.Mounted = Check{Known: true, Reason: "MountIdentityMissing", Message: "mount probe did not return an identity"}
+	}
+	status, cleanupReady := r.observedStatus(ctx, pool, result, now)
+	releaseErr := r.recordIdentityRelease(ctx, pool, &status, cleanupReady, now)
+	return errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
+}
+
+// observedStatus records one node observation. A terminating Pool may remain
+// cleanup-ready even though it is no longer eligible for new placement.
+func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, result Result, now time.Time) (volumeapi.PoolStatus, bool) {
 	status := pool.Status
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
@@ -86,33 +99,54 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 			Known: true, Reason: "PoolDeregistering", Message: "Pool rejects new placement while deregistration converges",
 		}, pool.Generation, now))
 	}
-	if r.Inventory != nil {
-		inventory := r.Inventory(ctx, pool, now)
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.OK {
+		status.Inventory = &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "MountUnavailable: " + result.Mounted.Reason}
+	} else if r.Inventory != nil {
+		inventoryPool := pool
+		if inventoryPool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && inventoryPool.Status.MountIdentity == nil {
+			// The first scan must verify the same candidate identity observed by
+			// the probe before that identity can be durably anchored.
+			inventoryPool.Status.MountIdentity = result.MountIdentity
+		}
+		inventory := r.Inventory(ctx, inventoryPool, now)
 		status.Inventory = &inventory
 	}
-	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionIdentityReleased)
-	if pool.DeletionTimestamp != nil {
-		release := Check{Known: true, Reason: "PoolIdentityRetained", Message: "Pool identity remains until inventory is empty and complete"}
-		if pool.IdentityReleaseApproval != pool.UID {
-			release.Reason = "PoolIdentityReleasePending"
-			release.Message = "Pool identity remains until the controller approves exact release"
-		} else if cleanupReady && emptyInventory(status.Inventory) {
-			if r.Release == nil {
-				release.Reason = "PoolIdentityReleaseUnavailable"
-				release.Message = "node Pool identity release is not configured"
-			} else if err := r.Release(ctx, pool); err != nil {
-				releaseErr = err
-				release.Reason = "PoolIdentityReleaseFailed"
-				release.Message = err.Error()
-			} else {
-				release.OK = true
-				release.Reason = "PoolIdentityReleased"
-				release.Message = "exact empty Pool identity was released"
-			}
-		}
-		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionIdentityReleased, release, pool.Generation, now))
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && status.MountIdentity == nil &&
+		result.Accessible.OK && result.Mounted.OK && result.Writable.OK && result.CapacityReadable.OK &&
+		status.Inventory != nil && status.Inventory.Valid && !status.Inventory.Truncated && status.Inventory.Message == "" {
+		status.MountIdentity = result.MountIdentity
 	}
-	return errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
+	meta.RemoveStatusCondition(&status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	return status, cleanupReady
+}
+
+// recordIdentityRelease performs only the exact empty Pool release approved
+// by the controller, then records the node's release evidence in status.
+func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.Pool, status *volumeapi.PoolStatus, cleanupReady bool, now time.Time) error {
+	if pool.DeletionTimestamp == nil {
+		return nil
+	}
+	release := Check{Known: true, Reason: "PoolIdentityRetained", Message: "Pool identity remains until inventory is empty and complete"}
+	var releaseErr error
+	if pool.IdentityReleaseApproval != pool.UID {
+		release.Reason = "PoolIdentityReleasePending"
+		release.Message = "Pool identity remains until the controller approves exact release"
+	} else if cleanupReady && emptyInventory(status.Inventory) {
+		if r.Release == nil {
+			release.Reason = "PoolIdentityReleaseUnavailable"
+			release.Message = "node Pool identity release is not configured"
+		} else if err := r.Release(ctx, pool); err != nil {
+			releaseErr = err
+			release.Reason = "PoolIdentityReleaseFailed"
+			release.Message = err.Error()
+		} else {
+			release.OK = true
+			release.Reason = "PoolIdentityReleased"
+			release.Message = "exact empty Pool identity was released"
+		}
+	}
+	meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionIdentityReleased, release, pool.Generation, now))
+	return releaseErr
 }
 
 func emptyInventory(inventory *volumeapi.PoolInventory) bool {
@@ -139,7 +173,15 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 	writable := condition(volumeapi.PoolConditionWritable, result.Writable, generation, now)
 	capacity := condition(volumeapi.PoolConditionCapacityReadable, result.CapacityReadable, generation, now)
 	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and capacity-readable"}
-	for _, candidate := range []Check{result.Accessible, result.Writable, result.CapacityReadable} {
+	checks := []Check{result.Accessible}
+	conditions := []metav1.Condition{accessible}
+	if result.Mounted.Reason != "" {
+		checks = append(checks, result.Mounted)
+		conditions = append(conditions, condition(volumeapi.PoolConditionMounted, result.Mounted, generation, now))
+	}
+	checks = append(checks, result.Writable, result.CapacityReadable)
+	conditions = append(conditions, writable, capacity)
+	for _, candidate := range checks {
 		if !candidate.Known || !candidate.OK {
 			readyCheck.OK = false
 			readyCheck.Reason = candidate.Reason
@@ -147,7 +189,7 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 			break
 		}
 	}
-	return []metav1.Condition{accessible, writable, capacity, condition(volumeapi.PoolConditionReady, readyCheck, generation, now)}
+	return append(conditions, condition(volumeapi.PoolConditionReady, readyCheck, generation, now))
 }
 
 func condition(conditionType string, check Check, generation int64, now time.Time) metav1.Condition {

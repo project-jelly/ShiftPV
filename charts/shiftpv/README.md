@@ -83,6 +83,23 @@ mode, sparse file, ACL과 xattr semantics를 보존하는지 별도 검증해야
 
 Chart는 directory, filesystem, mount, RAID, encryption과 backup을 만들거나 복구하지 않는다.
 
+별도 filesystem이 이미 마운트된 경로를 Pool로 쓸 때는 `spec.mountPolicy: RequireMountPoint`를
+지정할 수 있다. Node는 실제 mount point와 처음 관찰한 filesystem identity를 확인하며,
+mount 유실·교체 시 Pool을 NotReady로 표시한다. 일반 directory Pool은 기존처럼 이 필드를
+생략한다. 이 검사는 서로 다른 mount가 독립된 용량을 가진다는 증거는 아니며, 현재 버전은
+여전히 node당 Pool 하나만 허용한다.
+
+```yaml
+spec:
+  nodeName: worker-a
+  mountPath: /mnt/shiftpv-ssd
+  mountPolicy: RequireMountPoint
+  capacity:
+    limit: 500Gi
+```
+
+새 필드를 쓰는 배포는 [CRD를 먼저 갱신](../../docs/development/versioning.md)해야 한다.
+
 ## StorageClass
 
 Chart는 같은 provisioner를 사용하는 두 StorageClass를 설치한다. `shiftpv`는 일반 PVC lifecycle에 맞춰
