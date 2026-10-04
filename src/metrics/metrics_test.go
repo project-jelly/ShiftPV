@@ -66,10 +66,16 @@ func (i *inventory) ListMoves(context.Context) ([]volumeapi.Move, error) {
 	return i.moves, nil
 }
 
+func metricCopy(poolName, poolUID, nodeName string) *volume.CopyIdentity {
+	return &volume.CopyIdentity{InstallationID: "installation", PoolName: poolName, PoolUID: poolUID,
+		VolumeID: "v", VolumeUID: "volume-uid", CopyID: "copy-" + poolUID, NodeName: nodeName, Role: volume.RoleServing}
+}
+
 func fixture() (*Controller, *inventory) {
-	inv := &inventory{pools: []volumeapi.Pool{{Name: "pool-a", NodeName: "a", CapacityLimit: "1Gi"}, {Name: "pool-b", NodeName: "b", CapacityLimit: "1Gi"}},
-		volumes: map[string]volumeapi.State{"v": {UID: "volume-uid", CapacityBytes: 64, OwnerNode: "a", Phase: "Moving", ActiveMove: "move"}},
-		moves:   []volumeapi.Move{{Name: "move", Spec: volumeapi.MoveSpec{VolumeID: "v", SourceNode: "a"}, Status: volumeapi.MoveStatus{Phase: "Copying", DestinationNode: "b", CapacityApproved: true}}},
+	source := metricCopy("pool-a", "pool-a-uid", "a")
+	inv := &inventory{pools: []volumeapi.Pool{{Name: "pool-a", UID: "pool-a-uid", NodeName: "a", CapacityLimit: "1Gi"}, {Name: "pool-b", UID: "pool-b-uid", NodeName: "b", CapacityLimit: "1Gi"}},
+		volumes: map[string]volumeapi.State{"v": {UID: "volume-uid", CapacityBytes: 64, OwnerNode: "a", CurrentCopy: source, Phase: "Moving", ActiveMove: "move"}},
+		moves:   []volumeapi.Move{{Name: "move", Spec: volumeapi.MoveSpec{VolumeID: "v", SourceNode: "a"}, Status: volumeapi.MoveStatus{Phase: "Copying", DestinationNode: "b", DestinationPoolUID: "pool-b-uid", SourceCopy: source, CapacityApproved: true}}},
 	}
 	return &Controller{Exporter: New("metadata"), Inventory: inv, Interval: time.Millisecond}, inv
 }
@@ -104,12 +110,12 @@ func TestControllerAccountingAndMoveLifecycle(t *testing.T) {
 		"shiftpv_pool_reserved_bytes{node=\"b\",pool=\"pool-b\"} 64",
 		"shiftpv_moves{phase=\"Copying\"} 1",
 		"shiftpv_volumes{phase=\"Moving\"} 1")
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready", ActiveMove: "move"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", CurrentCopy: metricCopy("pool-b", "pool-b-uid", "b"), Phase: "Ready", ActiveMove: "move"}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	contains(t, output(t, c.Exporter), "shiftpv_pool_reserved_bytes{node=\"b\",pool=\"pool-b\"} 64")
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", CurrentCopy: metricCopy("pool-b", "pool-b-uid", "b"), Phase: "Ready"}
 	inv.moves[0].Status.Phase = "Blocked"
 	inv.moves[0].Status.RecoveryPhase = "Recovered"
 	if err := c.Refresh(context.Background()); err != nil {
@@ -155,12 +161,12 @@ func TestMetadataFailuresPreserveLastSuccess(t *testing.T) {
 func TestCompletingMoveHasBoundedMetricPhase(t *testing.T) {
 	c, inv := fixture()
 	inv.moves[0].Status.Phase = "Completing"
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready", ActiveMove: "move"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", CurrentCopy: metricCopy("pool-b", "pool-b-uid", "b"), Phase: "Ready", ActiveMove: "move"}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	contains(t, output(t, c.Exporter), "shiftpv_moves{phase=\"Completing\"} 1", "shiftpv_moves{phase=\"Unknown\"} 0")
-	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", Phase: "Ready"}
+	inv.volumes["v"] = volumeapi.State{UID: "volume-uid", CapacityBytes: 64, OwnerNode: "b", CurrentCopy: metricCopy("pool-b", "pool-b-uid", "b"), Phase: "Ready"}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +334,7 @@ func TestCardinalityBoundedByPoolsAndEnums(t *testing.T) {
 	inv.volumes = make(map[string]volumeapi.State)
 	inv.moves = nil
 	for n := 0; n < 1000; n++ {
-		inv.volumes[fmt.Sprintf("unique-volume-%d", n)] = volumeapi.State{CapacityBytes: 1, OwnerNode: "a", Phase: fmt.Sprintf("unique-phase-%d", n)}
+		inv.volumes[fmt.Sprintf("unique-volume-%d", n)] = volumeapi.State{CapacityBytes: 1, OwnerNode: "a", CurrentCopy: metricCopy("pool-a", "pool-a-uid", "a"), Phase: fmt.Sprintf("unique-phase-%d", n)}
 	}
 	for n := 0; n < 10000; n++ {
 		inv.moves = append(inv.moves, volumeapi.Move{Name: fmt.Sprintf("historic-%d", n), Status: volumeapi.MoveStatus{Phase: "Blocked"}})
@@ -397,7 +403,7 @@ func TestCachedScrapeLatency(t *testing.T) {
 	c, inv := fixture()
 	for n := 0; n < 99; n++ {
 		id := fmt.Sprintf("v-%d", n)
-		inv.volumes[id] = volumeapi.State{CapacityBytes: 64, OwnerNode: "a", Phase: "Ready"}
+		inv.volumes[id] = volumeapi.State{CapacityBytes: 64, OwnerNode: "a", CurrentCopy: metricCopy("pool-a", "pool-a-uid", "a"), Phase: "Ready"}
 	}
 	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -595,4 +601,34 @@ func TestPersistentVolumeFamilyIsAlwaysEmitted(t *testing.T) {
 				`shiftpv_persistent_volumes_released_bytes{pool="unknown"} 0`)
 		})
 	}
+}
+
+func TestCapacityMetricsSeparatePoolsOnSameNode(t *testing.T) {
+	c, inv := fixture()
+	inv.pools[1].NodeName = "a"
+	inv.moves[0].Status.DestinationNode = "a"
+	otherCopy := metricCopy("pool-b", "pool-b-uid", "a")
+	inv.volumes["other"] = volumeapi.State{OwnerNode: "a", CapacityBytes: 128, CurrentCopy: otherCopy}
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter),
+		`shiftpv_pool_reserved_bytes{node="a",pool="pool-a"} 64`,
+		`shiftpv_pool_reserved_bytes{node="a",pool="pool-b"} 192`)
+	// After owner commit, one exact source hold remains until cleanup settles.
+	state := inv.volumes["v"]
+	state.CurrentCopy = otherCopy
+	inv.volumes["v"] = state
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter),
+		`shiftpv_pool_reserved_bytes{node="a",pool="pool-a"} 64`,
+		`shiftpv_pool_reserved_bytes{node="a",pool="pool-b"} 192`)
+	inv.moves[0].Status.CleanupPhase = "Completed"
+	inv.moves[0].Status.Phase = "Succeeded"
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	contains(t, output(t, c.Exporter), `shiftpv_pool_reserved_bytes{node="a",pool="pool-a"} 0`)
 }

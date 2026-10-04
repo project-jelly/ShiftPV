@@ -24,7 +24,7 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 | Metric | Labels | Meaning |
 |---|---|---|
 | `shiftpv_pool_capacity_limit_bytes` | `pool`, `node` | Pool의 논리 capacity limit |
-| `shiftpv_pool_reserved_bytes` | `pool`, `node` | Volume owner와 미정산 Move hold의 합계; disk usage가 아님 |
+| `shiftpv_pool_reserved_bytes` | `pool`, `node` | 정확한 Pool UID에 속한 Volume owner와 미정산 Move hold의 합계; disk usage가 아님 |
 | `shiftpv_pool_accounting_valid` | `pool`, `node` | 최신 hold 계산이 유효한지 여부 |
 | `shiftpv_pool_ready` | `pool`, `node` | generation과 probe freshness를 포함한 Pool readiness |
 | `shiftpv_pool_filesystem_size_bytes` | `pool`, `node` | 등록 directory가 속한 filesystem 전체 크기 |
@@ -48,6 +48,10 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 `ShiftPVVolume`의 현재 copy가 속한 Pool이며, 대응하는 Volume이 없으면 `unknown`으로 접는다. Phase, state, source, method, code와 reason은 코드에
 고정된 집합 밖의 값을 `Unknown`으로 접는다. Volume UID, Move UID, copy ID, operation/executor ID,
 filesystem path, Pod UID, 오류 문자열과 timestamp를 label로 사용하지 않는다.
+
+같은 node에 여러 Pool이 있더라도 예약은 각 copy의 Pool UID로 계산한다. Pool group은
+이 합계를 묶지 않는다. owner가 destination Pool로 바뀐 뒤에도 미정산 source copy의
+예약은 원래 Pool에 남으며 cleanup이 정산되면 해제한다.
 
 ## Interpretation
 

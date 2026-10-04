@@ -243,7 +243,7 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 			sample{"pool_inventory_truncated", boolValue(inventoryTruncated), labels},
 		)
 		limit, limitErr := capacity.LimitBytes(pool)
-		reserved, accountingErr := capacity.ReservedBytes(volumes, moves, pool.NodeName)
+		reserved, accountingErr := capacity.ReservedBytesForPool(volumes, moves, pool.UID)
 		valid := limitErr == nil && accountingErr == nil
 		values = append(values, sample{"pool_accounting_valid", boolValue(valid), labels})
 		if !valid {
