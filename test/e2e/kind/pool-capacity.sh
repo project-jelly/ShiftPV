@@ -8,8 +8,10 @@ CAPACITY_POOL=worker-a
 CAPACITY_PATH=/mnt/shiftpv
 PHYSICAL_NAME=shiftpv-capacity-physical
 LOGICAL_NAME=shiftpv-capacity-logical
+FIXED_NAME=shiftpv-capacity-fixed
 PHYSICAL_PV=
 LOGICAL_PV=
+FIXED_PV=
 
 volume_hold_count() {
 	kubectl get shiftpvvolumes -o name | wc -l | tr -d ' '
@@ -41,6 +43,22 @@ wait_for_resource_exhausted() {
 		sleep 1
 	done
 	echo "PersistentVolumeClaim/${name} did not report ResourceExhausted" >&2
+	return 1
+}
+
+wait_for_unavailable() {
+	local name=$1
+	local attempt messages
+	for ((attempt = 0; attempt < 120; attempt++)); do
+		messages=$(kubectl get events \
+			--field-selector "involvedObject.kind=PersistentVolumeClaim,involvedObject.name=${name}" \
+			-o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)
+		if grep -Fq 'code = Unavailable' <<<"${messages}"; then
+			return
+		fi
+		sleep 1
+	done
+	echo "PersistentVolumeClaim/${name} did not report retryable Unavailable" >&2
 	return 1
 }
 
@@ -82,14 +100,64 @@ spec:
 EOF
 }
 
+# Model a CDI scratch claim: the importer Pod already has a node and owns the
+# PVC, while CDI copies the selected-node annotation when it creates the PVC.
+create_fixed_consumer() {
+	kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${FIXED_NAME}
+spec:
+  nodeName: ${CAPACITY_NODE}
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: importer
+      image: busybox:1.37
+      command: ["sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - name: scratch
+          mountPath: /scratch
+  volumes:
+    - name: scratch
+      persistentVolumeClaim:
+        claimName: ${FIXED_NAME}
+EOF
+	local pod_uid
+	pod_uid=$(kubectl get pod "${FIXED_NAME}" -o jsonpath='{.metadata.uid}')
+	kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${FIXED_NAME}
+  annotations:
+    volume.kubernetes.io/selected-node: ${CAPACITY_NODE}
+  ownerReferences:
+    - apiVersion: v1
+      kind: Pod
+      name: ${FIXED_NAME}
+      uid: ${pod_uid}
+spec:
+  storageClassName: shiftpv-capacity-test
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 64Mi
+EOF
+}
+
 cleanup_capacity_test() {
-	kubectl delete pod "${PHYSICAL_NAME}" "${LOGICAL_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	kubectl delete pvc "${PHYSICAL_NAME}" "${LOGICAL_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kubectl delete pod "${PHYSICAL_NAME}" "${LOGICAL_NAME}" "${FIXED_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kubectl delete pvc "${PHYSICAL_NAME}" "${LOGICAL_NAME}" "${FIXED_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 	if [[ -n "${PHYSICAL_PV}" ]]; then
 		kubectl wait --for=delete "pv/${PHYSICAL_PV}" --timeout=2m >/dev/null 2>&1 || true
 	fi
 	if [[ -n "${LOGICAL_PV}" ]]; then
 		kubectl wait --for=delete "pv/${LOGICAL_PV}" --timeout=2m >/dev/null 2>&1 || true
+	fi
+	if [[ -n "${FIXED_PV}" ]]; then
+		kubectl wait --for=delete "pv/${FIXED_PV}" --timeout=2m >/dev/null 2>&1 || true
 	fi
 	kubectl delete storageclass shiftpv-capacity-test --ignore-not-found --wait=true >/dev/null 2>&1 || true
 	docker exec "${CAPACITY_NODE}" sh -c "rm -f '${CAPACITY_PATH}/external-fill'; mountpoint -q '${CAPACITY_PATH}' && umount '${CAPACITY_PATH}' || true" >/dev/null 2>&1 || true
@@ -152,10 +220,28 @@ test "$(kubectl get "shiftpvvolume/${LOGICAL_VOLUME}" -o jsonpath='{.spec.reques
 test "$(kubectl get "shiftpvvolume/${LOGICAL_VOLUME}" -o jsonpath='{.spec.capacityBytes}')" = 83886080
 test "$(kubectl get "shiftpvvolume/${LOGICAL_VOLUME}" -o jsonpath='{.spec.initialNode}')" = "${CAPACITY_NODE}"
 
+# The Pod is already assigned to a node. ResourceExhausted would erase this
+# PVC's selected-node annotation and leave it pending after capacity returns.
+create_fixed_consumer
+wait_for_unavailable "${FIXED_NAME}"
+test "$(kubectl get pvc "${FIXED_NAME}" -o jsonpath='{.metadata.annotations.volume\.kubernetes\.io/selected-node}')" = "${CAPACITY_NODE}"
+wait_for_volume_hold_count 1
+
 kubectl delete pod "${LOGICAL_NAME}" --wait=true
 kubectl delete pvc "${LOGICAL_NAME}" --wait=true
 kubectl wait --for=delete "pv/${LOGICAL_PV}" --timeout=2m
 LOGICAL_PV=
+kubectl wait --for=condition=Ready "pod/${FIXED_NAME}" --timeout=5m
+kubectl wait --for=jsonpath='{.status.phase}'=Bound "pvc/${FIXED_NAME}" --timeout=2m
+FIXED_PV=$(kubectl get pvc "${FIXED_NAME}" -o jsonpath='{.spec.volumeName}')
+FIXED_VOLUME=$(kubectl get "pv/${FIXED_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
+test "$(kubectl get "shiftpvvolume/${FIXED_VOLUME}" -o jsonpath='{.spec.initialNode}')" = "${CAPACITY_NODE}"
+wait_for_volume_hold_count 1
+
+kubectl delete pod "${FIXED_NAME}" --wait=true
+kubectl delete pvc "${FIXED_NAME}" --ignore-not-found --wait=true
+kubectl wait --for=delete "pv/${FIXED_PV}" --timeout=2m
+FIXED_PV=
 wait_for_volume_hold_count 0
 
 trap - EXIT

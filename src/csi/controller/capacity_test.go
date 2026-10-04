@@ -10,8 +10,11 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
@@ -181,6 +184,96 @@ func TestCreateVolumeUsesPoolLimitAndFilesystemCapacity(t *testing.T) {
 				t.Fatalf("code = %s, want %s: %v", got, test.wantCode, err)
 			}
 		})
+	}
+}
+
+func TestCreateVolumeRetriesScheduledPodOwnedPVCWhenCapacityIsReleased(t *testing.T) {
+	client := fake.NewClientset(scheduledScratchPVC("worker-a"), scratchConsumerPod("worker-a"),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "vmtest"}})
+	existingID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	service := capacityService(client, "128Mi", map[string]volumeapi.State{
+		existingID: {UID: "existing-uid", Phase: volumeapi.PhaseReady, OwnerNode: "worker-a", CapacityBytes: 80 << 20},
+	}, &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{TotalBytes: 1 << 30, AvailableBytes: 1 << 30}})
+	req := validCreateRequest("worker-a")
+	req.Parameters = map[string]string{PVCNameKey: "scratch", PVCNamespaceKey: "vmtest"}
+	if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+		t.Fatalf("scheduled consumer capacity denial = %v, want Unavailable", err)
+	}
+	registry := service.Volumes.(*capacityTrackingVolumeRegistry)
+	registry.mu.Lock()
+	delete(registry.volumes, existingID)
+	registry.mu.Unlock()
+	if _, err := service.CreateVolume(context.Background(), req); err != nil {
+		t.Fatalf("retry after reservation release did not converge: %v", err)
+	}
+}
+
+func TestCreateVolumeRetriesScheduledPodOwnedPVCWhenFilesystemSpaceReturns(t *testing.T) {
+	client := fake.NewClientset(scheduledScratchPVC("worker-a"), scratchConsumerPod("worker-a"),
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "vmtest"}})
+	probe := &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{TotalBytes: 128 << 20, AvailableBytes: 32 << 20}}
+	service := capacityService(client, "128Mi", nil, probe)
+	req := validCreateRequest("worker-a")
+	req.Parameters = map[string]string{PVCNameKey: "scratch", PVCNamespaceKey: "vmtest"}
+	if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+		t.Fatalf("filesystem shortage for scheduled consumer = %v, want Unavailable", err)
+	}
+	probe.mu.Lock()
+	probe.stats.AvailableBytes = 128 << 20
+	probe.mu.Unlock()
+	if _, err := service.CreateVolume(context.Background(), req); err != nil {
+		t.Fatalf("retry after filesystem space returns did not converge: %v", err)
+	}
+}
+
+func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *testing.T) {
+	for name, test := range map[string]struct {
+		change func(*corev1.PersistentVolumeClaim, *corev1.Pod)
+		size   int64
+	}{
+		"no Pod owner":             {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.OwnerReferences = nil }},
+		"consumer not scheduled":   {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) { pod.Spec.NodeName = "" }},
+		"consumer on another node": {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) { pod.Spec.NodeName = "worker-b" }},
+		"stale Pod identity":       {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.OwnerReferences[0].UID = "old-pod" }},
+		"unrelated Pod volume": {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) {
+			pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other"
+		}},
+		"wrong PVC identity": {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.UID = "other" }},
+		"oversized request":  {size: 129 << 20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pvc, pod := scheduledScratchPVC("worker-a"), scratchConsumerPod("worker-a")
+			if test.change != nil {
+				test.change(pvc, pod)
+			}
+			service := capacityService(fake.NewClientset(pvc, pod), "128Mi", map[string]volumeapi.State{
+				"shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {UID: "existing-uid", Phase: volumeapi.PhaseReady, OwnerNode: "worker-a", CapacityBytes: 80 << 20},
+			}, &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{TotalBytes: 1 << 30, AvailableBytes: 1 << 30}})
+			req := validCreateRequest("worker-a")
+			req.Parameters = map[string]string{PVCNameKey: "scratch", PVCNamespaceKey: "vmtest"}
+			if test.size != 0 {
+				req.CapacityRange.RequiredBytes = test.size
+			}
+			if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.ResourceExhausted {
+				t.Fatalf("capacity denial = %v, want ResourceExhausted", err)
+			}
+		})
+	}
+}
+
+func scheduledScratchPVC(node string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "scratch", Namespace: "vmtest", UID: types.UID("uid"),
+		Annotations:     map[string]string{selectedNodeAnnotation: node},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "importer", UID: types.UID("pod-uid")}},
+	}}
+}
+
+func scratchConsumerPod(node string) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "importer", Namespace: "vmtest", UID: types.UID("pod-uid")},
+		Spec: corev1.PodSpec{NodeName: node, Volumes: []corev1.Volume{{Name: "scratch", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "scratch"},
+		}}}},
 	}
 }
 

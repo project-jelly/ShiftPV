@@ -8,10 +8,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
+
+const selectedNodeAnnotation = "volume.kubernetes.io/selected-node"
 
 type PoolCapacityRegistry interface {
 	ReadyPoolForNode(context.Context, string) (volumeapi.Pool, error)
@@ -23,7 +26,7 @@ type PoolCapacityProbe interface {
 	StatFS(context.Context, string) (poolcapacity.Filesystem, error)
 }
 
-func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, nodeName string, requestedBytes int64) (volumeapi.State, error) {
+func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
 	existing, err := s.Volumes.Get(ctx, id)
 	if err == nil {
 		if err := validateCreateIntent(existing, requestName, nodeName, requestedBytes); err != nil {
@@ -76,7 +79,7 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 		logicalFree = limitBytes - reservedBytes
 	}
 	if requestedBytes > logicalFree {
-		return volumeapi.State{}, status.Errorf(codes.ResourceExhausted,
+		return volumeapi.State{}, s.capacityDenied(ctx, parameters, requestName, nodeName, requestedBytes <= limitBytes,
 			"Pool %q reservation limit exceeded: requested=%d reserved=%d limit=%d",
 			pool.Name, requestedBytes, reservedBytes, limitBytes)
 	}
@@ -86,11 +89,68 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 		return volumeapi.State{}, capacityProbeError("inspect Pool filesystem capacity", err)
 	}
 	if requestedBytes > stats.AvailableBytes {
-		return volumeapi.State{}, status.Errorf(codes.ResourceExhausted,
+		return volumeapi.State{}, s.capacityDenied(ctx, parameters, requestName, nodeName, stats.TotalBytes == 0 || requestedBytes <= stats.TotalBytes,
 			"Pool %q filesystem space is insufficient: requested=%d available=%d",
 			pool.Name, requestedBytes, stats.AvailableBytes)
 	}
 	return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, requestedBytes)
+}
+
+// A scheduler-owned PVC can be moved to another node after ResourceExhausted.
+// A Pod-owned PVC created after its consumer was assigned a node cannot: CDI
+// scratch PVCs are one example. Keep its selected node so provisioning retries
+// there when a reservation or filesystem space becomes available.
+func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, requestName, nodeName string, canFitLater bool, format string, args ...any) error {
+	message := fmt.Sprintf(format, args...)
+	if !canFitLater {
+		return status.Error(codes.ResourceExhausted, message)
+	}
+	fixed, err := s.hasScheduledPodConsumer(ctx, parameters, requestName, nodeName)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%s; inspect PVC consumer: %v", message, err)
+	}
+	if fixed {
+		return status.Errorf(codes.Unavailable, "%s; scheduled consumer on node %q requires same-node retry", message, nodeName)
+	}
+	return status.Error(codes.ResourceExhausted, message)
+}
+
+func (s *Service) hasScheduledPodConsumer(ctx context.Context, parameters map[string]string, requestName, nodeName string) (bool, error) {
+	name, namespace := parameters[PVCNameKey], parameters[PVCNamespaceKey]
+	if name == "" || namespace == "" {
+		return false, nil
+	}
+	pvc, err := s.Client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if requestName != "pvc-"+string(pvc.UID) || pvc.Annotations[selectedNodeAnnotation] != nodeName {
+		return false, nil
+	}
+	for _, owner := range pvc.OwnerReferences {
+		if owner.APIVersion != "v1" || owner.Kind != "Pod" || owner.Name == "" {
+			continue
+		}
+		pod, err := s.Client.CoreV1().Pods(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if pod.UID != owner.UID || pod.Spec.NodeName != nodeName {
+			continue
+		}
+		for _, volume := range pod.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == name {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) poolReservedBytes(ctx context.Context, nodeName string) (int64, error) {
