@@ -243,7 +243,8 @@ func helperPoolMountBound(expected, current *corev1.Pod) bool {
 			continue
 		}
 		for _, mount := range got.VolumeMounts {
-			if mount.Name == "pool" && mount.MountPath == mountPath && mount.SubPath == "" && mount.SubPathExpr == "" {
+			if mount.Name == "pool" && mount.MountPath == mountPath && mount.SubPath == "" && mount.SubPathExpr == "" &&
+				mount.ReadOnly == expected.Spec.Containers[0].VolumeMounts[0].ReadOnly {
 				return true
 			}
 		}

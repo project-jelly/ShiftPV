@@ -88,9 +88,12 @@ func TestStatFSReturnsRegisteredPoolFilesystemCapacity(t *testing.T) {
 	if stats.TotalBytes != 409600 || stats.AvailableBytes != 102400 || stats.AvailableInodes != 12 {
 		t.Fatalf("stats = %+v", stats)
 	}
-	want := []string{"sh", "-c", "stat -f -c '%b %a %S %d' /pool > /dev/termination-log"}
-	if got := created.pod.Spec.Containers[0].Command; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+	got := created.pod.Spec.Containers[0].Command
+	if len(got) < 6 || got[0] != "/shiftpv-volume-helper" || got[1] != "statfs" || !strings.Contains(strings.Join(got, "\x00"), "--pool-evidence=") {
 		t.Fatalf("command = %#v", got)
+	}
+	if created.pod.Spec.AutomountServiceAccountToken == nil || !*created.pod.Spec.AutomountServiceAccountToken || !created.pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
+		t.Fatal("measurement helper must authenticate and bind the Pool read-only")
 	}
 }
 
@@ -104,6 +107,16 @@ func TestStatFSForPoolUsesExactPoolPathOnSharedNode(t *testing.T) {
 	}
 	if got := created.pod.Spec.Volumes[0].HostPath.Path; got != pool.MountPath {
 		t.Fatalf("statfs helper used %q, want %q", got, pool.MountPath)
+	}
+}
+
+func TestStatFSForPoolRejectsUnverifiedFixedPoolBeforeStartingHelper(t *testing.T) {
+	client, created := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
+	runner := validRunner(client)
+	pool := volumeapi.Pool{Name: "pool-b", UID: "pool-b-uid", NodeName: "worker-a", MountPath: "/mnt/pool-b", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
+	runner.Pools = fakePoolResolver{pool: pool}
+	if _, err := runner.StatFSForPool(context.Background(), pool); err == nil || created.pod != nil {
+		t.Fatalf("unverified measurement started: err=%v pod=%v", err, created.pod)
 	}
 }
 
@@ -125,7 +138,7 @@ func TestVolumeUsageReturnsQuiescedDirectoryBytes(t *testing.T) {
 		t.Fatalf("usage = %d, err = %v", bytes, err)
 	}
 	command := created.pod.Spec.Containers[0].Command
-	if len(command) != 5 || command[4] != "/pool/volumes/"+testVolumeID {
+	if len(command) < 7 || command[1] != "usage" || !strings.Contains(strings.Join(command, "\x00"), "--volume-id="+testVolumeID) {
 		t.Fatalf("command = %#v", command)
 	}
 }
@@ -207,6 +220,8 @@ func TestSameResultPodRejectsChangedSecurityBoundary(t *testing.T) {
 		"security context": func(pod *corev1.Pod) {
 			pod.Spec.Containers[0].SecurityContext.RunAsUser = int64Ptr(1000)
 		},
+		"mount access": func(pod *corev1.Pod) { pod.Spec.Containers[0].VolumeMounts[0].ReadOnly = true },
+		"token":        func(pod *corev1.Pod) { pod.Spec.AutomountServiceAccountToken = boolPtr(true) },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -331,7 +346,7 @@ func validRunner(client *fake.Clientset) Runner {
 	return Runner{
 		Client:    client,
 		Namespace: "shiftpv-system",
-		Pools:     fakePoolResolver{pool: volumeapi.Pool{NodeName: "worker-a", MountPath: "/mnt/shiftpv"}},
+		Pools:     fakePoolResolver{pool: volumeapi.Pool{Name: "pool-a", UID: "pool-uid", NodeName: "worker-a", MountPath: "/mnt/shiftpv"}},
 		Image:     "busybox:1.37",
 		Timeout:   time.Second,
 	}

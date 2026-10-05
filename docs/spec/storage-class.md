@@ -70,6 +70,20 @@ parameters:
 stale, invalid 또는 incomplete observation은 allocation을 승인할 수 없다. `statfs`는 같은 filesystem의
 현재 여유를 확인하는 admission 신호일 뿐 공간을 예약하거나 hard quota를 제공하지 않는다.
 
+용량·source usage 측정 helper는 요청에 묶인 Pool name/UID/node, generation과 filesystem
+evidence digest를 API의 현재 등록과 비교하고, 실제 bind mount를 측정 전후에 검증한다.
+usage는 installation과 현재 quiesced serving copy 및 디스크의 copy marker도 검증한다.
+측정이나 후속 검증이 실패하면 수치를 반환하지 않는다. 측정 Pod는 Pool을 read-only로
+마운트하며, 일반 shell pipeline으로 측정하지 않는다.
+
+노드의 publish·inventory·identity release는 host sysfs와 device-mapper 조회를 통해
+현재 backing extents도 기록된 allocation과 비교한다. Helper는 host device 접근 권한을
+갖지 않으므로 bind mount와 API에 기록된 allocation 증거를 사용한다. 등록된 Pool을
+사용하는 동안 운영자는 backing mapping, partition, filesystem 또는 mount를 교체·확장하지
+않는다. 변경하려면 신규 배치를 중단하고 volume·Move·cleanup을 정상 종료하여 Pool을
+안전하게 deregister한 뒤 새 등록으로 검증한다. 검사 직후 또는 작업 도중의 외부 변경을
+원자적으로 차단하는 fencing은 제공하지 않는다.
+
 용량 부족 시 scheduler가 아직 배치할 수 있는 consumer에는 `ResourceExhausted`를 반환해 다른 노드
 선택을 허용한다. CDI scratch처럼 PVC가 Pod 소유이고 그 Pod가 이미 선택 노드에 배치된 경우에는,
 요청량이 Pool 한도와 filesystem 전체 크기 안에 들어갈 수 있다면 `Unavailable`을 반환한다.

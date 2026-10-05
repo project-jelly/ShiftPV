@@ -75,6 +75,14 @@ capacity identity는 교체하지 않으며 metrics도 Pool UID별로 계산한�
 노출하면 native alias도 함께 비교한다. 외부 계층이 숨긴 공유나 host mapping 변경과
 작업의 원자적 fencing은 보장하지 않는다.
 
+용량·source usage 측정은 요청의 exact Pool과 anchored evidence digest를 API의 현재
+등록 및 실제 bind mount에 측정 전후로 대조한 뒤에만 결과를 게시한다. usage는 현재
+quiesced serving copy와 디스크 identity도 대조한다. 노드의 publish·inventory·identity
+release는 현재 backing extents까지 재검증한다. Helper에 host device 권한을 추가하지
+않으며, 등록된 Pool을 사용하는 동안 backing mapping·filesystem·mount 변경 및 확장은
+허용하지 않는다. 변경은 정상 cleanup과 안전한 deregistration 후 새 등록으로 진행한다.
+이 검사들은 외부 변경과 작업을 원자적으로 직렬화하는 fencing을 대신하지 않는다.
+
 이 결정은 실제 LVM/독립 mount 다중 Pool acceptance 결과가 확보되기 전까지 Proposed다.
 단위 테스트의 합성 backing과 기존 singleton kind E2E는 그 결과를 대신하지 않는다.
 서로 다른 그룹 또는 같은 node 안의 수동 이동은 이 단계의 구현 범위에 포함되지 않는다.

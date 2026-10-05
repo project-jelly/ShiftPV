@@ -162,6 +162,12 @@ Node는 sysfs와 읽기 전용 device-mapper table 조회로 backing device와 5
 운영자가 각 filesystem의 독립 할당을 보장해야 한다. 관리자가 host mapping을 동시에
 바꾸는 작업에 대한 원자적 fencing도 제공하지 않는다.
 
+등록된 Pool을 사용하는 동안 LV mapping·partition·filesystem·mount를 변경하거나 확장하지
+않는다. 변경은 신규 배치를 중단하고 volume·Move·cleanup을 정상 종료하여 Pool을 안전하게
+deregister한 뒤 수행하고, 새 Pool 등록으로 allocation을 다시 검증한다. 노드는 publish·identity
+release 직전과 inventory 전후에 live backing extents를 확인하지만 helper는 bound filesystem identity와 API 증거를
+확인하므로, 이 운영 제약이 작업 중 외부 mapping 변경을 막는 경계다.
+
 `CapacityIndependent=True`와 `status.capacityUnit`, generation과 fresh·complete inventory를
 함께 확인한다. 증거가 없거나 backing이 변경되면 Ready가 내려가고 신규 배치를 보류한다.
 최초 기록한 capacity identity는 정상 status 갱신으로 교체하거나 지우지 않는다.

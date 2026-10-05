@@ -28,3 +28,11 @@ sudo unshare --mount --propagation private \
   "${test_binary}" \
   -test.v \
   -test.run '^TestLinuxMountIntegration'
+
+measurement_binary="${temp_dir}/measurement.test"
+go test -c -o "${measurement_binary}" ./src/cmd/volume-helper
+sudo unshare --mount --propagation private \
+  env SHIFTPV_LINUX_MOUNT_INTEGRATION=1 \
+  "${measurement_binary}" \
+  -test.v \
+  -test.run '^TestLinuxMeasurementIntegration'
