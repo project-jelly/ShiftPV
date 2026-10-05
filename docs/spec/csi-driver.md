@@ -1,7 +1,6 @@
 # CSI Driver Contract
 
-> **Status:** ShiftPV 0.4.0 runtime이 따르는 계약이다. 저장소와 실제 node acceptance gate를 통과했으며
-> 아래의 명시된 product boundary 안에서 사용한다.
+현재 구현의 계약이다. 운영 검증 범위는 [Testing](../development/testing.md)을 따른다.
 
 `csi.shiftpv.io`는 node-local `hostPath` directory를 Kubernetes의 persistent RWO Filesystem volume으로
 제공한다. 이동은 source node와 disk가 정상인 상태에서 수행하는 planned cold mobility다. I/O를 멈추고

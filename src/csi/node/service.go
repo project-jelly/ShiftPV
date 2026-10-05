@@ -272,7 +272,7 @@ func (s *Service) poolRoot(ctx context.Context, copy volume.CopyIdentity) (volum
 		return volumeapi.Pool{}, "", fmt.Errorf("host root %q must be absolute", s.HostRoot)
 	}
 	root := filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator)))
-	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+	if err := readiness.VerifyHostPool(hostRoot, pool); err != nil {
 		return volumeapi.Pool{}, "", err
 	}
 	return pool, root, nil

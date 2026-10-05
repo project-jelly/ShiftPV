@@ -1,8 +1,7 @@
-# ShiftPV 0.4 Contracts
+# ShiftPV Contracts
 
-이 디렉터리는 0.4 구현과 운영 승인에 사용하는 normative contract다. 0.4.0 runtime은 이 계약을 따르고
-실제 node의 unclean OS reboot와 100회·12시간 soak를 통과했으며, 아래의 명시된 product boundary 안에서
-사용한다.
+현재 구현의 동작과 운영 경계를 설명한다. 검증 수준과 합격 조건은
+[Testing](../development/testing.md)에 있다.
 
 | 문서 | 단일 책임 |
 |---|---|
@@ -12,8 +11,7 @@
 | [source-cleanup.md](source-cleanup.md) | parent journal, exact-copy 삭제와 GC 경계 |
 | [metrics.md](metrics.md) | 운영 관측 신호와 freshness; 권한 증거와의 경계 |
 
-`MUST`, `MUST NOT`, `SHOULD`는 구현과 테스트가 따라야 할 요구사항을 뜻한다. 필드명이 확정되지 않은
-설명은 개념 이름이며 CRD schema를 먼저 고정한 뒤 코드와 동일하게 유지한다.
+`MUST`, `MUST NOT`, `SHOULD`는 구현과 테스트가 따라야 할 요구사항을 뜻한다.
 
 ## Product boundary
 

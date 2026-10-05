@@ -86,6 +86,32 @@ func capacityFailure(reason string, err error) Check {
 	return Check{Known: true, Reason: reason, Message: err.Error()}
 }
 
+// VerifyHostPool checks the mount and live backing with the node's host access.
+func VerifyHostPool(hostRoot string, pool volumeapi.Pool) error {
+	path, err := hostPath(hostRoot, pool.MountPath)
+	if err != nil {
+		return err
+	}
+	if err := VerifyMountedPath(path, pool); err != nil {
+		return err
+	}
+	return NewProbe(hostRoot).VerifyCapacityUnit(pool)
+}
+
+func (p *Probe) VerifyCapacityUnit(pool volumeapi.Pool) error {
+	if pool.CapacityPolicy == "" {
+		return nil
+	}
+	if pool.CapacityPolicy != volumeapi.PoolCapacityPolicyFixedBlock || pool.Status.CapacityUnit.Validate() != nil {
+		return fmt.Errorf("Pool has no supported anchored capacity allocation")
+	}
+	_, check := p.InspectCapacityUnit(pool)
+	if !check.OK {
+		return fmt.Errorf("verify live Pool allocation: %s: %s", check.Reason, check.Message)
+	}
+	return nil
+}
+
 // capacityIsolation inspects all local backing allocations before any writable
 // probe or inventory scan. Unsupported peers never become additional capacity.
 func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]allocationObservation {

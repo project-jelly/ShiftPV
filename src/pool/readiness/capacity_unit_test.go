@@ -95,12 +95,21 @@ func TestFixedBlockProbeAnchorsDirectoryFilesystemAndRejectsChangingBacking(t *t
 		t.Fatalf("directory allocation=%+v writes=%d", result, writes)
 	}
 	pool.Status.CapacityUnit = result.CapacityUnit
+	if err := p.VerifyCapacityUnit(pool); err != nil {
+		t.Fatalf("stable live allocation rejected: %v", err)
+	}
 	p.allocations = allocationResolver{extents: []capacityunit.Extent{{Device: "8:0", Start: 200, Sectors: 100}}}
+	if err := p.VerifyCapacityUnit(pool); err == nil {
+		t.Fatal("same filesystem device with changed backing passed the operation check")
+	}
 	result = p.Inspect(pool)
 	if result.Independent.Reason != "CapacityIdentityChanged" || writes != 1 {
 		t.Fatalf("changed backing was probed: %+v writes=%d", result, writes)
 	}
 	p.allocations = allocationResolver{err: fmt.Errorf("thin allocation unsupported")}
+	if err := p.VerifyCapacityUnit(pool); err == nil {
+		t.Fatal("unsupported live allocation passed the operation check")
+	}
 	result = p.Inspect(pool)
 	if result.Independent.OK || writes != 1 {
 		t.Fatal("unknown/thin allocation was approved")

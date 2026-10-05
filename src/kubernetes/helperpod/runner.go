@@ -2,8 +2,10 @@ package helperpod
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -78,11 +80,17 @@ func (r *Runner) FinalizeCreate(ctx context.Context, identity volume.CopyIdentit
 }
 
 func (r *Runner) StatFS(ctx context.Context, nodeName string) (poolcapacity.Filesystem, error) {
-	poolRoot, err := r.poolRoot(ctx, nodeName)
+	if r.Pools == nil || nodeName == "" {
+		return poolcapacity.Filesystem{}, fmt.Errorf("ShiftPVPool registry is required")
+	}
+	pool, err := r.Pools.PoolForNode(ctx, nodeName)
 	if err != nil {
 		return poolcapacity.Filesystem{}, err
 	}
-	return r.statFSAt(ctx, nodeName, poolRoot)
+	if pool.NodeName != nodeName {
+		return poolcapacity.Filesystem{}, fmt.Errorf("measurement Pool node changed")
+	}
+	return r.StatFSForPool(ctx, pool)
 }
 
 // StatFSForPool probes one exact capacity unit even when its node has others.
@@ -94,13 +102,19 @@ func (r *Runner) StatFSForPool(ctx context.Context, pool volumeapi.Pool) (poolca
 	if err != nil {
 		return poolcapacity.Filesystem{}, err
 	}
-	return r.statFSAt(ctx, pool.NodeName, current.MountPath)
+	expected, err := poolcapacity.MeasurementEvidence(pool)
+	if err != nil {
+		return poolcapacity.Filesystem{}, err
+	}
+	actual, err := poolcapacity.MeasurementEvidence(current)
+	if err != nil || actual != expected {
+		return poolcapacity.Filesystem{}, fmt.Errorf("Pool measurement evidence changed")
+	}
+	return r.statFSAt(ctx, current)
 }
 
-func (r *Runner) statFSAt(ctx context.Context, nodeName, poolRoot string) (poolcapacity.Filesystem, error) {
-	output, err := r.runForResultAtPath(ctx, nodeName, "pool-capacity", poolRoot, []string{
-		"sh", "-c", "stat -f -c '%b %a %S %d' /pool > /dev/termination-log",
-	})
+func (r *Runner) statFSAt(ctx context.Context, pool volumeapi.Pool) (poolcapacity.Filesystem, error) {
+	output, err := r.runMeasurement(ctx, pool, "statfs", "", nil)
 	if err != nil {
 		return poolcapacity.Filesystem{}, err
 	}
@@ -112,32 +126,41 @@ func (r *Runner) statFSAt(ctx context.Context, nodeName, poolRoot string) (poolc
 }
 
 func (r *Runner) VolumeUsage(ctx context.Context, nodeName, volumeID string) (int64, error) {
-	poolRoot, err := r.poolRoot(ctx, nodeName)
+	if r.Pools == nil || nodeName == "" {
+		return 0, fmt.Errorf("ShiftPVPool registry is required")
+	}
+	pool, err := r.Pools.PoolForNode(ctx, nodeName)
 	if err != nil {
 		return 0, err
 	}
-	return r.volumeUsageAt(ctx, nodeName, volumeID, poolRoot)
+	if pool.NodeName != nodeName {
+		return 0, fmt.Errorf("measurement Pool node changed")
+	}
+	return r.volumeUsageAt(ctx, pool, volumeID, nil)
 }
 
 func (r *Runner) VolumeUsageForCopy(ctx context.Context, copy volume.CopyIdentity) (int64, error) {
-	if err := copy.Validate(); err != nil {
-		return 0, err
+	if copy.Validate() != nil || copy.Role != volume.RoleServing {
+		return 0, fmt.Errorf("usage requires an exact serving copy")
 	}
-	poolRoot, err := r.poolRootForIdentity(ctx, copy)
+	if r.Pools == nil {
+		return 0, fmt.Errorf("ShiftPVPool registry is required")
+	}
+	pool, err := r.Pools.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return 0, err
 	}
-	return r.volumeUsageAt(ctx, copy.NodeName, copy.VolumeID, poolRoot)
+	if pool.Name != copy.PoolName || pool.UID != copy.PoolUID || pool.NodeName != copy.NodeName {
+		return 0, fmt.Errorf("usage Pool identity changed")
+	}
+	return r.volumeUsageAt(ctx, pool, copy.VolumeID, &copy)
 }
 
-func (r *Runner) volumeUsageAt(ctx context.Context, nodeName, volumeID, poolRoot string) (int64, error) {
-	path, err := volume.Path(mountPath, volumeID)
-	if err != nil {
+func (r *Runner) volumeUsageAt(ctx context.Context, pool volumeapi.Pool, volumeID string, copy *volume.CopyIdentity) (int64, error) {
+	if _, err := volume.Path(mountPath, volumeID); err != nil {
 		return 0, err
 	}
-	output, err := r.runForResultAtPath(ctx, nodeName, volumeID, poolRoot, []string{
-		"sh", "-c", "du -sb \"$1\" | awk '{print $1}' > /dev/termination-log", "shiftpv-du", path,
-	})
+	output, err := r.runMeasurement(ctx, pool, "usage", volumeID, copy)
 	if err != nil {
 		return 0, err
 	}
@@ -146,6 +169,31 @@ func (r *Runner) volumeUsageAt(ctx context.Context, nodeName, volumeID, poolRoot
 		return 0, retryableError{err: fmt.Errorf("decode helper volume usage result %q", output)}
 	}
 	return bytes, nil
+}
+
+func (r *Runner) runMeasurement(ctx context.Context, pool volumeapi.Pool, action, volumeID string, copy *volume.CopyIdentity) (string, error) {
+	evidence, err := poolcapacity.MeasurementEvidence(pool)
+	if err != nil {
+		return "", err
+	}
+	command := []string{"/shiftpv-volume-helper", action,
+		"--pool-name=" + pool.Name, "--pool-uid=" + pool.UID, "--node-name=" + pool.NodeName,
+		"--pool-evidence=" + evidence, volumeapi.PoolReadinessStaleAfterArgument(r.PoolReadinessStaleAfter)}
+	if volumeID != "" {
+		command = append(command, "--volume-id="+volumeID)
+	}
+	if copy != nil {
+		encoded, err := json.Marshal(copy)
+		if err != nil {
+			return "", err
+		}
+		command = append(command, "--copy-identity="+string(encoded))
+	}
+	label := volumeID
+	if label == "" {
+		label = "pool-capacity"
+	}
+	return r.runForResultAtPath(ctx, pool.NodeName, label, pool.MountPath, command)
 }
 
 func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string) (string, error) {
@@ -163,6 +211,8 @@ func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poo
 	}
 
 	desired := r.helperPod(nodeName, volumeID, poolRoot, command)
+	desired.Spec.AutomountServiceAccountToken = boolPtr(true)
+	desired.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
 	pods := r.Client.CoreV1().Pods(r.Namespace)
 	pod, err := pods.Create(ctx, desired, metav1.CreateOptions{})
 	if err != nil {
@@ -215,10 +265,7 @@ func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poo
 	return result, nil
 }
 
-// sameResultPod binds a short-lived stat/du result to the exact Pod
-// incarnation and execution shape that the Runner created. Pod names are
-// reusable, so a name-only watch could otherwise accept a replacement Pod's
-// termination message as trusted capacity or usage data.
+// sameResultPod accepts results only from the created Pod UID and execution shape.
 func sameResultPod(expected, current *corev1.Pod, uid types.UID) error {
 	if expected == nil || current == nil || uid == "" || current.UID != uid {
 		return fmt.Errorf("helper Pod identity changed")
@@ -248,6 +295,9 @@ func resultPodShapeChecks(expected, current *corev1.Pod) []fieldCheck {
 		{"spec.nodeName", func() bool { return current.Spec.NodeName == expected.Spec.NodeName }},
 		{"spec.serviceAccountName", func() bool {
 			return current.Spec.ServiceAccountName == expected.Spec.ServiceAccountName
+		}},
+		{"spec.automountServiceAccountToken", func() bool {
+			return reflect.DeepEqual(current.Spec.AutomountServiceAccountToken, expected.Spec.AutomountServiceAccountToken)
 		}},
 		{"spec.restartPolicy", func() bool { return current.Spec.RestartPolicy == corev1.RestartPolicyNever }},
 		{"spec.hostNetwork", func() bool { return !current.Spec.HostNetwork }},
@@ -295,17 +345,6 @@ func (r *Runner) helperPod(nodeName, volumeID, poolRoot string, command []string
 			}},
 		},
 	}
-}
-
-func (r *Runner) poolRoot(ctx context.Context, nodeName string) (string, error) {
-	if r.Pools == nil {
-		return "", fmt.Errorf("ShiftPVPool registry is required")
-	}
-	pool, err := r.Pools.PoolForNode(ctx, nodeName)
-	if err != nil {
-		return "", fmt.Errorf("resolve ShiftPVPool for node %q: %w", nodeName, err)
-	}
-	return pool.MountPath, nil
 }
 
 func (r *Runner) poolRootForIdentity(ctx context.Context, identity volume.CopyIdentity) (string, error) {

@@ -1,8 +1,5 @@
 # Metrics Contract
 
-> **Status:** 현재 0.4 구현 후보가 내보내는 metric 계약이다. Metric은 운영 관찰면이며 storage
-> authority가 아니다.
-
 Metrics는 `ShiftPVPool`, `ShiftPVVolume`, `ShiftPVMove`와 node-local observation의 수렴 상태를 보여 주는
 관찰면이다. Controller, Node 또는 운영 절차는 Prometheus 값을 allocation, publication, promotion, deletion,
 cleanup 완료나 capacity release의 권한으로 사용하지 않는다.

@@ -35,7 +35,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: shiftpv-volume-helper create|serve-source|copy|promote|verify-owner|cleanup [flags]")
+		return fmt.Errorf("usage: shiftpv-volume-helper create|serve-source|copy|promote|verify-owner|cleanup|statfs|usage [flags]")
 	}
 	switch os.Args[1] {
 	case "create":
@@ -50,6 +50,8 @@ func run() error {
 		return runMovePromote(os.Args[2:])
 	case "verify-owner":
 		return runVerifyOwner(os.Args[2:])
+	case "statfs", "usage":
+		return runMeasurement(os.Args[1], os.Args[2:])
 	default:
 		return fmt.Errorf("unknown volume helper action %q", os.Args[1])
 	}
@@ -91,12 +93,8 @@ func runServeSource(arguments []string) error {
 	return command.Run()
 }
 
-// helperPoolReadinessFlag registers the probe staleness budget a node-bound
-// helper judges Pool readiness with. Only the cleanup helper consumes it today,
-// through the move source publication proof in helperauth; every other
-// subcommand rechecks authority through PoolForIdentity and accepts the flag only
-// so a controller may forward it without version-skewing the CLI. The name and
-// default are shared with the controller so parent and child agree.
+// Cleanup and measurement use the controller's readiness budget.
+// Move effects accept this flag for CLI compatibility and check exact authority.
 func helperPoolReadinessFlag(flags *flag.FlagSet, staleAfter *time.Duration) {
 	flags.DurationVar(staleAfter, volumeapi.PoolReadinessStaleAfterFlag,
 		volumeapi.DefaultPoolReadinessStaleAfter, "maximum age of a successful node Pool readiness probe")

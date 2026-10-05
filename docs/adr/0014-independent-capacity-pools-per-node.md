@@ -6,41 +6,26 @@
 
 ## Context
 
-기존 `ShiftPVPool`은 node당 하나만 배치 대상으로 사용할 수 있었다. 용량 예약과
-`statfs` helper, NodePublish, Move의 source/destination 및 자동 이동 후보가 node
-하나에 Pool 하나가 있다는 가정을 공유한다. 이미 마운트된 thick LV나 별도 filesystem을
-같은 node에 추가하려면 이 가정을 동시에 바꿔야 한다. 경로가 다르다는 사실만으로
-용량 독립성을 보장할 수는 없다.
+기존 배치와 용량 계산은 node당 Pool 하나를 가정했다. 같은 node에 이미 마운트된
+thick LV나 별도 filesystem을 추가하려면 독립 용량을 Pool별로 구분해야 한다.
+서로 다른 경로만으로는 용량 독립성을 보장할 수 없다.
 
 ## Decision
 
-`ShiftPVPool` 한 개는 독립 할당된 용량 단위 한 개다. 서로 다른 `mountPath`를 가진
-Pool 두 개를 같은 node에 등록할 수 있지만, 두 Pool이 같은 filesystem device 또는
-알려진 공유 backing을 쓰면 배치에 사용하지 않는다. 겹치거나 중첩된 경로도 거부한다.
-여러 Pool/node의 모든 Pool에는 `capacityPolicy: FixedBlock` 검증을 요구한다.
-별도 mount에는 [0013](0013-opt-in-pool-mount-identity.md)의 `RequireMountPoint` 검증도 권장한다. 기존 directory Pool은 node의 기존 filesystem 용량 단위로 남을 수 있으나,
-새 Pool과 실제 용량을 공유하면 함께 배치할 수 없다. 복잡한 LVM thin pool, Btrfs
-subvolume, 외부 스토리지처럼 backing 독립성을 경로에서 증명할 수 없는 경우에는
-지원하는 증거 또는 별도 capacity-domain 회계가 생기기 전까지 독립 Pool로 승인하지
-않는다.
+- `ShiftPVPool` 하나가 독립 용량 단위 하나를 소유한다. 같은 node의 모든 Pool에
+  `capacityPolicy: FixedBlock`을 요구하며 backing 구간과 경로의 중복을 거부한다.
+- ext4/xfs의 고정 device, partition, thick LVM linear allocation을 검증한다.
+  독립성을 증명할 수 없는 thin/shared backing은 승인하지 않는다. 별도 mount에는
+  [RequireMountPoint](0013-opt-in-pool-mount-identity.md)를 권장한다.
+- `spec.poolGroup`은 StorageClass 선택 범위이며 생략하면 `default`다. class는
+  `shiftpv.io/pool-group`으로 그룹을 선택한다. PVC 하나는 수용 가능한 Pool 하나에 고정된다.
+- 예약과 생성·이동·삭제 lock은 Pool UID를 사용한다. 게시·삭제·이동 경로는 저장된
+  copy identity로 찾으며, 승인된 destination Pool은 재시도에서도 바뀌지 않는다.
+- 자동 이동은 같은 그룹의 다른 Ready node로 제한한다. 같은 node의 Pool 간 이동과
+  그룹 간 수동 이동은 후속 기능이다.
 
-Pool의 `spec.poolGroup`은 StorageClass 선택 범위다. 생략하면 `default`이며 기존
-`shiftpv`와 `shiftpv-retain`은 그 그룹을 사용한다. StorageClass의 `shiftpv.io/pool-group`
-parameter로 다른 그룹을 지정할 수 있다. 같은 그룹의 여러 Pool이 같은 node에
-있으면 요청량, 논리 예약 여유, 실제 filesystem 여유를 모두 충족하는 Pool 하나를
-선택하고 그 Pool name/UID를 Volume copy identity에 고정한다. 서로 다른 그룹이면
-StorageClass가 명시적으로 선택한다. 그룹은 용량을 합산하는 회계 단위가 아니다.
-
-예약, 직렬화 lock, `statfs` 및 helper hostPath는 node가 아닌 정확한 Pool UID를
-사용한다. 기존 Volume의 publish/unpublish/delete와 Move의 source/target은 저장된
-copy identity로 Pool을 찾는다. 자동 계획 이동은 같은 `poolGroup`의 다른 Ready
-Pool만 후보로 삼고, destination Pool UID를 Move에 기록해 재시도 시 바꾸지 않는다.
-같은 그룹에 다른 node의 후보가 없으면 이동 가능한 곳이 없는 것으로 취급한다.
-서로 다른 그룹 사이의 수동 이동은 별도 결정으로 다룬다.
-
-등록, 조회, readiness, metrics, 삭제 finalizer는 Pool별로 수렴한다. 특정 Pool이
-NotReady여도 같은 node의 다른 Pool에 대한 관찰과 기존 복사본 처리를 막지 않는다.
-Pool 선택 근거나 용량 독립성이 불명확하면 새 배치와 위험한 이동을 보류한다.
+측정 전후 검증은 [StorageClass contract](../spec/storage-class.md#measurement-verification),
+등록과 backing 변경 절차는 [Chart guide](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.
 
 ## Alternatives considered
 
@@ -53,28 +38,8 @@ Pool 선택 근거나 용량 독립성이 불명확하면 새 배치와 위험�
 
 ## Consequences
 
-`ShiftPVPool`과 `poolGroup`의 책임을 분리한다. Pool은 용량과 복사본 identity를
-소유하고 그룹은 선택 범위만 표현한다. 기존 하나의 Pool/node 설치와 기본
-StorageClass의 동작은 유지한다. 다중 Pool을 실제로 열기 전에는 Pool별 예약,
-헬퍼·publication 경로, Move recovery, topology, 용량 독립성 거부 검사를 함께
-검증해야 한다. 이 결정은 replication, HA, RWX 또는 그룹 간 자동 이동을 추가하지
-않는다.
+Pool은 용량과 copy identity를, 그룹은 선택 범위를 표현한다. 용량을 그룹 단위로
+합산하거나 PVC를 여러 Pool에 분할하지 않는다. 기존 단일 directory Pool도 사용할 수 있다.
 
-### Implementation progress
-
-Pool group 선택, 정확한 copy identity 기반 생성·게시 경로, Pool UID 기준 용량
-예약을 단계적으로 연결한다. Move의 source usage, destination admission, 복사·승격
-helper, scanner publication proof와 recovery도 정확한 Pool incarnation을 따른다.
-생성과 이동은 같은 Pool UID lock으로 예약과 durable intent를 함께 기록한다.
-승인된 Move는 재시도에서 다른 Pool로 바뀌지 않는다.
-
-다중 등록은 모든 Pool이 `FixedBlock` 검증에 참여하는 경우에만 허용하는 구현을
-추가한다. Node는 ext4/xfs와 fixed partition/linear backing 구간을 비교하고, 겹치는
-backing·경로 또는 알 수 없는 구성을 쓰기 probe·inventory 전에 거부한다. 기록한
-capacity identity는 교체하지 않으며 metrics도 Pool UID별로 계산한다. Kernel이 WWID를
-노출하면 native alias도 함께 비교한다. 외부 계층이 숨긴 공유나 host mapping 변경과
-작업의 원자적 fencing은 보장하지 않는다.
-
-이 결정은 실제 LVM/독립 mount 다중 Pool acceptance 결과가 확보되기 전까지 Proposed다.
-단위 테스트의 합성 backing과 기존 singleton kind E2E는 그 결과를 대신하지 않는다.
-서로 다른 그룹 또는 같은 node 안의 수동 이동은 이 단계의 구현 범위에 포함되지 않는다.
+구현과 unit/Kind 검증은 완료했다. 실제 thick LVM·독립 disk의 다중 Pool 검증이 남아
+있으므로 상태는 Proposed로 유지한다. 합격 조건은 [Testing](../development/testing.md#multi-pool-qualification)에 있다.

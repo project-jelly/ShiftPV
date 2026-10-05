@@ -1,7 +1,7 @@
 # ShiftPV Documentation
 
 문서는 한 사실을 한 곳에서만 소유한다. 과거 동작과 변경 일지는 Git history와 release가 보존하며,
-본문은 0.4 구현과 운영에 필요한 현재 계약만 설명한다.
+본문은 현재 구현과 운영 계약을 설명한다.
 
 처음 설치한다면 [Quickstart](quickstart.md)에서 시작한다.
 

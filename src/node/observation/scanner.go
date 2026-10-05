@@ -47,7 +47,7 @@ func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
 		return err
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
-	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
 		return err
 	}
 	return ownership.ReleaseEmptyPool(ctx, root, ownership.PoolIdentity{InstallationID: installationID, PoolUID: pool.UID})
@@ -75,7 +75,7 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 		return result
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
-	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
 		result.Message = "MountUnavailable: " + err.Error()
 		return result
 	}
@@ -102,7 +102,7 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	}
 	result.Copies = append(result.Copies, unknown...)
 	result.Truncated = result.Truncated || truncated
-	if err := readiness.VerifyMountedPath(root, pool); err != nil {
+	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
 		result.Message = "MountUnavailable: " + err.Error()
 		return result
 	}
