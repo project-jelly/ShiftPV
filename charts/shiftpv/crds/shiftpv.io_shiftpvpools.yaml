@@ -108,6 +108,20 @@ spec:
                   type: integer
                   format: int64
                   minimum: 0
+                capacityProbeSupported:
+                  type: boolean
+                capacityProbe:
+                  description: Answer to one live capacity request, bound to a unique request ID and exact Pool evidence. Ordinary cached capacity cannot approve allocation.
+                  type: object
+                  required: [requestID, evidence, totalBytes, availableBytes, availableInodes, observedAt]
+                  properties:
+                    requestID: {type: string, pattern: '^[0-9a-f]{32}$'}
+                    evidence: {type: string, pattern: '^[0-9a-f]{64}$'}
+                    totalBytes: {type: integer, format: int64, minimum: 0}
+                    availableBytes: {type: integer, format: int64, minimum: 0}
+                    availableInodes: {type: integer, format: int64, minimum: 0}
+                    error: {type: string, maxLength: 1024}
+                    observedAt: {type: string, format: date-time}
                 capacityUnit:
                   type: object
                   required: [device, source, filesystem, extents]

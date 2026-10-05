@@ -180,6 +180,9 @@ cleanup_capacity_test() {
 }
 trap cleanup_capacity_test EXIT
 
+kubectl wait --for=jsonpath='{.status.capacityProbeSupported}'=true \
+	"shiftpvpool/${CAPACITY_POOL}" --timeout=2m
+
 kubectl patch shiftpvpool "${CAPACITY_POOL}" --type=merge -p '{"spec":{"capacity":{"limit":"128Mi"}}}' >/dev/null
 docker exec "${CAPACITY_NODE}" mount -t tmpfs -o size=128m shiftpv-capacity "${CAPACITY_PATH}"
 docker exec "${CAPACITY_NODE}" sh -c "dd if=/dev/zero of='${CAPACITY_PATH}/external-fill' bs=1M count=80 >/dev/null 2>&1"
@@ -200,6 +203,15 @@ EOF
 create_workload "${PHYSICAL_NAME}" 64Mi
 wait_for_resource_exhausted "${PHYSICAL_NAME}"
 wait_for_volume_hold_count 0
+# This rejection must come from a newly requested Node read, with the external
+# file reflected in the reply. A cached free-space value cannot approve it.
+LIVE_PROBE=$(kubectl get "shiftpvpool/${CAPACITY_POOL}" -o json)
+jq -e '
+  (.metadata.annotations["shiftpv.io/capacity-probe-request"] | fromjson) as $request |
+  .status.capacityProbe as $answer |
+  $answer.requestID == $request.id and $answer.evidence == $request.evidence and
+  (($answer.error // "") == "") and $answer.availableBytes < 67108864
+' <<<"${LIVE_PROBE}" >/dev/null
 
 # Removing the external file makes the same pending claim converge.
 docker exec "${CAPACITY_NODE}" rm -f "${CAPACITY_PATH}/external-fill"

@@ -29,8 +29,11 @@ The notification grants no capacity: each retry runs admission again.
 
 Apply the updated Pool CRD before upgrading. New nodes report
 `status.filesystemTotalBytes` for inexpensive temporary rejection; older nodes
-or CRDs fall back to a live helper measurement. Creation still measures live
-free space. No existing Pool or StorageClass settings need changing.
+or CRDs fall back to a live helper measurement. New nodes also answer fresh
+capacity requests through the Kubernetes API, avoiding a measurement Pod for
+CSI admission. Missing support or a 2-second response timeout uses the helper.
+Deletion waits up to 5 seconds for its existing causal absence proof before
+returning a retry. No existing Pool or StorageClass settings need changing.
 
 
 ## Install

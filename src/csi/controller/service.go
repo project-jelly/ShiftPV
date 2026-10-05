@@ -71,6 +71,7 @@ type Service struct {
 	CapacityProbe           PoolCapacityProbe
 	PoolLocks               *poolcapacity.Locker
 	PoolReadinessStaleAfter time.Duration
+	CleanupAbsenceWait      time.Duration
 	ObserveStep             func(string, time.Duration)
 	RetryRequests           interface {
 		Register(namespace, name, uid, node, group string, requested int64)
@@ -297,6 +298,9 @@ func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenc
 		return status.Errorf(codes.FailedPrecondition, "cleanup is phase=%q", cleanup.Status.Phase)
 	}
 	cleanup, settled, settleErr := s.Cleanups.ReconcileAbsence(ctx, cleanup)
+	if settleErr == nil && !settled {
+		cleanup, settled, settleErr = s.Cleanups.WaitForAbsence(ctx, cleanup, s.CleanupAbsenceWait)
+	}
 	if settleErr != nil {
 		if errors.Is(settleErr, cleanupapi.ErrConflict) {
 			return status.Errorf(codes.FailedPrecondition, "verify exact cleanup absence: %v", settleErr)

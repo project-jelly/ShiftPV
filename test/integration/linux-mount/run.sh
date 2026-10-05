@@ -36,3 +36,8 @@ sudo unshare --mount --propagation private \
   "${measurement_binary}" \
   -test.v \
   -test.run '^TestLinuxMeasurementIntegration'
+
+live_capacity_binary="${temp_dir}/live-capacity.test"
+go test -c -o "${live_capacity_binary}" ./src/pool/measurement
+sudo unshare --mount --propagation private \
+  "${live_capacity_binary}" -test.v -test.run '^TestLinuxLiveCapacity'

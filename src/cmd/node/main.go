@@ -20,6 +20,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/metrics"
 	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
 	nodeobservation "github.com/project-jelly/ShiftPV/src/node/observation"
+	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
 	poolreadiness "github.com/project-jelly/ShiftPV/src/pool/readiness"
 )
 
@@ -41,6 +42,7 @@ func main() {
 	}
 
 	registry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
+	probeRegistry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -74,8 +76,13 @@ func main() {
 	}
 
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() { errCh <- readinessReconciler.Run(ctx) }()
+	go func() {
+		worker := &poolmeasurement.Node{NodeName: *nodeName, Pools: probeRegistry,
+			Probe: &poolmeasurement.Probe{Pools: probeRegistry, HostRoot: *hostRoot}}
+		errCh <- worker.Run(ctx, probeRegistry.Client)
+	}()
 	go func() {
 		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)

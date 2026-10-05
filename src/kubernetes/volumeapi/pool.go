@@ -32,12 +32,15 @@ type Pool struct {
 	DeletionTimestamp       *metav1.Time
 	Finalizers              []string
 	IdentityReleaseApproval string
+	CapacityProbeRequest    string
 	Status                  PoolStatus
 }
 
 const DefaultPoolGroup = "default"
 
 type PoolStatus struct {
+	CapacityProbeSupported bool                     `json:"capacityProbeSupported,omitempty"`
+	CapacityProbe          *PoolCapacityProbeResult `json:"capacityProbe,omitempty"`
 	// FilesystemTotalBytes is a node observation for rejection classification,
 	// never a substitute for live free-space admission.
 	FilesystemTotalBytes int64              `json:"filesystemTotalBytes,omitempty"`
@@ -47,6 +50,18 @@ type PoolStatus struct {
 	MountIdentity        *PoolMountIdentity `json:"mountIdentity,omitempty"`
 	Conditions           []metav1.Condition `json:"conditions,omitempty"`
 	Inventory            *PoolInventory     `json:"inventory,omitempty"`
+}
+
+// PoolCapacityProbeResult answers one causally requested read. A result from a
+// different request or Pool evidence must never approve a new allocation.
+type PoolCapacityProbeResult struct {
+	RequestID       string      `json:"requestID"`
+	Evidence        string      `json:"evidence"`
+	TotalBytes      int64       `json:"totalBytes"`
+	AvailableBytes  int64       `json:"availableBytes"`
+	AvailableInodes int64       `json:"availableInodes"`
+	Error           string      `json:"error,omitempty"`
+	ObservedAt      metav1.Time `json:"observedAt"`
 }
 
 // PoolMountIdentity anchors an opted-in Pool to the mounted filesystem first
@@ -450,6 +465,15 @@ func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string
 			if err != nil {
 				return fmt.Errorf("encode ShiftPVPool status: %w", err)
 			}
+			// The request worker owns only this field. Preserve its latest answer
+			// when readiness retries a whole-status write after a conflict.
+			if probe, found, err := unstructured.NestedMap(object.Object, "status", "capacityProbe"); err != nil {
+				return err
+			} else if found {
+				data["capacityProbe"] = probe
+			} else {
+				delete(data, "capacityProbe")
+			}
 			if err := unstructured.SetNestedMap(object.Object, data, "status"); err != nil {
 				return fmt.Errorf("set ShiftPVPool status: %w", err)
 			}
@@ -610,7 +634,8 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 	return Pool{
 		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, PoolGroup: poolGroup, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy, CapacityPolicy: capacityPolicy,
 		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), DeletionTimestamp: object.GetDeletionTimestamp(),
-		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation], Status: status,
+		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation],
+		CapacityProbeRequest: object.GetAnnotations()[PoolCapacityProbeRequestAnnotation], Status: status,
 	}, nil
 }
 

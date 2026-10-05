@@ -40,6 +40,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	mobilitycontroller "github.com/project-jelly/ShiftPV/src/mobility/controller"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
 	"github.com/project-jelly/ShiftPV/src/provisioning"
 	webhookcertificate "github.com/project-jelly/ShiftPV/src/webhook/certificate"
 )
@@ -53,6 +54,7 @@ type config struct {
 	storageClassNames                         flagvalue.Names
 	endpoint, namespace, helperImage          string
 	helperWait                                time.Duration
+	cleanupAbsenceWait                        time.Duration
 	helperCPURequest, helperMemoryRequest     string
 	helperCPULimit, helperMemoryLimit         string
 	helperServiceAccount                      string
@@ -76,6 +78,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.namespace, "namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
 	flag.StringVar(&cfg.helperImage, "helper-image", "busybox:1.37", "directory helper Pod image")
 	flag.DurationVar(&cfg.helperWait, "helper-timeout", 2*time.Minute, "helper Pod completion timeout")
+	flag.DurationVar(&cfg.cleanupAbsenceWait, "cleanup-absence-wait", 5*time.Second, "bounded wait for post-delete absence proof; zero returns immediately")
 	flag.StringVar(&cfg.helperCPURequest, "helper-cpu-request", "10m", "helper Pod CPU request")
 	flag.StringVar(&cfg.helperMemoryRequest, "helper-memory-request", "16Mi", "helper Pod memory request")
 	flag.StringVar(&cfg.helperCPULimit, "helper-cpu-limit", "100m", "helper Pod CPU limit")
@@ -100,6 +103,9 @@ func parseFlags() config {
 	flag.Parse()
 	if cfg.poolReadinessStaleAfter <= 0 {
 		klog.Fatalf("pool readiness stale duration must be positive")
+	}
+	if cfg.cleanupAbsenceWait < 0 || cfg.cleanupAbsenceWait > 30*time.Second {
+		klog.Fatalf("cleanup absence wait must be between zero and 30 seconds")
 	}
 	if cfg.moveJournalRetention < time.Hour {
 		klog.Fatalf("move journal retention must be at least one hour")
@@ -129,13 +135,17 @@ func main() {
 	retryPools := &volumeapi.Registry{Client: retryClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
 	capacityRetries := provisioning.NewRetries(retryClients.Typed, retryPools)
 	go capacityRetries.Run(ctx, retryClients.Dynamic)
+	probeConfig := capacityRetryRESTConfig(config)
+	probeConfig.UserAgent = "shiftpv-capacity-probe"
+	probePools := &volumeapi.Registry{Client: wiring.ForConfig(probeConfig, "capacity probe", fatal).Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
+	capacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: operator, ObserveStep: exporter.ObserveProvisioningStep}
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	controllerService := &controllercsi.Service{
 		Client: client, Namespace: cfg.namespace, Operator: operator, Volumes: volumeRegistry,
-		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
-		Cleanups: cleanupStore, CleanupOperator: operator,
+		CapacityPools: volumeRegistry, CapacityProbe: capacityProbe, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
+		Cleanups: cleanupStore, CleanupOperator: operator, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
 		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, ObserveStep: exporter.ObserveProvisioningStep, RetryRequests: capacityRetries,
 	}
 	identityService := &identity.Service{Version: version}
