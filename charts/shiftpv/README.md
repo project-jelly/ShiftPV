@@ -20,6 +20,19 @@ storage operator가 준비해야 한다.
 아래 설치 예시는 기존 ShiftPV 리소스가 없는 클러스터를 대상으로 한다.
 기존 설치는 [업그레이드 절차](../../docs/development/versioning.md#existing-installation-upgrades)를 따른다.
 
+## Provisioning retries
+
+`sidecars.provisioner.retryIntervalStart` defaults to `1s` and
+`retryIntervalMax` to `30s`; both apply to provisioning and deletion.
+Reservation changes wake waiting Pod-owned PVCs on the same node and Pool group.
+The notification grants no capacity: each retry runs admission again.
+
+Apply the updated Pool CRD before upgrading. New nodes report
+`status.filesystemTotalBytes` for inexpensive temporary rejection; older nodes
+or CRDs fall back to a live helper measurement. Creation still measures live
+free space. No existing Pool or StorageClass settings need changing.
+
+
 ## Install
 
 다음은 공개된 Chart 0.5.10의 설치 예시다. 재마운트 확인까지 포함한 절차와 image digest pin은

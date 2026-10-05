@@ -38,12 +38,15 @@ type Pool struct {
 const DefaultPoolGroup = "default"
 
 type PoolStatus struct {
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	LastProbeTime      metav1.Time        `json:"lastProbeTime,omitempty"`
-	CapacityUnit       *PoolCapacityUnit  `json:"capacityUnit,omitempty"`
-	MountIdentity      *PoolMountIdentity `json:"mountIdentity,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
-	Inventory          *PoolInventory     `json:"inventory,omitempty"`
+	// FilesystemTotalBytes is a node observation for rejection classification,
+	// never a substitute for live free-space admission.
+	FilesystemTotalBytes int64              `json:"filesystemTotalBytes,omitempty"`
+	ObservedGeneration   int64              `json:"observedGeneration,omitempty"`
+	LastProbeTime        metav1.Time        `json:"lastProbeTime,omitempty"`
+	CapacityUnit         *PoolCapacityUnit  `json:"capacityUnit,omitempty"`
+	MountIdentity        *PoolMountIdentity `json:"mountIdentity,omitempty"`
+	Conditions           []metav1.Condition `json:"conditions,omitempty"`
+	Inventory            *PoolInventory     `json:"inventory,omitempty"`
 }
 
 // PoolMountIdentity anchors an opted-in Pool to the mounted filesystem first

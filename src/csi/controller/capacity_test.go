@@ -784,3 +784,50 @@ func validCurrentCopy(volumeID, nodeName string) *volume.CopyIdentity {
 		NodeName: nodeName, Role: volume.RoleServing,
 	}
 }
+
+func TestReservationDenialReusesOnlyFreshTotalObservation(t *testing.T) {
+	for name, change := range map[string]func(*volumeapi.Pool){
+		"fresh":                 func(*volumeapi.Pool) {},
+		"missing":               func(p *volumeapi.Pool) { p.Status.FilesystemTotalBytes = 0 },
+		"stale":                 func(p *volumeapi.Pool) { p.Status.LastProbeTime = metav1.NewTime(time.Now().Add(-time.Hour)) },
+		"generation":            func(p *volumeapi.Pool) { p.Generation++ },
+		"not ready":             func(p *volumeapi.Pool) { p.Status.Conditions[0].Status = metav1.ConditionFalse },
+		"oversized observation": func(p *volumeapi.Pool) { p.Status.FilesystemTotalBytes = 32 << 20 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{TotalBytes: 256 << 20, AvailableBytes: 256 << 20}}
+			service := capacityService(fake.NewClientset(scheduledScratchPVC("worker-a"), scratchConsumerPod("worker-a")), "128Mi", map[string]volumeapi.State{"existing": {OwnerNode: "worker-a", CapacityBytes: 128 << 20, CurrentCopy: capacityCopy("pool-uid", "worker-a")}}, probe)
+			registry := service.CapacityPools.(*fakePoolCapacityRegistry)
+			registry.pool.Generation = 1
+			registry.pool.Status = volumeapi.PoolStatus{ObservedGeneration: 1, LastProbeTime: metav1.Now(), FilesystemTotalBytes: 256 << 20, Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}}}
+			change(&registry.pool)
+			req := validCreateRequest("worker-a")
+			req.Parameters = map[string]string{PVCNameKey: "scratch", PVCNamespaceKey: "vmtest"}
+			for i := 0; i < 3; i++ {
+				if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+					t.Fatalf("%v", err)
+				}
+			}
+			want := 3
+			if name == "fresh" {
+				want = 0
+			}
+			if probe.callCount() != want {
+				t.Fatalf("probe calls=%d want=%d", probe.callCount(), want)
+			}
+			// Once the reservation is gone, approval must probe live space despite the observation.
+			registry.mu.Lock()
+			delete(registry.volumes, "existing")
+			registry.mu.Unlock()
+			probe.mu.Lock()
+			probe.stats.AvailableBytes = 0
+			probe.mu.Unlock()
+			if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.Unavailable {
+				t.Fatalf("cached observation admitted full filesystem: %v", err)
+			}
+			if probe.callCount() != want+1 {
+				t.Fatal("admission skipped live measurement")
+			}
+		})
+	}
+}

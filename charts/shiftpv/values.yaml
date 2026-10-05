@@ -104,6 +104,8 @@ serviceAccount:
 sidecars:
   provisioner:
     image: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
+    retryIntervalStart: 1s
+    retryIntervalMax: 30s
     resources: {}
   registrar:
     image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0

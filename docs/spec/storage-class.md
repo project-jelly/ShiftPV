@@ -92,6 +92,20 @@ inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경�
 external-provisioner가 `selected-node`를 유지한 채 재시도해야 용량 반환 후 해당 PVC가 수렴한다.
 PVC 또는 Pod 조회가 일시적으로 실패하면 재배치 결정을 추측하지 않고 재시도한다.
 
+### Capacity retry notification
+
+Node readiness reports `status.filesystemTotalBytes` with the existing generation
+and probe timestamp. A fresh Ready observation may classify a logical shortage
+as temporary without another helper. Unknown, stale or apparently undersized
+observations require a live probe; approval always checks live free space.
+
+Pod-owned PVCs fixed to a node are indexed by PVC UID, node and Pool group after
+a temporary capacity denial. Volume, Move and Pool events re-read the durable
+ledger and notify eligible Pending PVCs through `shiftpv.io/capacity-retry`.
+PVC updates retain UID and resourceVersion, and never change selected-node.
+The index is bounded and ephemeral; normal provisioner retries recover missed
+events and controller restarts. Notifications grant no capacity or fairness guarantee.
+
 ## Capacity ownership
 
 Capacity는 Volume과 Move journal의 hold로 계산한다.

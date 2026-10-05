@@ -148,3 +148,13 @@ capacity accounting이 같은 결론을 가리켜야 한다.
 
 Soak 시간과 횟수는 cluster 규모와 disk 속도에 맞춰 release checklist에서 고정한다. 실패한 run은
 resource snapshot, logs, metrics, directory inventory를 보존하고 자동 재실행으로 덮지 않는다.
+
+## CDI provisioning latency
+
+For the two-VM/250Gi Pool scenario, compare reservation return → next
+`CreateVolume` start, rejection helper count, and successful creation duration.
+Use Controller level-2 step logs and, when enabled,
+`shiftpv_provisioning_step_duration_seconds`. Nested durations must not be summed.
+Confirm `shiftpv.io/capacity-retry` preserves selected-node, and repeat with a
+Controller restart and a different Pool group. Check that Deleting Volumes and
+unsettled Move holds remain charged. Fake API timing is not VM latency evidence.

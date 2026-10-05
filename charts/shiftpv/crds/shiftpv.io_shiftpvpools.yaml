@@ -104,6 +104,10 @@ spec:
                 lastProbeTime:
                   type: string
                   format: date-time
+                filesystemTotalBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
                 capacityUnit:
                   type: object
                   required: [device, source, filesystem, extents]

@@ -125,6 +125,10 @@ func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, re
 	status := pool.Status
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
+	status.FilesystemTotalBytes = 0
+	if result.CapacityReadable.OK {
+		status.FilesystemTotalBytes = result.Filesystem.TotalBytes
+	}
 	for _, condition := range conditions(result, pool.Generation, now) {
 		meta.SetStatusCondition(&status.Conditions, condition)
 	}

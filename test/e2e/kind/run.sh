@@ -148,6 +148,20 @@ run_mobility_node_restarts() {
 }
 
 run_pool_capacity() {
+	# Pod readiness can precede the API server's webhook endpoint refresh.
+	# Exercise the read-only admission path before starting this focused case.
+	local attempt ready=0
+	for ((attempt = 0; attempt < 30; attempt++)); do
+		if kubectl delete shiftpvpool worker-b --dry-run=server >/dev/null 2>&1; then
+			ready=1
+			break
+		fi
+		sleep 1
+	done
+	if [[ "${ready}" != 1 ]]; then
+		echo "Pool admission webhook did not become reachable" >&2
+		return 1
+	fi
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/pool-capacity.sh"
 }
 
@@ -176,6 +190,12 @@ run_cleanup_job_retry() {
 }
 
 install_shiftpv true
+
+if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
+	run_pool_capacity
+	echo "ShiftPV focused Pool capacity E2E passed"
+	exit 0
+fi
 
 if [[ "${ORPHAN_CLEANUP_ONLY:-0}" == "1" ]]; then
 	run_orphan_preservation
@@ -218,7 +238,7 @@ fi
 #       order. retain-reclaim runs behind the metrics check, which leaves no
 #       capacity hold, and reuses the live Prometheus to prove
 #       shiftpv_copy_observations{state="Missing"} stays zero across the
-#       reclaim. pool-capacity only ever runs behind them today.
+#       reclaim. pool-capacity also has a standalone focused entry point.
 #   g2  volume-delete-cleanup (138 s) + the release lifecycle (257 s:
 #       uninstall guard, break-glass reinstall, forced controller/node restarts,
 #       fsGroup, StorageClass coexistence) + filesystem-faults (77 s)
@@ -264,11 +284,6 @@ if group_selected g1; then
 fi
 if group_selected g3; then
 	run_orphan_preservation
-fi
-
-if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
-	echo "ShiftPV focused Pool capacity E2E passed"
-	exit 0
 fi
 
 if [[ "${MOBILITY_FILESYSTEM_FAULTS_ONLY:-0}" == "1" ]]; then

@@ -37,6 +37,7 @@ type CleanupJournal interface {
 // triageCleanup: a cleanup that settled or was sent to review elsewhere ends
 // this call wherever that is observed.
 func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (cleanupapi.Cleanup, error) {
+	defer r.observeStep("reclaim_helper")()
 	if r == nil || r.Client == nil || r.Pools == nil || r.Namespace == "" || r.Image == "" || r.Timeout <= 0 || store == nil || cleanup.UID == "" || cleanup.Name == "" || cleanup.Spec.Validate() != nil {
 		return cleanupapi.Cleanup{}, fmt.Errorf("cleanup runner configuration is incomplete")
 	}

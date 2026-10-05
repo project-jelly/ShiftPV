@@ -22,6 +22,7 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/cmd/internal/flagvalue"
@@ -39,6 +40,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	mobilitycontroller "github.com/project-jelly/ShiftPV/src/mobility/controller"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/provisioning"
 	webhookcertificate "github.com/project-jelly/ShiftPV/src/webhook/certificate"
 )
 
@@ -122,6 +124,11 @@ func main() {
 		klog.Fatalf("bootstrap uninstall quiesce gate: %v", err)
 	}
 	operator := newHelperRunner(cfg, client, volumeRegistry)
+	operator.ObserveStep = exporter.ObserveProvisioningStep
+	retryClients := wiring.ForConfig(capacityRetryRESTConfig(config), "capacity retry", fatal)
+	retryPools := &volumeapi.Registry{Client: retryClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
+	capacityRetries := provisioning.NewRetries(retryClients.Typed, retryPools)
+	go capacityRetries.Run(ctx, retryClients.Dynamic)
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
@@ -129,6 +136,7 @@ func main() {
 		Client: client, Namespace: cfg.namespace, Operator: operator, Volumes: volumeRegistry,
 		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
 		Cleanups: cleanupStore, CleanupOperator: operator,
+		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, ObserveStep: exporter.ObserveProvisioningStep, RetryRequests: capacityRetries,
 	}
 	identityService := &identity.Service{Version: version}
 
@@ -158,6 +166,17 @@ func main() {
 	klog.Infof("starting ShiftPV controller %s", version)
 	awaitShutdown(ctx, errCh, stop)
 	shutdownWebhook(webhookServer)
+}
+
+// Retry observation has its own bounded API budget so status-event bursts
+// cannot consume the CSI registry's client-side rate limiter.
+func capacityRetryRESTConfig(config *rest.Config) *rest.Config {
+	retryConfig := rest.CopyConfig(config)
+	retryConfig.QPS, retryConfig.Burst = 5, 10
+	retryConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(retryConfig.QPS, retryConfig.Burst)
+	retryConfig.Timeout = 0 // Reconcile is bounded separately; watches may stay open.
+	retryConfig.UserAgent = "shiftpv-capacity-retry"
+	return retryConfig
 }
 
 // admissionRESTConfig is the higher-throughput configuration the lifecycle

@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
 
 var testTime = time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
@@ -317,5 +318,21 @@ func TestReconcilerObserverReceivesExistingProbeAndErrors(t *testing.T) {
 	repository.err = context.DeadlineExceeded
 	if err := reconciler.Reconcile(context.Background()); !errors.Is(err, context.DeadlineExceeded) || calls != 3 || !errors.Is(observedErr, err) {
 		t.Fatalf("API error observation: %v", err)
+	}
+}
+
+func TestCapacityObservationClearedWhenProbeFails(t *testing.T) {
+	r := &Reconciler{}
+	pool := volumeapi.Pool{Status: volumeapi.PoolStatus{FilesystemTotalBytes: 123}}
+	result := Result{CapacityReadable: Check{OK: true, Known: true}, Filesystem: poolcapacity.Filesystem{TotalBytes: 456}}
+	status, _ := r.observedStatus(context.Background(), pool, result, testTime)
+	if status.FilesystemTotalBytes != 456 {
+		t.Fatal("successful capacity observation missing")
+	}
+	pool.Status = status
+	result.CapacityReadable = Check{Known: true}
+	status, _ = r.observedStatus(context.Background(), pool, result, testTime)
+	if status.FilesystemTotalBytes != 0 {
+		t.Fatal("failed probe retained old capacity observation")
 	}
 }

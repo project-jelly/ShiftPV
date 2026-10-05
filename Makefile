@@ -8,7 +8,7 @@ CONTROLLER_IMAGE ?= shiftpv-controller:$(CONTROLLER_VERSION)
 NODE_IMAGE ?= shiftpv-node:$(NODE_VERSION)
 IMAGE ?= shiftpv:dev
 COVERAGE_MIN ?= 80
-COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/lifecycle/... ./src/metrics/... ./src/mobility/... ./src/node/... ./src/pool/... ./src/volume/... ./src/webhook/... ./test/...
+COVERAGE_PACKAGES := ./src/csi/... ./src/kubernetes/... ./src/lifecycle/... ./src/metrics/... ./src/mobility/... ./src/node/... ./src/pool/... ./src/provisioning/... ./src/volume/... ./src/webhook/... ./test/...
 # Every shell script under build/ and test/ is linted; shellcheck picks each
 # file's dialect from its own shebang.
 SHELL_SCRIPTS := $(shell find build test -type f -name '*.sh' | LC_ALL=C sort)

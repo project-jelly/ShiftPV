@@ -632,3 +632,26 @@ func TestCapacityMetricsSeparatePoolsOnSameNode(t *testing.T) {
 	}
 	contains(t, output(t, c.Exporter), `shiftpv_pool_reserved_bytes{node="a",pool="pool-a"} 0`)
 }
+
+func TestProvisioningStepMetric(t *testing.T) {
+	exporter := New()
+	exporter.ObserveProvisioningStep("statfs_helper", 4*time.Second)
+	families, err := exporter.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "shiftpv_provisioning_step_duration_seconds" {
+			continue
+		}
+		metric := family.Metric[0]
+		if metric.GetHistogram().GetSampleCount() != 1 || metric.GetHistogram().GetSampleSum() != 4 {
+			t.Fatal("stage duration not recorded")
+		}
+		if len(metric.Label) != 1 || metric.Label[0].GetName() != "step" {
+			t.Fatal("stage metric has identity labels")
+		}
+		return
+	}
+	t.Fatal("stage metric missing")
+}

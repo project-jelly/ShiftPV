@@ -104,6 +104,8 @@ spec:
             - --leader-election-namespace=$(POD_NAMESPACE)
             - --extra-create-metadata=true
             - --timeout=2m
+            - --retry-interval-start={{ .Values.sidecars.provisioner.retryIntervalStart }}
+            - --retry-interval-max={{ .Values.sidecars.provisioner.retryIntervalMax }}
             - --v={{ .Values.controller.logLevel }}
           env:
             {{- include "shiftpv.podNamespaceEnv" . | nindent 12 }}

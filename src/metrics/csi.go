@@ -33,3 +33,9 @@ func (e *Exporter) intercept(ctx context.Context, request any, info *grpc.UnaryS
 	e.duration.WithLabelValues(method).Observe(time.Since(started).Seconds())
 	return response, err
 }
+
+func (e *Exporter) ObserveProvisioningStep(step string, elapsed time.Duration) {
+	if e != nil {
+		e.steps.WithLabelValues(step).Observe(elapsed.Seconds())
+	}
+}
