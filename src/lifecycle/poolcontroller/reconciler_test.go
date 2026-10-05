@@ -3,6 +3,7 @@ package poolcontroller
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -151,7 +152,8 @@ func TestReconcileSerializesDeletionApprovalWithPoolAdmission(t *testing.T) {
 	pools := &memoryPools{pools: []volumeapi.Pool{pool}}
 	safety := &memorySafety{called: make(chan struct{}, 1)}
 	locks := &poolcapacity.Locker{}
-	releaseAdmission := locks.Lock(pool.NodeName)
+	releaseAdmission := sync.OnceFunc(locks.Lock(pool.UID))
+	defer releaseAdmission()
 	reconciler := &Reconciler{Pools: pools, Safety: safety, Quiesce: memoryQuiesce{}, PoolLocks: locks, Interval: time.Second}
 	done := make(chan error, 1)
 	go func() { done <- reconciler.ReconcileAll(context.Background()) }()
@@ -170,6 +172,30 @@ func TestReconcileSerializesDeletionApprovalWithPoolAdmission(t *testing.T) {
 		t.Fatal("Pool deletion did not resume after admission released its fence")
 	}
 	if len(pools.approved) != 1 {
+		t.Fatalf("identity release approval=%v", pools.approved)
+	}
+}
+
+func TestReconcileDeletionDoesNotWaitForOtherPoolAdmissionOnSameNode(t *testing.T) {
+	deletedAt := metav1.Now()
+	pool := volumeapi.Pool{Name: "pool", UID: "pool-uid", NodeName: "node-a", DeletionTimestamp: &deletedAt, Finalizers: []string{volumeapi.PoolProtectionFinalizer}}
+	otherPool := volumeapi.Pool{Name: "other-pool", UID: "other-pool-uid", NodeName: pool.NodeName, Finalizers: []string{volumeapi.PoolProtectionFinalizer}}
+	pools := &memoryPools{pools: []volumeapi.Pool{otherPool, pool}}
+	locks := &poolcapacity.Locker{}
+	releaseAdmission := locks.Lock(otherPool.UID)
+	defer releaseAdmission()
+	reconciler := &Reconciler{Pools: pools, Safety: &memorySafety{}, Quiesce: memoryQuiesce{}, PoolLocks: locks, Interval: time.Second}
+	done := make(chan error, 1)
+	go func() { done <- reconciler.ReconcileAll(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Pool deletion waited for admission to another Pool on the same node")
+	}
+	if len(pools.approved) != 1 || pools.approved[0] != pool.Name+"/"+pool.UID {
 		t.Fatalf("identity release approval=%v", pools.approved)
 	}
 }
