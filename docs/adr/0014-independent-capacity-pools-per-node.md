@@ -6,7 +6,7 @@
 
 ## Context
 
-현재 `ShiftPVPool`은 node당 하나만 배치 대상으로 사용할 수 있다. 용량 예약과
+기존 `ShiftPVPool`은 node당 하나만 배치 대상으로 사용할 수 있었다. 용량 예약과
 `statfs` helper, NodePublish, Move의 source/destination 및 자동 이동 후보가 node
 하나에 Pool 하나가 있다는 가정을 공유한다. 이미 마운트된 thick LV나 별도 filesystem을
 같은 node에 추가하려면 이 가정을 동시에 바꿔야 한다. 경로가 다르다는 사실만으로
@@ -17,8 +17,8 @@
 `ShiftPVPool` 한 개는 독립 할당된 용량 단위 한 개다. 서로 다른 `mountPath`를 가진
 Pool 두 개를 같은 node에 등록할 수 있지만, 두 Pool이 같은 filesystem device 또는
 알려진 공유 backing을 쓰면 배치에 사용하지 않는다. 겹치거나 중첩된 경로도 거부한다.
-새로 추가하는 Pool에는 [0013](0013-opt-in-pool-mount-identity.md)의 mount 검증을
-요구한다. 기존 directory Pool은 node의 기존 filesystem 용량 단위로 남을 수 있으나,
+여러 Pool/node의 모든 Pool에는 `capacityPolicy: FixedBlock` 검증을 요구한다.
+별도 mount에는 [0013](0013-opt-in-pool-mount-identity.md)의 `RequireMountPoint` 검증도 권장한다. 기존 directory Pool은 node의 기존 filesystem 용량 단위로 남을 수 있으나,
 새 Pool과 실제 용량을 공유하면 함께 배치할 수 없다. 복잡한 LVM thin pool, Btrfs
 subvolume, 외부 스토리지처럼 backing 독립성을 경로에서 증명할 수 없는 경우에는
 지원하는 증거 또는 별도 capacity-domain 회계가 생기기 전까지 독립 Pool로 승인하지
@@ -68,6 +68,13 @@ helper, scanner publication proof와 recovery도 정확한 Pool incarnation을 �
 생성과 이동은 같은 Pool UID lock으로 예약과 durable intent를 함께 기록한다.
 승인된 Move는 재시도에서 다른 Pool로 바뀌지 않는다.
 
-현재 다중 Pool 등록 제한은 유지한다. 독립 용량 검증과 Pool별 metrics를 연결하고
-실제 다중 Pool E2E를 통과한 뒤 등록 제한을 해제한다. 서로 다른 그룹 또는 같은
-node 안의 수동 이동은 이 단계의 구현 범위에 포함되지 않는다.
+다중 등록은 모든 Pool이 `FixedBlock` 검증에 참여하는 경우에만 허용하는 구현을
+추가한다. Node는 ext4/xfs와 fixed partition/linear backing 구간을 비교하고, 겹치는
+backing·경로 또는 알 수 없는 구성을 쓰기 probe·inventory 전에 거부한다. 기록한
+capacity identity는 교체하지 않으며 metrics도 Pool UID별로 계산한다. Kernel이 WWID를
+노출하면 native alias도 함께 비교한다. 외부 계층이 숨긴 공유나 host mapping 변경과
+작업의 원자적 fencing은 보장하지 않는다.
+
+이 결정은 실제 LVM/독립 mount 다중 Pool acceptance 결과가 확보되기 전까지 Proposed다.
+단위 테스트의 합성 backing과 기존 singleton kind E2E는 그 결과를 대신하지 않는다.
+서로 다른 그룹 또는 같은 node 안의 수동 이동은 이 단계의 구현 범위에 포함되지 않는다.

@@ -86,8 +86,8 @@ Chart는 directory, filesystem, mount, RAID, encryption과 backup을 만들거�
 별도 filesystem이 이미 마운트된 경로를 Pool로 쓸 때는 `spec.mountPolicy: RequireMountPoint`를
 지정할 수 있다. Node는 실제 mount point와 처음 관찰한 filesystem identity를 확인하며,
 mount 유실·교체 시 Pool을 NotReady로 표시한다. 일반 directory Pool은 기존처럼 이 필드를
-생략한다. 이 검사는 서로 다른 mount가 독립된 용량을 가진다는 증거는 아니며, 현재 버전은
-여전히 node당 Pool 하나만 허용한다.
+생략한다. 이 검사는 서로 다른 mount가 독립된 용량을 가진다는 증거는 아니다.
+한 node에 여러 Pool을 사용하려면 아래의 `FixedBlock` 검증을 모든 Pool에 켠다.
 
 ```yaml
 spec:
@@ -99,6 +99,83 @@ spec:
 ```
 
 새 필드를 쓰는 배포는 [CRD를 먼저 갱신](../../docs/development/versioning.md)해야 한다.
+
+## Multiple Pools on one node
+
+한 Pool은 한 filesystem 용량 단위를 소유한다. 같은 node의 여러 Pool은 모두
+`spec.capacityPolicy: FixedBlock`이어야 하며, Ready 전에 실제 backing 영역이
+서로 겹치지 않는지 확인한다. 기존 directory Pool도 지원하는 filesystem 위에
+있으면 이 필드를 추가할 수 있다. 전환은 inventory가 healthy·complete이고 진행 중인
+Move가 없는 상태에서 수행한다. 검증을 켠 뒤에는 정책을 제거하거나 바꿀 수 없다.
+새 CRD를 먼저 적용한 뒤 controller/node/helper 이미지를 함께 갱신한다.
+
+다음은 **이미 준비하고 마운트한** 독립 thick LV 두 개를 등록하는 예다.
+ShiftPV가 LV, filesystem 또는 mount를 만들지 않는다.
+
+```yaml
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVPool
+metadata:
+  name: worker-a-fast
+spec:
+  nodeName: worker-a
+  poolGroup: fast
+  mountPath: /mnt/shiftpv-fast
+  mountPolicy: RequireMountPoint
+  capacityPolicy: FixedBlock
+  capacity:
+    limit: 200Gi
+---
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVPool
+metadata:
+  name: worker-a-bulk
+spec:
+  nodeName: worker-a
+  poolGroup: bulk
+  mountPath: /mnt/shiftpv-bulk
+  mountPolicy: RequireMountPoint
+  capacityPolicy: FixedBlock
+  capacity:
+    limit: 500Gi
+```
+
+`fast`와 `bulk` 그룹을 선택하는 StorageClass로 용도를 나눈다. 두 Pool의 그룹을
+같게 설정하면 한 StorageClass에서 요청량을 수용할 수 있는 Pool 하나를 선택한다.
+한 PVC는 선택된 Pool 하나에 고정되며 두 filesystem에 걸쳐 분할되지 않는다.
+자동 cold move는 같은 그룹의 다른 node로만 진행한다. 같은 node 안의 Pool 간 이동과
+그룹 간 수동 이동은 후속 기능이다.
+
+| 구성 | `FixedBlock` 판정 |
+|---|---|
+| ext4/xfs on 별도 고정 블록 device 또는 겹치지 않는 partition | 지원 |
+| ext4/xfs on 일반 thick LVM의 linear allocation | backing 구간이 겹치지 않으면 지원 |
+| 같은 filesystem의 여러 directory 또는 bind alias | 서로 용량을 공유하므로 함께 사용 불가 |
+| 중첩된 Pool 경로, symlink를 포함한 등록 경로 | 거부 |
+| thin/thin-pool, snapshot, crypt, striped, multipath DM target | 이 구현에서 독립성을 증명하지 않아 거부 |
+| Btrfs subvolume, NFS, loop/MD 등 지원하지 않는 filesystem/backing | 거부 |
+
+Node는 sysfs와 읽기 전용 device-mapper table 조회로 backing device와 512-byte sector
+구간을 관찰한다. native device가 WWID를 제공하면 같은 WWID의 경로를 같은 backing으로
+취급한다. WWID가 없으면 node의 kernel device namespace까지만 구분할 수 있다.
+하이퍼바이저나 외부 SAN이 숨긴 alias·공유 용량은 이 관찰만으로 증명할 수 없으며,
+운영자가 각 filesystem의 독립 할당을 보장해야 한다. 관리자가 host mapping을 동시에
+바꾸는 작업에 대한 원자적 fencing도 제공하지 않는다.
+
+`CapacityIndependent=True`와 `status.capacityUnit`, generation과 fresh·complete inventory를
+함께 확인한다. 증거가 없거나 backing이 변경되면 Ready가 내려가고 신규 배치를 보류한다.
+최초 기록한 capacity identity는 정상 status 갱신으로 교체하거나 지우지 않는다.
+작업 직전에는 현재 filesystem의 device/source/type을 다시 확인한다. `capacity.limit`는
+Pool의 논리 예약 한도이며 hard quota가 아니다. 그 filesystem을 함께 쓰는 외부 process의
+사용량은 `statfs` 여유에 반영된다.
+
+실제 LVM/별도 mount acceptance에서는 최소한 다음을 검증한다.
+
+1. 같은 node의 독립 Pool 두 개가 모두 Ready가 되고 서로 다른 그룹의 PVC가 각 경로에 생성된다.
+2. 같은 그룹의 두 Pool 중 한 Pool의 예약 여유가 부족하면 다른 Pool을 선택한다.
+3. 같은 filesystem의 두 경로와 겹치는 backing은 쓰기 probe와 inventory 전에 거부한다.
+4. thin backing, mount 유실·교체, Pool 재생성 시 새 배치와 위험한 작업이 보류된다.
+5. 삭제와 Move의 hold가 정확한 Pool UID에 남고, 기존 단일 directory Pool 동작이 유지된다.
 
 ## StorageClass
 

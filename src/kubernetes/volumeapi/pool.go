@@ -25,6 +25,7 @@ type Pool struct {
 	NodeName                string
 	PoolGroup               string
 	MountPath               string
+	CapacityPolicy          string
 	MountPolicy             string
 	CapacityLimit           string
 	Generation              int64
@@ -39,6 +40,7 @@ const DefaultPoolGroup = "default"
 type PoolStatus struct {
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	LastProbeTime      metav1.Time        `json:"lastProbeTime,omitempty"`
+	CapacityUnit       *PoolCapacityUnit  `json:"capacityUnit,omitempty"`
 	MountIdentity      *PoolMountIdentity `json:"mountIdentity,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 	Inventory          *PoolInventory     `json:"inventory,omitempty"`
@@ -83,18 +85,24 @@ func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	nodes := make(map[string]struct{}, len(pools))
+	nodes := make(map[string]Pool, len(pools))
 	for _, pool := range pools {
 		if pool.NodeName == "" || len(validation.IsDNS1123Label(pool.PoolGroup)) != 0 || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" ||
-			(pool.MountPolicy != "" && pool.MountPolicy != PoolMountPolicyRequireMountPoint) {
-			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName, mountPath, or mountPolicy", ErrPoolConfiguration, pool.Name)
+			(pool.MountPolicy != "" && pool.MountPolicy != PoolMountPolicyRequireMountPoint) ||
+			(pool.CapacityPolicy != "" && pool.CapacityPolicy != PoolCapacityPolicyFixedBlock) {
+			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName, poolGroup, mountPath, mountPolicy, or capacityPolicy", ErrPoolConfiguration, pool.Name)
 		}
-		if _, duplicate := nodes[pool.NodeName]; duplicate {
+		if previous, duplicate := nodes[pool.NodeName]; duplicate && (pool.CapacityPolicy != PoolCapacityPolicyFixedBlock || previous.CapacityPolicy != PoolCapacityPolicyFixedBlock) {
 			return nil, duplicatePoolError(pool.NodeName)
 		}
-		nodes[pool.NodeName] = struct{}{}
+		nodes[pool.NodeName] = pool
 	}
-	sort.Slice(pools, func(left, right int) bool { return pools[left].NodeName < pools[right].NodeName })
+	sort.Slice(pools, func(left, right int) bool {
+		if pools[left].NodeName != pools[right].NodeName {
+			return pools[left].NodeName < pools[right].NodeName
+		}
+		return pools[left].Name < pools[right].Name
+	})
 	return pools, nil
 }
 
@@ -136,6 +144,9 @@ func (r *Registry) ObservePools(ctx context.Context) (PoolSnapshot, error) {
 	snapshot := PoolSnapshot{Registered: pools}
 	for _, pool := range pools {
 		if placeable, _ := poolReady(pool, now, staleAfter); placeable {
+			if independent, _ := PoolCapacityIndependent(pool, pools); !independent {
+				continue
+			}
 			snapshot.Ready = append(snapshot.Ready, pool)
 		}
 	}
@@ -284,15 +295,31 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 }
 
 func (r *Registry) ReadyPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
-	pool, err := r.PoolForIdentity(ctx, name, uid, nodeName)
+	if _, err := r.PoolForIdentity(ctx, name, uid, nodeName); err != nil {
+		return Pool{}, err
+	}
+	peers, err := r.ListPoolRegistrations(ctx)
 	if err != nil {
 		return Pool{}, err
 	}
-	now, staleAfter := r.readiness()
-	if placeable, reason := poolReady(pool, now, staleAfter); !placeable {
-		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, name, nodeName, reason)
+	// Use one registration snapshot for both readiness and peer evidence.
+	for _, pool := range peers {
+		if pool.Name != name {
+			continue
+		}
+		if pool.UID != uid || pool.NodeName != nodeName {
+			return Pool{}, fmt.Errorf("%w: ShiftPVPool %q identity changed", ErrStateConflict, name)
+		}
+		now, staleAfter := r.readiness()
+		if ready, reason := poolReady(pool, now, staleAfter); !ready {
+			return Pool{}, fmt.Errorf("%w: ShiftPVPool %q on node %q: %s", ErrPoolNotReady, name, nodeName, reason)
+		}
+		if independent, reason := PoolCapacityIndependent(pool, peers); !independent {
+			return Pool{}, fmt.Errorf("%w: %s", ErrPoolNotReady, reason)
+		}
+		return pool, nil
 	}
-	return pool, nil
+	return Pool{}, fmt.Errorf("%w: ShiftPVPool %q", ErrPoolNotFound, name)
 }
 
 // readiness resolves the observation instant and the probe staleness budget a
@@ -404,6 +431,18 @@ func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string
 			if registeredNode != nodeName {
 				return fmt.Errorf("%w: ShiftPVPool %q belongs to node %q, not %q", ErrStateConflict, name, registeredNode, nodeName)
 			}
+			current, err := poolFrom(object)
+			if err != nil {
+				return err
+			}
+			if current.Status.CapacityUnit != nil && !SameCapacityUnit(current.Status.CapacityUnit, status.CapacityUnit) {
+				return fmt.Errorf("%w: ShiftPVPool %q capacity identity cannot be changed or cleared", ErrStateConflict, name)
+			}
+			if status.CapacityUnit != nil {
+				if err := status.CapacityUnit.Validate(); err != nil {
+					return fmt.Errorf("invalid ShiftPVPool capacity identity: %w", err)
+				}
+			}
 			data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
 			if err != nil {
 				return fmt.Errorf("encode ShiftPVPool status: %w", err)
@@ -478,6 +517,16 @@ func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 	if p.Status.LastProbeTime.IsZero() || staleAfter <= 0 || now.Sub(p.Status.LastProbeTime.Time) > staleAfter || now.Before(p.Status.LastProbeTime.Time) {
 		return false, "ProbeStale"
 	}
+	if ready, reason := p.mountReady(); !ready {
+		return false, reason
+	}
+	if ready, reason := p.capacityReady(); !ready {
+		return false, reason
+	}
+	return true, condition.Reason
+}
+
+func (p Pool) mountReady() (bool, string) {
 	if p.MountPolicy == PoolMountPolicyRequireMountPoint {
 		if p.Status.MountIdentity == nil {
 			return false, "MountIdentityMissing"
@@ -493,7 +542,7 @@ func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 			return false, "MountProbePending"
 		}
 	}
-	return true, condition.Reason
+	return true, ""
 }
 
 // CleanupReadyAt keeps an exact, already-approved cleanup executable while a
@@ -508,6 +557,9 @@ func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, str
 	}
 	if p.Status.ObservedGeneration != p.Generation {
 		return false, "ProbeOutdated"
+	}
+	if ready, reason := p.capacityReady(); !ready {
+		return false, reason
 	}
 	conditionTypes := []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable}
 	if p.MountPolicy == PoolMountPolicyRequireMountPoint {
@@ -550,9 +602,10 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 	}
 	mountPath, _, _ := unstructured.NestedString(object.Object, "spec", "mountPath")
 	mountPolicy, _, _ := unstructured.NestedString(object.Object, "spec", "mountPolicy")
+	capacityPolicy, _, _ := unstructured.NestedString(object.Object, "spec", "capacityPolicy")
 	capacityLimit, _, _ := unstructured.NestedString(object.Object, "spec", "capacity", "limit")
 	return Pool{
-		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, PoolGroup: poolGroup, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy,
+		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, PoolGroup: poolGroup, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy, CapacityPolicy: capacityPolicy,
 		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), DeletionTimestamp: object.GetDeletionTimestamp(),
 		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation], Status: status,
 	}, nil
