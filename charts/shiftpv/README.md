@@ -35,6 +35,12 @@ CSI admission. Missing support or a 2-second response timeout uses the helper.
 Deletion waits up to 5 seconds for its existing causal absence proof before
 returning a retry. No existing Pool or StorageClass settings need changing.
 
+## Resident volume effects
+
+새 Volume 생성과 삭제는 상주 Node가 실행한다. Controller가 Pod UID를 durable intent에 기록하고,
+Node receipt를 확인한 뒤 Ready 전환 또는 absence 검증을 진행한다. 기존 helper 작업과 Move는 기존 경로를 따른다.
+배포 시 target CRD를 먼저 적용하고 Controller·Node 이미지를 함께 갱신한다. `NodeCreating` 또는 Node cleanup이
+진행 중인 동안 구버전 Controller로 되돌리면 해당 작업을 완료할 수 없으므로 먼저 정산해야 한다.
 
 ## Install
 

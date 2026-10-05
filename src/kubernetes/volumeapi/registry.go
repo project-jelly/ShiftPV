@@ -47,11 +47,12 @@ const (
 	VolumeProtectionFinalizer = "shiftpv.io/volume-protection"
 	MoveProtectionFinalizer   = "shiftpv.io/move-protection"
 
-	PhasePending  = "Pending"
-	PhaseReady    = "Ready"
-	PhaseDeleting = "Deleting"
-	PhaseMoving   = "Moving"
-	PhaseBlocked  = "Blocked"
+	PhasePending      = "Pending"
+	PhaseNodeCreating = "NodeCreating"
+	PhaseReady        = "Ready"
+	PhaseDeleting     = "Deleting"
+	PhaseMoving       = "Moving"
+	PhaseBlocked      = "Blocked"
 )
 
 // PoolReadinessStaleAfterFlag is the one spelling of the probe staleness budget

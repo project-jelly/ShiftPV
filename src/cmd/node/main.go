@@ -16,12 +16,15 @@ import (
 	"github.com/project-jelly/ShiftPV/src/csi/identity"
 	nodecsi "github.com/project-jelly/ShiftPV/src/csi/node"
 	csiserver "github.com/project-jelly/ShiftPV/src/csi/server"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/metrics"
 	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
 	nodeobservation "github.com/project-jelly/ShiftPV/src/node/observation"
 	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
 	poolreadiness "github.com/project-jelly/ShiftPV/src/pool/readiness"
+	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
+	"k8s.io/client-go/rest"
 )
 
 var version = "dev"
@@ -76,7 +79,15 @@ func main() {
 	}
 
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
+	if os.Getenv("POD_UID") != "" {
+		clients := wiring.InCluster(fatal)
+		effectConfig := rest.CopyConfig(clients.Config)
+		effectConfig.QPS, effectConfig.Burst, effectConfig.RateLimiter = 50, 100, nil
+		effectClients := wiring.ForConfig(effectConfig, "resident Node effects", fatal)
+		effects := &nodeexecutor.Node{Identity: volumeapi.NodeExecutor{Namespace: os.Getenv("POD_NAMESPACE"), PodName: os.Getenv("POD_NAME"), PodUID: os.Getenv("POD_UID"), NodeName: *nodeName}, Discovery: nodeexecutor.Discovery{Client: effectClients.Typed}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic}, Cleanups: &cleanupapi.Store{Client: effectClients.Dynamic}, HostRoot: *hostRoot}
+		go func() { errCh <- effects.Run(ctx) }()
+	}
 	go func() { errCh <- readinessReconciler.Run(ctx) }()
 	go func() {
 		worker := &poolmeasurement.Node{NodeName: *nodeName, Pools: probeRegistry,

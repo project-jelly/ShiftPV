@@ -37,6 +37,7 @@ spec:
           args:
             - --endpoint=unix:///run/csi/csi.sock
             - --namespace=$(POD_NAMESPACE)
+            - --node-daemonset-name={{ include "shiftpv.fullname" . }}-node
             - --helper-image={{ include "shiftpv.helperPodImage" . }}
             - --helper-timeout={{ .Values.helperPod.timeout }}
             - --helper-service-account={{ include "shiftpv.helperServiceAccount" . }}

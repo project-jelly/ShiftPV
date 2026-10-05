@@ -29,6 +29,8 @@ type State struct {
 	CreationOperationID string
 	DeletionOperationID string
 	CurrentCopy         *volume.CopyIdentity
+	CreationExecutor    *NodeExecutor
+	CreationReceipt     *CreationReceipt
 }
 
 func CreationOperationID(volumeUID string) (string, error) {
@@ -219,7 +221,7 @@ func sameCreationIntent(object *unstructured.Unstructured, state State, volumeID
 	if state.OwnerNode != ownerNode || state.RequestName != requestName || state.InitialNode != ownerNode || state.CapacityBytes != capacityBytes {
 		return false
 	}
-	if state.Phase != PhasePending && state.Phase != PhaseReady {
+	if state.Phase != PhasePending && state.Phase != PhaseNodeCreating && state.Phase != PhaseReady {
 		return false
 	}
 	return servingCopyFor(state.CurrentCopy, volumeID, state.UID, ownerNode)
@@ -256,7 +258,10 @@ func (r *Registry) CompleteCreate(ctx context.Context, volumeID, uid string, cop
 		if current.Phase == PhaseReady {
 			return current, nil
 		}
-		if current.Phase != PhasePending {
+		if current.Phase != PhasePending && current.Phase != PhaseNodeCreating {
+			return State{}, ErrStateConflict
+		}
+		if current.Phase == PhaseNodeCreating && !ValidCreationReceipt(current) {
 			return State{}, ErrStateConflict
 		}
 		current.Phase = PhaseReady
@@ -452,6 +457,12 @@ func (r *Registry) mutateState(ctx context.Context, volumeID string, mutate func
 			if next.CurrentCopy == nil {
 				next.CurrentCopy = current.CurrentCopy
 			}
+			if next.CreationExecutor == nil {
+				next.CreationExecutor = current.CreationExecutor
+			}
+			if next.CreationReceipt == nil {
+				next.CreationReceipt = current.CreationReceipt
+			}
 			setState(object, next)
 			return nil
 		},
@@ -482,6 +493,14 @@ func stateFrom(object *unstructured.Unstructured) (State, error) {
 	}
 	creationOperationID, _, _ := unstructured.NestedString(object.Object, "status", "creationOperationID")
 	deletionOperationID, _, _ := unstructured.NestedString(object.Object, "status", "deletionOperationID")
+	var executor *NodeExecutor
+	var receipt *CreationReceipt
+	if err := decodeStatusField(object, "creationExecutor", &executor); err != nil {
+		return State{}, err
+	}
+	if err := decodeStatusField(object, "creationReceipt", &receipt); err != nil {
+		return State{}, err
+	}
 	var currentCopy *volume.CopyIdentity
 	if data, found, nestedErr := unstructured.NestedMap(object.Object, "status", "currentCopy"); nestedErr != nil {
 		return State{}, nestedErr
@@ -499,6 +518,7 @@ func stateFrom(object *unstructured.Unstructured) (State, error) {
 		UID: string(object.GetUID()), Finalizers: append([]string(nil), object.GetFinalizers()...),
 		RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: initialNode,
 		Phase: phase, OwnerNode: ownerNode, ActiveMove: activeMove,
+		CreationExecutor: executor, CreationReceipt: receipt,
 		PublishedNodes: publishedNodes, CreationOperationID: creationOperationID, DeletionOperationID: deletionOperationID, CurrentCopy: currentCopy,
 	}, nil
 }
@@ -521,6 +541,8 @@ func setState(object *unstructured.Unstructured, state State) {
 	if state.DeletionOperationID != "" {
 		status["deletionOperationID"] = state.DeletionOperationID
 	}
+	setStatusField(object, "creationExecutor", state.CreationExecutor)
+	setStatusField(object, "creationReceipt", state.CreationReceipt)
 	if state.CurrentCopy != nil {
 		if encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(state.CurrentCopy); err == nil {
 			status["currentCopy"] = encoded

@@ -71,9 +71,18 @@ evidence를 대신하지 않는다.
 ## Provision and publish
 
 Provisioning은 선택된 Pool의 exact identity와 fresh, valid, complete inventory를 확인하고 durable
-`ShiftPVVolume` intent와 current-owner capacity hold를 먼저 기록한다. 그 뒤 helper가 exact directory와 marker를
-멱등 생성하고 API receipt를 남긴다. 불명확한 capacity, observation 또는 identity에서는 directory를 만들지
-않는다.
+`ShiftPVVolume` intent와 current-owner capacity hold를 먼저 기록한다. Controller는 상주 Node Pod UID를
+`creationExecutor`에 고정하고 `NodeCreating`으로 전환한다. Node가 exact directory와 marker를 멱등 생성하고
+placement digest를 포함한 `creationReceipt`를 기록하면 Controller가 `Ready`로 전환한다.
+
+삭제도 Controller가 cleanup journal에 `executor.kind: Node`와 Pod UID를 기록한 뒤 Node가 실행한다.
+Node의 purge receipt 이후 Controller가 fresh absence proof를 확인해야 capacity hold를 반환한다.
+Node는 capacity 승인, `Ready` 전환, metadata 삭제를 수행하지 않는다.
+
+Node 재시작은 같은 operation과 local marker/receipt로 재개한다. 실행 중인 Pod를 다른 Pod로 바꾸지 않으며,
+종료되거나 사라진 Pod만 receipt 기록 전에 재지정한다. Node에 고정된 작업은 시간 초과 후 helper로 전환하지
+않는다. 기존 helper Pod·Job, 구버전 Node와 Move copy/cleanup은 helper 경로를 유지한다.
+불명확한 capacity, observation 또는 identity에서는 directory를 만들지 않는다.
 
 Publish는 다음 조건을 모두 만족할 때만 같은 per-volume lock 안에서 bind mount한다.
 

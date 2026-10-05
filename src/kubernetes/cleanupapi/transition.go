@@ -55,7 +55,7 @@ func validateExecutorRule(current Cleanup, phase string, next Status) error {
 	if current.Status.Executor != nil && !executorTransitionAllowed(phase, next.Phase, current.Status.Executor, next.Executor, current.Status.Receipt, next.Receipt) {
 		return fmt.Errorf("%w: executor identity is immutable", ErrConflict)
 	}
-	if next.Phase == PhaseRunning && next.Executor == nil {
+	if next.Phase == PhaseRunning && (next.Executor == nil || !next.Executor.Valid()) {
 		return fmt.Errorf("%w: Running requires an executor", ErrConflict)
 	}
 	return nil
@@ -68,7 +68,7 @@ func validateReceiptRule(current Cleanup, _ string, next Status) error {
 	if next.Receipt == nil {
 		return nil
 	}
-	if next.Executor == nil || next.Receipt.OperationID != current.Spec.OperationID || next.Receipt.ExecutorUID != next.Executor.JobUID {
+	if next.Executor == nil || next.Receipt.OperationID != current.Spec.OperationID || next.Receipt.ExecutorUID != next.Executor.ExecutionUID() {
 		return fmt.Errorf("%w: receipt identity does not match intent and executor", ErrConflict)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, next.Receipt.ObservedAt); err != nil {
@@ -121,10 +121,9 @@ func validateCompletedRule(_ Cleanup, _ string, next Status) error {
 }
 
 func validPurgedReceipt(cleanup Cleanup, status Status) bool {
-	if status.Executor == nil || status.Receipt == nil || !volume.ValidObjectName(status.Executor.JobName) ||
-		!volume.ValidIdentityToken(status.Executor.JobUID) || !volume.ValidIdentityToken(status.Executor.PodUID) ||
+	if status.Executor == nil || status.Receipt == nil || !status.Executor.Valid() || !volume.ValidIdentityToken(status.Executor.PodUID) ||
 		status.Executor.NodeName != cleanup.Spec.Target.NodeName ||
-		status.Receipt.OperationID != cleanup.Spec.OperationID || status.Receipt.ExecutorUID != status.Executor.JobUID ||
+		status.Receipt.OperationID != cleanup.Spec.OperationID || status.Receipt.ExecutorUID != status.Executor.ExecutionUID() ||
 		!status.Receipt.Retired || !status.Receipt.Purged || !validSHA256Digest(status.Receipt.LocalReceiptDigest) {
 		return false
 	}
@@ -141,13 +140,13 @@ func executorTransitionAllowed(currentPhase, nextPhase string, current, next *Ex
 	if reflect.DeepEqual(current, next) {
 		return true
 	}
-	// A Job retry gets a new Pod UID. Before any API receipt exists, the exact
-	// parent may rebind execution to that new Pod while retaining the same Job
-	// UID, operation, and node. The node-local per-volume lock and operation
+	// A retry may bind a new Pod before any API receipt exists. The backend,
+	// operation and node remain fixed; legacy Job retries also retain Job UID. The node-local per-volume lock and operation
 	// intent serialize an old Pod with its retry and make the effect idempotent.
 	// Once a receipt exists, the complete executor identity is immutable.
 	return currentPhase == PhaseRunning && nextPhase == PhaseRunning && currentReceipt == nil && nextReceipt == nil && current != nil && next != nil &&
-		volume.ValidIdentityToken(next.PodUID) && current.JobName == next.JobName && current.JobUID == next.JobUID && current.NodeName == next.NodeName
+		volume.ValidIdentityToken(next.PodUID) && next.Valid() && current.Kind == next.Kind && current.Namespace == next.Namespace &&
+		current.JobName == next.JobName && current.JobUID == next.JobUID && current.NodeName == next.NodeName
 }
 
 func sameAbsenceFence(current, next *AbsenceProof) bool {

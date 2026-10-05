@@ -191,6 +191,12 @@ run_cleanup_job_retry() {
 
 install_shiftpv true
 
+if [[ "${NODE_EFFECTS_ONLY:-0}" == "1" ]]; then
+ CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/node-executor.sh"
+ echo "ShiftPV focused resident Node E2E passed"
+ exit 0
+fi
+
 if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
 	run_pool_capacity
 	echo "ShiftPV focused Pool capacity E2E passed"

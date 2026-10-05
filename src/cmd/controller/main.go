@@ -42,6 +42,7 @@ import (
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
 	"github.com/project-jelly/ShiftPV/src/provisioning"
+	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	webhookcertificate "github.com/project-jelly/ShiftPV/src/webhook/certificate"
 )
 
@@ -51,6 +52,7 @@ var version = "dev"
 // bound directly to the flag of the same purpose, so the flag names, defaults
 // and help text stay exactly where they were declared.
 type config struct {
+	nodeDaemonSet                             string
 	storageClassNames                         flagvalue.Names
 	endpoint, namespace, helperImage          string
 	helperWait                                time.Duration
@@ -76,6 +78,7 @@ func parseFlags() config {
 	var cfg config
 	flag.StringVar(&cfg.endpoint, "endpoint", "unix:///run/csi/csi.sock", "CSI Unix socket endpoint")
 	flag.StringVar(&cfg.namespace, "namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
+	flag.StringVar(&cfg.nodeDaemonSet, "node-daemonset-name", "", "trusted resident Node DaemonSet; empty uses helper Pods")
 	flag.StringVar(&cfg.helperImage, "helper-image", "busybox:1.37", "directory helper Pod image")
 	flag.DurationVar(&cfg.helperWait, "helper-timeout", 2*time.Minute, "helper Pod completion timeout")
 	flag.DurationVar(&cfg.cleanupAbsenceWait, "cleanup-absence-wait", 5*time.Second, "bounded wait for post-delete absence proof; zero returns immediately")
@@ -142,10 +145,12 @@ func main() {
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
+	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
+	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: operator, Timeout: cfg.helperWait}
 	controllerService := &controllercsi.Service{
-		Client: client, Namespace: cfg.namespace, Operator: operator, Volumes: volumeRegistry,
+		Client: client, Namespace: cfg.namespace, Operator: effects, Volumes: volumeRegistry,
 		CapacityPools: volumeRegistry, CapacityProbe: capacityProbe, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
-		Cleanups: cleanupStore, CleanupOperator: operator, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
+		Cleanups: cleanupStore, CleanupOperator: effects, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
 		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, ObserveStep: exporter.ObserveProvisioningStep, RetryRequests: capacityRetries,
 	}
 	identityService := &identity.Service{Version: version}

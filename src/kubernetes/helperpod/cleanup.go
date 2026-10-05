@@ -392,3 +392,12 @@ func (r *Runner) needsReview(ctx context.Context, store CleanupJournal, cleanup 
 	}
 	return fmt.Errorf("cleanup needs review: %s: %s", reason, message)
 }
+
+// CleanupExists preserves suspended Jobs accepted before a controller restart.
+func (r *Runner) CleanupExists(ctx context.Context, cleanup cleanupapi.Cleanup) (bool, error) {
+	_, err := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, cleanup.Name+"-effect", metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
+}

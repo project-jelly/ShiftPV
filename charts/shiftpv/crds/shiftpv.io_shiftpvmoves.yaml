@@ -199,8 +199,18 @@ spec:
                           format: date-time
                         executor:
                           type: object
-                          required: [jobName, jobUID, nodeName]
+                          required: [nodeName]
+                          x-kubernetes-validations:
+                            - rule: "!has(self.kind) ? (has(self.jobName) && has(self.jobUID)) : (has(self.namespace) && has(self.podName) && has(self.podUID) && !has(self.jobName) && !has(self.jobUID))"
+                              message: "executor must bind either a legacy Job or a resident Node Pod"
                           properties:
+                            kind:
+                              type: string
+                              enum: [Node]
+                            namespace:
+                              type: string
+                            podName:
+                              type: string
                             jobName:
                               type: string
                               minLength: 1

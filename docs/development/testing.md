@@ -100,14 +100,16 @@ patch하거나 host-side copy로 제품 effect를 대신하면 안 된다.
 전체 suite와 독립적으로 재현 가능한 lifecycle gate는 다음과 같이 실행한다.
 
 ```bash
+NODE_EFFECTS_ONLY=1 CLUSTER_NAME=shiftpv-node-focused ./test/e2e/kind/run.sh
 VOLUME_DELETE_CLEANUP_ONLY=1 CLUSTER_NAME=shiftpv-delete-focused ./test/e2e/kind/run.sh
 CLEANUP_JOB_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
 MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./test/e2e/kind/run.sh
 ```
 
-첫 번째 gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 유지되고, generation-fenced absence 뒤에만
-삭제와 용량 재사용이 일어나는지 검증한다. 두 번째 gate는 cleanup Job의 첫 Pod가 receipt 기록 전에 사라져도
-같은 Job identity 아래 새 Pod로 재결합해 수렴하는지 검증한다. 세 번째 gate는 owner commit 전후 및
+Node gate는 상주 Node 생성 receipt, Pod 교체 뒤 데이터 보존, 새 Pod UID의 purge receipt와 fenced cleanup 완료를 확인한다.
+Volume delete gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 유지되고, generation-fenced absence 뒤에만
+삭제와 용량 재사용이 일어나는지 검증한다. Job retry gate는 cleanup Job의 첫 Pod가 receipt 기록 전에 사라져도
+같은 Job identity 아래 새 Pod로 재결합해 수렴하는지 검증한다. Mobility restart gate는 owner commit 전후 및
 `CleaningSource`에서 source/destination node가 중단됐다가 돌아온 뒤 현재 transaction이 계속 수렴하는지
 검증한다.
 

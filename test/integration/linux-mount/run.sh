@@ -41,3 +41,8 @@ live_capacity_binary="${temp_dir}/live-capacity.test"
 go test -c -o "${live_capacity_binary}" ./src/pool/measurement
 sudo unshare --mount --propagation private \
   "${live_capacity_binary}" -test.v -test.run '^TestLinuxLiveCapacity'
+
+node_effects_binary="${temp_dir}/node-effects.test"
+go test -c -o "${node_effects_binary}" ./src/provisioning/nodeexecutor
+sudo unshare --mount --propagation private \
+  "${node_effects_binary}" -test.v -test.run '^TestNativeMountedPool'
