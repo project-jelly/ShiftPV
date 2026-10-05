@@ -68,6 +68,7 @@ git diff --check
 | Source cleanup | intent 전/후, unlink 전/후, local/API receipt 전/후, absence scan 전/후 |
 | Volume delete | mounted target, node down, already-absent-with-intent, unexpected absence, finalizer race |
 | Capacity | destination reserve, commit 직후 두 copy, 각 receipt 단독, fresh absence, abort cleanup |
+| Measurement | 측정 전후 Pool/mount/copy 변경, API·du 실패, read-only bind, mount 유실 |
 | Inventory | generation stale, invalid signature/identity, incomplete/truncated scan, copy reappearance |
 | Removal | unresolved Volume/Move/hold, unavailable node, API read error, generation-fenced empty inventory |
 
@@ -109,6 +110,17 @@ MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./te
 같은 Job identity 아래 새 Pod로 재결합해 수렴하는지 검증한다. 세 번째 gate는 owner commit 전후 및
 `CleaningSource`에서 source/destination node가 중단됐다가 돌아온 뒤 현재 transaction이 계속 수렴하는지
 검증한다.
+
+## Multi-Pool qualification
+
+실제 ext4/xfs의 thick LVM 또는 독립 disk에서 다음을 확인한다. 합성 backing, tmpfs와
+단일 Pool Kind 결과는 이 검증을 대신하지 않는다.
+
+1. 같은 node의 독립 Pool 두 개가 Ready가 되고 그룹별 PVC가 각 경로에 생성된다.
+2. 같은 그룹에서 한 Pool의 여유가 부족하면 다른 Pool을 선택한다.
+3. 공유 filesystem·겹치는 backing·thin 구성은 쓰기 probe와 inventory 전에 거부한다.
+4. mount 유실·교체와 Pool 재생성 시 새 배치·게시가 거부된다.
+5. 삭제·이동 hold가 해당 Pool UID에 남고 기존 단일 directory Pool도 동작한다.
 
 ## Real-node qualification
 

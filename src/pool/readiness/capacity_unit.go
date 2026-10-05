@@ -86,9 +86,7 @@ func capacityFailure(reason string, err error) Check {
 	return Check{Known: true, Reason: reason, Message: err.Error()}
 }
 
-// VerifyHostPool adds a live allocation check where the node's existing host
-// sysfs and device-mapper access are available. Helpers retain the bound-mount
-// check; they do not receive host device access for inspection.
+// VerifyHostPool checks the mount and live backing with the node's host access.
 func VerifyHostPool(hostRoot string, pool volumeapi.Pool) error {
 	path, err := hostPath(hostRoot, pool.MountPath)
 	if err != nil {

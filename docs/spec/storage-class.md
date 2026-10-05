@@ -1,6 +1,6 @@
 # StorageClass Contract
 
-> **Status:** ShiftPV 0.4 구현·검증 목표다. 모든 acceptance gate가 끝나야 runtime 보증이 된다.
+현재 구현의 계약이다. 운영 검증 범위는 [Testing](../development/testing.md)을 따른다.
 
 ShiftPV StorageClass는 등록된 node-local Pool의 directory를 RWO Filesystem PV로 동적 provisioning한다.
 Chart는 일반 lifecycle용 `shiftpv`와 명시적 보존용 `shiftpv-retain`을 함께 제공한다.
@@ -27,7 +27,7 @@ volumeBindingMode: WaitForFirstConsumer
 
 | Class | Default | Reclaim | 용도 |
 |---|---:|---|---|
-| `shiftpv` | no | `Delete` | PVC와 함께 data lifecycle을 끝내는 일반 workload와 DR 시험 |
+| `shiftpv` | no | `Delete` | PVC 삭제와 함께 data를 폐기하는 workload |
 | `shiftpv-retain` | no | `Retain` | PVC 삭제 뒤에도 PV와 원본 data를 보존해야 하는 workload |
 
 두 class의 provisioner는 `csi.shiftpv.io`, access/mode는 `ReadWriteOnce`/`Filesystem`, binding은
@@ -70,19 +70,21 @@ parameters:
 stale, invalid 또는 incomplete observation은 allocation을 승인할 수 없다. `statfs`는 같은 filesystem의
 현재 여유를 확인하는 admission 신호일 뿐 공간을 예약하거나 hard quota를 제공하지 않는다.
 
-용량·source usage 측정 helper는 요청에 묶인 Pool name/UID/node, generation과 filesystem
-evidence digest를 API의 현재 등록과 비교하고, 실제 bind mount를 측정 전후에 검증한다.
-usage는 installation과 현재 quiesced serving copy 및 디스크의 copy marker도 검증한다.
-측정이나 후속 검증이 실패하면 수치를 반환하지 않는다. 측정 Pod는 Pool을 read-only로
-마운트하며, 일반 shell pipeline으로 측정하지 않는다.
+### Measurement verification
 
-노드의 publish·inventory·identity release는 host sysfs와 device-mapper 조회를 통해
-현재 backing extents도 기록된 allocation과 비교한다. Helper는 host device 접근 권한을
-갖지 않으므로 bind mount와 API에 기록된 allocation 증거를 사용한다. 등록된 Pool을
-사용하는 동안 운영자는 backing mapping, partition, filesystem 또는 mount를 교체·확장하지
-않는다. 변경하려면 신규 배치를 중단하고 volume·Move·cleanup을 정상 종료하여 Pool을
-안전하게 deregister한 뒤 새 등록으로 검증한다. 검사 직후 또는 작업 도중의 외부 변경을
-원자적으로 차단하는 fencing은 제공하지 않는다.
+측정 helper는 Pool을 read-only로 마운트하고 측정 전후에 다음을 확인한다. 실패하면 결과를 폐기한다.
+
+- Pool name/UID/node, generation과 등록된 mount/capacity 증명의 digest가 요청과 일치한다.
+- Pool은 Ready이며 inventory는 fresh·complete다. 설정된 capacity/mount 정책에 따라
+  실제 mount가 등록된 filesystem과 일치하는지 검증한다.
+- usage의 원본은 게시되지 않은 현재 serving copy이며 installation과 디스크 marker가 일치한다.
+
+`statfs`는 syscall로, usage는 `du -sbx`로 측정하며 명령 실패를 그대로 반환한다.
+Helper는 host device 권한을 갖지 않는다. `FixedBlock` Pool은 노드가 publish·identity release 직전과
+inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경을 원자적으로 차단하지는 않으므로
+[Pool 변경 절차](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.
+
+### Capacity denial
 
 용량 부족 시 scheduler가 아직 배치할 수 있는 consumer에는 `ResourceExhausted`를 반환해 다른 노드
 선택을 허용한다. CDI scratch처럼 PVC가 Pod 소유이고 그 Pod가 이미 선택 노드에 배치된 경우에는,
@@ -92,7 +94,7 @@ PVC 또는 Pod 조회가 일시적으로 실패하면 재배치 결정을 추측
 
 ## Capacity ownership
 
-Capacity는 directory 존재 추정이나 wall-clock TTL이 아니라 세 durable API의 명시적 hold로 계산한다.
+Capacity는 Volume과 Move journal의 hold로 계산한다.
 
 | 상태 | capacity owner |
 |---|---|
@@ -102,10 +104,8 @@ Capacity는 directory 존재 추정이나 wall-clock TTL이 아니라 세 durabl
 | Move abort cleanup | Volume의 source hold + Move의 destination hold 유지 |
 | Volume deletion | Volume hold를 cleanup closure까지 유지 |
 
-한 physical copy라도 남을 수 있는 동안 해당 hold를 보수적으로 유지한다. Move commit 시 destination hold의
-소유권은 Move에서 Volume로 넘어가고, source hold는 Volume에서 같은 Move의 retained-source hold로 이어진다.
-소유권 이전에는 release gap이 없어야 하며, source와 destination 두 physical copy가 존재하는 구간은 두
-Pool에 동시에 계수하는 conservative double accounting을 적용한다.
+Move commit 시 destination hold는 Move에서 Volume으로, source hold는 Volume에서 Move로 넘어간다.
+두 copy가 남아 있는 동안 두 Pool에 모두 계수하며 hold의 공백을 허용하지 않는다.
 
 Move의 destination/source hold와 삭제 중 Volume hold는 exact purge API receipt와 그 이후 generation의 fresh,
 valid, complete absence proof가 모두 있을 때만 해제한다. stale scan, node heartbeat 소실, deadline 경과,
@@ -141,7 +141,7 @@ PVC 삭제
 ownership을 분리하면 안 된다. 폐기 중에도 fresh observation이나 cleanup 증거가 불충분하면 data와 hold를
 보존한다.
 
-`shiftpv`만 cluster default다. 보존이 필요한 PVC는 default에 의존하지 않고 `shiftpv-retain`을 명시한다.
+두 class 모두 기본 StorageClass가 아니다. PVC에 사용할 class를 명시한다.
 기존 PVC의 class와 PV reclaim policy는 Chart upgrade만으로 소급 변경되지 않는다. node/disk의 영구
 손실 처리, HA/replication, RWX, snapshot, expansion과 hard quota는 이 계약 범위 밖이다.
 

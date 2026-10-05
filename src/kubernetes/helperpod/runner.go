@@ -265,10 +265,7 @@ func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poo
 	return result, nil
 }
 
-// sameResultPod binds a short-lived stat/du result to the exact Pod
-// incarnation and execution shape that the Runner created. Pod names are
-// reusable, so a name-only watch could otherwise accept a replacement Pod's
-// termination message as trusted capacity or usage data.
+// sameResultPod accepts results only from the created Pod UID and execution shape.
 func sameResultPod(expected, current *corev1.Pod, uid types.UID) error {
 	if expected == nil || current == nil || uid == "" || current.UID != uid {
 		return fmt.Errorf("helper Pod identity changed")

@@ -1,9 +1,8 @@
 # Source Layout
 
-이 문서는 0.4 구현이 따라야 할 책임 경계다. Package 이름보다 의존 방향을 우선하며, 한 사실을 여러
-reconciler가 소유하지 않는다.
+현재 소스의 책임과 의존 방향을 설명한다.
 
-## Target boundaries
+## Boundaries
 
 ```text
 cmd wiring
@@ -51,7 +50,7 @@ test/
 | 책임 | 규칙 |
 |---|---|
 | `cmd/controller`, `cmd/node`, `cmd/uninstall-guard` | flag, dependency wiring, process lifecycle만 소유 |
-| `cmd/volume-helper` | node-bound CLI parsing과 node-local effect 호출만 소유; exact Kubernetes authority 재확인은 `kubernetes/helperauth`가 소유하고 durable truth는 소유하지 않음 |
+| `cmd/volume-helper` | CLI, 측정 전후 검증과 node-local effect 호출; Move/cleanup 승인은 `kubernetes/helperauth` 사용 |
 | CSI | RPC validation과 protocol command 변환; filesystem effect 직접 실행 금지 |
 | Kubernetes repositories | Pool/Volume/Move read, status patch, resourceVersion CAS, child executor 생성 |
 | Pure protocol | 외부 I/O 없는 state decision, identity comparison, capacity holds |

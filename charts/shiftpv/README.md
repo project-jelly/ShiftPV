@@ -17,8 +17,8 @@ storage operator가 준비해야 한다.
   `/var/snap/microk8s/common/var/lib/kubelet`
 - RWO filesystem workload
 
-0.4는 empty install을 기준으로 한다. 설치 전 같은 driver의 PVC/PV와 ShiftPV CRD instance가 없어야
-하며, 다른 contract의 resource를 자동 변환하지 않는다.
+아래 설치 예시는 기존 ShiftPV 리소스가 없는 클러스터를 대상으로 한다.
+기존 설치는 [업그레이드 절차](../../docs/development/versioning.md#existing-installation-upgrades)를 따른다.
 
 ## Install
 
@@ -53,7 +53,7 @@ helm install shiftpv shiftpv/shiftpv \
 
 ## Register Pools
 
-참여 node마다 운영자가 소유한 directory를 가리키는 Pool 하나를 선언한다.
+운영자가 준비한 directory를 Pool로 등록한다. 단일 Pool 예시:
 
 ```yaml
 apiVersion: shiftpv.io/v1alpha1
@@ -155,33 +155,20 @@ spec:
 | thin/thin-pool, snapshot, crypt, striped, multipath DM target | 이 구현에서 독립성을 증명하지 않아 거부 |
 | Btrfs subvolume, NFS, loop/MD 등 지원하지 않는 filesystem/backing | 거부 |
 
-Node는 sysfs와 읽기 전용 device-mapper table 조회로 backing device와 512-byte sector
-구간을 관찰한다. native device가 WWID를 제공하면 같은 WWID의 경로를 같은 backing으로
-취급한다. WWID가 없으면 node의 kernel device namespace까지만 구분할 수 있다.
-하이퍼바이저나 외부 SAN이 숨긴 alias·공유 용량은 이 관찰만으로 증명할 수 없으며,
-운영자가 각 filesystem의 독립 할당을 보장해야 한다. 관리자가 host mapping을 동시에
-바꾸는 작업에 대한 원자적 fencing도 제공하지 않는다.
+Node는 sysfs와 device-mapper table에서 backing 구간을 확인한다. 같은 WWID의 device는
+같은 backing으로 취급한다. WWID가 없거나 하이퍼바이저/SAN이 공유를 숨기면 운영자가
+독립 할당을 보장해야 한다. 작업 중 외부 변경을 원자적으로 차단하지는 않는다.
 
-등록된 Pool을 사용하는 동안 LV mapping·partition·filesystem·mount를 변경하거나 확장하지
-않는다. 변경은 신규 배치를 중단하고 volume·Move·cleanup을 정상 종료하여 Pool을 안전하게
-deregister한 뒤 수행하고, 새 Pool 등록으로 allocation을 다시 검증한다. 노드는 publish·identity
-release 직전과 inventory 전후에 live backing extents를 확인하지만 helper는 bound filesystem identity와 API 증거를
-확인하므로, 이 운영 제약이 작업 중 외부 mapping 변경을 막는 경계다.
+등록 중에는 LV mapping·partition·filesystem·mount를 교체하거나 확장하지 않는다.
+변경하려면 신규 배치를 중단하고 Volume·Move·cleanup을 정상 종료한 뒤 Pool을 삭제한다.
+삭제 완료 후 backing을 변경하고 새 Pool로 등록한다.
 
 `CapacityIndependent=True`와 `status.capacityUnit`, generation과 fresh·complete inventory를
 함께 확인한다. 증거가 없거나 backing이 변경되면 Ready가 내려가고 신규 배치를 보류한다.
-최초 기록한 capacity identity는 정상 status 갱신으로 교체하거나 지우지 않는다.
-작업 직전에는 현재 filesystem의 device/source/type을 다시 확인한다. `capacity.limit`는
-Pool의 논리 예약 한도이며 hard quota가 아니다. 그 filesystem을 함께 쓰는 외부 process의
-사용량은 `statfs` 여유에 반영된다.
-
-실제 LVM/별도 mount acceptance에서는 최소한 다음을 검증한다.
-
-1. 같은 node의 독립 Pool 두 개가 모두 Ready가 되고 서로 다른 그룹의 PVC가 각 경로에 생성된다.
-2. 같은 그룹의 두 Pool 중 한 Pool의 예약 여유가 부족하면 다른 Pool을 선택한다.
-3. 같은 filesystem의 두 경로와 겹치는 backing은 쓰기 probe와 inventory 전에 거부한다.
-4. thin backing, mount 유실·교체, Pool 재생성 시 새 배치와 위험한 작업이 보류된다.
-5. 삭제와 Move의 hold가 정확한 Pool UID에 남고, 기존 단일 directory Pool 동작이 유지된다.
+최초 capacity identity는 status 갱신으로 교체하거나 지우지 않는다. `capacity.limit`는
+논리 예약 한도이며 hard quota가 아니다. 외부 사용량은 filesystem 여유에서 차감된다.
+측정 검증은 [StorageClass contract](../../docs/spec/storage-class.md#measurement-verification),
+실제 LVM·disk 검증은 [Testing](../../docs/development/testing.md#multi-pool-qualification)을 따른다.
 
 ## StorageClass
 
@@ -211,10 +198,8 @@ additionalStorageClasses:
     poolGroup: fast
 ```
 
-`poolGroup`은 배치 대상을 고르는 값이며 용량을 합산하지 않는다. `spec.poolGroup`을 생략한
-Pool은 `default`에 속한다. 기존 두 class는 immutable parameter를 바꾸지 않고
-`default`를 계속 선택한다. 이 단계에서는 node당 Pool 등록을 하나만 허용한다.
-다른 node의 Pool에 그룹을 지정한 뒤 별도 StorageClass에서 선택할 수 있다.
+`poolGroup`을 생략하면 `default`다. 기본 제공되는 두 class는 이 그룹을 선택한다.
+`additionalStorageClasses`로 다른 그룹을 선택하는 class를 추가할 수 있다.
 
 Chart 0.6.0부터 두 class 모두 기본 StorageClass로 지정하지 않는다. PVC에서 사용할 class를 명시한다.
 클러스터 기본값으로 쓰려는 운영자만 `storageClass.defaultClass=true`를 설정한다.
@@ -235,12 +220,8 @@ spec:
       storage: 20Gi
 ```
 
-Capacity는 hard quota가 아니다. Admission은 Pool limit, filesystem available bytes, 모든 Volume owner
-hold와 미완료 Move hold를 보수적으로 계산한다. 이동 중 두 물리 copy가 있으면 두 Pool에 동시에
-capacity가 잡히는 것이 정상이다.
-
-중요한 data는 cluster default에 의존하지 않고 `shiftpv-retain`을 명시해야 한다. `Retain`은 PVC 삭제를
-막지 않으며, 삭제 뒤 PV와 실제 data를 보존해 운영자의 별도 폐기 결정을 요구한다.
+Admission은 Pool limit, filesystem 여유와 Volume·Move hold를 확인한다. 이동 중 두 copy가
+남아 있으면 두 Pool에 모두 용량을 잡는다. `Retain`은 PVC 삭제 뒤 PV와 data를 보존한다.
 
 ShiftPV는 CSI `File` fsGroup 정책을 선언한다. Pod가 `securityContext.fsGroup`을 지정하면 kubelet이
 볼륨의 그룹 소유권과 쓰기 권한을 적용하므로 비-root workload도 별도 init container 없이 사용할 수 있다.
@@ -279,15 +260,16 @@ StorageClass가 없으므로 `storageClassName`을 생략한 PVC는 그 사이 P
 
 ### Retain volume 회수
 
-`shiftpv-retain`의 PVC를 삭제하면 PV는 `Released`로 남고 `ShiftPVVolume`과 node의 data directory도
-보존된다. 그 data를 폐기하기로 결정했으면 PV의 reclaim policy를 `Delete`로 바꾸는 것으로 끝난다. PV
-controller가 PV를 삭제하고 CSI `DeleteVolume`이 ShiftPV의 일반 cleanup 경로(cleanup Job, copy marker와
-placement marker 제거, receipt 기록, `ShiftPVVolume` 삭제)를 그대로 태운다.
+`shiftpv-retain`의 PVC를 삭제하면 PV는 `Released`로 남고 Volume과 data를 보존한다.
+폐기하려면 Pod 종료, 실제 unpublish와 active Move가 없음을 확인하고 필요한 data를 backup한다.
+PV controller와 CSI `DeleteVolume`이 data·marker·Volume을 정상 cleanup 경로로 정리한다.
 
 ```bash
-kubectl get pv <pv-name> -o jsonpath='{.status.phase} {.spec.csi.volumeHandle}{"\n"}'   # Released 확인
-kubectl patch pv <pv-name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
-kubectl get pv <pv-name>; kubectl get shiftpvvolume <volume-id>                        # 둘 다 NotFound가 되면 완료
+kubectl get pv <pv-name> -o yaml          # driver, claim UID, volumeHandle과 Released 확인
+kubectl get shiftpvvolume <volume-id> -o yaml
+kubectl patch pv <pv-name> --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
+kubectl wait --for=delete pv/<pv-name> --timeout=10m
+kubectl wait --for=delete shiftpvvolume/<volume-id> --timeout=10m
 ```
 
 `ShiftPVVolume`의 finalizer를 직접 떼거나 node에서 directory를 `rm`하지 않는다. data directory만 지우면
@@ -334,30 +316,6 @@ kubectl get shiftpvpools -o yaml
 
 Node outage 중에는 관련 journal/finalizer를 제거하지 않는다. Node가 같은 identity로 돌아오면 동일
 transaction을 재개한다. 영구 authoritative disk/node 손실은 제품 복구 범위 밖이다.
-
-## Delete a retained volume
-
-`Retain` PVC/PV의 폐기는 workload I/O를 멈추고 exact identity를 확인한 뒤 CSI `DeleteVolume`에
-위임한다.
-
-1. PV driver, claim UID, volume handle을 확인한다.
-2. Volume에 active Move가 없는지 확인한다.
-3. Pod 종료와 owner node의 실제 unpublish를 확인하고 필요한 data를 backup한다.
-4. 확인한 PV의 reclaim policy를 `Delete`로 변경한다.
-5. Volume deletion journal, exact purge receipt, fresh absence와 Volume/PV 삭제를 확인한다.
-
-```bash
-kubectl get pv <pv-name> -o yaml
-kubectl get shiftpvvolume <volume-handle> -o yaml
-kubectl patch pv <pv-name> --type=merge \
-  -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
-kubectl wait --for=delete pv/<pv-name> --timeout=10m
-kubectl wait --for=delete shiftpvvolume/<volume-handle> --timeout=10m
-```
-
-Deleting Volume의 finalizer는 durable intent, exact executor, local/API purge receipt와 이후 generation의
-absence proof가 모두 확인될 때만 해제된다. Intent 없이 path가 사라졌거나 identity가 다르면 cleanup
-subjournal이 `NeedsReview`로 남는다.
 
 ## GC and review
 

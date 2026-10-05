@@ -1,6 +1,6 @@
 # Volume Mobility Contract
 
-Status: target contract, not a runtime guarantee until implementation gates pass.
+This describes the current implementation. Qualification requirements are in [Testing](../development/testing.md).
 
 ShiftPV moves one RWO Filesystem PVC from its current node-local owner to another
 registered Pool. PVC, PV, and CSI volume handle identity remain stable. The

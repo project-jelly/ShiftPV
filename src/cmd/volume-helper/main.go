@@ -93,11 +93,8 @@ func runServeSource(arguments []string) error {
 	return command.Run()
 }
 
-// helperPoolReadinessFlag registers the probe staleness budget a node-bound
-// helper judges Pool readiness with. Cleanup publication proof and measurement
-// helpers consume it. Move effect helpers recheck authority through
-// PoolForIdentity and accept the flag for CLI compatibility. The name and
-// default are shared with the controller so parent and child agree.
+// Cleanup and measurement use the controller's readiness budget.
+// Move effects accept this flag for CLI compatibility and check exact authority.
 func helperPoolReadinessFlag(flags *flag.FlagSet, staleAfter *time.Duration) {
 	flags.DurationVar(staleAfter, volumeapi.PoolReadinessStaleAfterFlag,
 		volumeapi.DefaultPoolReadinessStaleAfter, "maximum age of a successful node Pool readiness probe")

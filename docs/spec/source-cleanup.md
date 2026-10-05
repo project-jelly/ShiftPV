@@ -1,6 +1,6 @@
 # Cleanup And GC Contract
 
-Status: target contract, not a runtime guarantee until implementation gates pass.
+This describes the current implementation. Qualification requirements are in [Testing](../development/testing.md).
 
 Cleanup removes only exact non-authoritative ShiftPV copies. There is no
 standalone durable cleanup CR. Durable truth lives in `status.cleanup` on the
