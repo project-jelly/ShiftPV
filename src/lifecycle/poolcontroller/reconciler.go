@@ -80,7 +80,7 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 		if !slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) {
 			continue
 		}
-		unlock := r.PoolLocks.Lock(pool.NodeName)
+		unlock := r.PoolLocks.Lock(pool.UID)
 		report, checkErr := r.Safety.CheckPoolDeleteAfter(ctx, pool.Name, types.UID(pool.UID), pool.DeletionTimestamp.Time)
 		if checkErr != nil {
 			unlock()
