@@ -312,6 +312,24 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 	return pool, nil
 }
 
+// CleanupPoolForIdentity checks an approved cleanup's exact Pool and backing
+// readiness. Placement inventory and peer admission do not authorize cleanup;
+// complete post-effect inventory is required later to release its hold.
+func (r *Registry) CleanupPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
+	pool, err := r.PoolForIdentity(ctx, name, uid, nodeName)
+	if err != nil {
+		return Pool{}, err
+	}
+	if !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+		return Pool{}, fmt.Errorf("%w: cleanup Pool protection is unavailable", ErrStateConflict)
+	}
+	now, staleAfter := r.readiness()
+	if ready, reason := pool.CleanupReadyAt(now, staleAfter); !ready {
+		return Pool{}, fmt.Errorf("%w: cleanup Pool %q: %s", ErrPoolNotReady, pool.Name, reason)
+	}
+	return pool, nil
+}
+
 func (r *Registry) ReadyPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
 	if _, err := r.PoolForIdentity(ctx, name, uid, nodeName); err != nil {
 		return Pool{}, err

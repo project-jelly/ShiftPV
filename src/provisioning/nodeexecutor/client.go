@@ -108,7 +108,7 @@ func (c *Client) Reclaim(ctx context.Context, expected cleanupapi.Cleanup, store
 	if current.Status.Receipt != nil {
 		return current, nil
 	}
-	if _, err := c.Volumes.ReadyPoolForIdentity(ctx, current.Spec.Target.PoolName, current.Spec.Target.PoolUID, current.Spec.Target.NodeName); err != nil {
+	if _, err := c.Volumes.CleanupPoolForIdentity(ctx, current.Spec.Target.PoolName, current.Spec.Target.PoolUID, current.Spec.Target.NodeName); err != nil {
 		return current, err
 	}
 	if err := c.bindCleanup(ctx, current, store); err != nil {

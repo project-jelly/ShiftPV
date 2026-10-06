@@ -9,9 +9,73 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"testing"
+	"time"
 )
+
+func TestCleanupReadinessDoesNotRequirePlacementInventory(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*unstructured.Unstructured)
+		want   error
+	}{
+		{name: "invalid inventory", change: func(p *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(p.Object, false, "status", "inventory", "valid")
+		}},
+		{name: "truncated inventory", change: func(p *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(p.Object, true, "status", "inventory", "truncated")
+		}},
+		{name: "terminating pool", change: func(p *unstructured.Unstructured) {
+			p.SetDeletionTimestamp(&metav1.Time{Time: time.Now()})
+			conditions := []any{}
+			for _, kind := range []string{volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable} {
+				conditions = append(conditions, map[string]any{"type": kind, "status": "True", "observedGeneration": int64(1), "lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano), "reason": "PoolReady"})
+			}
+			_ = unstructured.SetNestedSlice(p.Object, conditions, "status", "conditions")
+		}},
+		{name: "stale probe", want: volumeapi.ErrPoolNotReady, change: func(p *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(p.Object, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano), "status", "lastProbeTime")
+		}},
+		{name: "lost protection", want: volumeapi.ErrStateConflict, change: func(p *unstructured.Unstructured) { p.SetFinalizers(nil) }},
+		{name: "changed pool UID", want: volumeapi.ErrStateConflict, change: func(p *unstructured.Unstructured) { p.SetUID("replacement-pool") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, node, dynamic, _, state := fixture(t)
+			ctx := context.Background()
+			if err := client.Volumes.CompleteCreate(ctx, testID, state.UID, *state.CurrentCopy); err != nil {
+				t.Fatal(err)
+			}
+			state, err := client.Volumes.BeginDelete(ctx, testID, state.UID, *state.CurrentCopy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanup, err := node.Cleanups.Ensure(ctx, cleanupapi.Spec{OperationID: state.DeletionOperationID, Target: *state.CurrentCopy, Reason: "VolumeDelete", Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: testID, UID: state.UID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool, err := dynamic.Resource(volumeapi.PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.change(pool)
+			if _, err := dynamic.Resource(volumeapi.PoolResource).Update(ctx, pool, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			current, err := client.Reclaim(ctx, cleanup, node.Cleanups)
+			if test.want != nil {
+				if !errors.Is(err, test.want) || current.Status.Executor != nil {
+					t.Fatalf("cleanup=%+v error=%v want=%v", current, err, test.want)
+				}
+				return
+			}
+			if !errors.Is(err, context.DeadlineExceeded) || current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode || current.Status.Phase != cleanupapi.PhaseRunning || current.Status.Receipt != nil {
+				t.Fatalf("approved cleanup cannot run or settled without proof: cleanup=%+v error=%v", current, err)
+			}
+		})
+	}
+}
 
 func TestCreationRequiresBoundReceiptAndPreservesIt(t *testing.T) {
 	client, node, _, _, state := fixture(t)
