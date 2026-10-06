@@ -303,3 +303,14 @@ func (r *Runner) deleteCreationPod(ctx context.Context, expected *corev1.Pod, ui
 func isAmbiguousKubernetesError(err error) bool {
 	return apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err)
 }
+
+// CreationExists keeps already accepted helper executions on their own backend.
+func (r *Runner) CreationExists(ctx context.Context, identity volume.CopyIdentity) (bool, error) {
+	operationID := "create-" + identity.VolumeUID
+	sum := sha256.Sum256([]byte(operationID + "\x00" + identity.CopyID))
+	_, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, fmt.Sprintf("shiftpv-create-%x", sum[:16]), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
+}

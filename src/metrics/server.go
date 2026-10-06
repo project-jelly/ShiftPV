@@ -18,6 +18,7 @@ type Exporter struct {
 	Registry *prometheus.Registry
 	requests *prometheus.CounterVec
 	duration *prometheus.HistogramVec
+	steps    *prometheus.HistogramVec
 }
 
 func New(sources ...string) *Exporter {
@@ -25,7 +26,8 @@ func New(sources ...string) *Exporter {
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "shiftpv_csi_requests_total", Help: "Completed CSI lifecycle RPC calls, including retries."}, []string{"method", "code"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "shiftpv_csi_request_duration_seconds", Help: "CSI lifecycle RPC duration, not workload downtime.", Buckets: []float64{.005, .025, .1, .5, 1, 5, 30, 120, 600}}, []string{"method"}),
 	}
-	e.Registry.MustRegister(e.Cache, e.requests, e.duration)
+	e.steps = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "shiftpv_provisioning_step_duration_seconds", Help: "Provisioning stage duration; nested stages overlap.", Buckets: []float64{.005, .025, .1, .5, 1, 5, 30, 120}}, []string{"step"})
+	e.Registry.MustRegister(e.Cache, e.requests, e.duration, e.steps)
 	for _, source := range sources {
 		e.Cache.update(source, nil, false)
 	}

@@ -1,0 +1,8 @@
+{{- if .Values.nodeRPC.enabled -}}
+{{- if or (lt (int .Values.nodeRPC.port) 1) (gt (int .Values.nodeRPC.port) 65535) -}}
+{{- fail "nodeRPC.port must be between 1 and 65535" -}}
+{{- end -}}
+{{- if and .Values.metrics.enabled (eq (int .Values.nodeRPC.port) (int .Values.metrics.port)) -}}
+{{- fail "nodeRPC.port must differ from metrics.port" -}}
+{{- end -}}
+{{- end -}}

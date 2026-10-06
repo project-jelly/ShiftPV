@@ -1,0 +1,40 @@
+syntax = "proto3";
+package shiftpv.node.v1;
+option go_package = "github.com/project-jelly/ShiftPV/src/node/rpc/protocol";
+import "google/protobuf/empty.proto";
+
+// Requests refer to durable authority. No caller-supplied filesystem paths.
+service Node {
+  rpc GetCapacity(CapacityRequest) returns (CapacityResponse);
+  rpc CreateCopy(EffectRequest) returns (google.protobuf.Empty);
+  rpc ReclaimCopy(EffectRequest) returns (google.protobuf.Empty);
+}
+
+enum Operation {
+  OPERATION_UNSPECIFIED = 0;
+  CREATE = 1;
+  RECLAIM = 2;
+}
+message EffectRequest {
+  string executor_uid = 1;
+  string node_name = 2;
+  string volume_name = 3;
+  string volume_uid = 4;
+  string operation_id = 5;
+}
+message CapacityRequest {
+  string executor_uid = 1;
+  string node_name = 2;
+  string pool_name = 3;
+  string pool_uid = 4;
+  string evidence = 5;
+  string nonce = 6;
+}
+message CapacityResponse {
+  string executor_uid = 1;
+  string evidence = 2;
+  string nonce = 3;
+  int64 total_bytes = 4;
+  int64 available_bytes = 5;
+  int64 available_inodes = 6;
+}

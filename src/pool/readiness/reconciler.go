@@ -123,8 +123,13 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 // cleanup-ready even though it is no longer eligible for new placement.
 func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, result Result, now time.Time) (volumeapi.PoolStatus, bool) {
 	status := pool.Status
+	status.CapacityProbeSupported = true
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
+	status.FilesystemTotalBytes = 0
+	if result.CapacityReadable.OK {
+		status.FilesystemTotalBytes = result.Filesystem.TotalBytes
+	}
 	for _, condition := range conditions(result, pool.Generation, now) {
 		meta.SetStatusCondition(&status.Conditions, condition)
 	}

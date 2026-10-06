@@ -40,6 +40,10 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 | `shiftpv_persistent_volumes_released_bytes` | `pool` | `Released` PersistentVolume의 요청 capacity 합계 |
 | `shiftpv_csi_requests_total` | `method`, `code` | 지원하는 CSI lifecycle RPC 완료 횟수 |
 | `shiftpv_csi_request_duration_seconds` | `method` | 지원하는 CSI lifecycle RPC 처리 시간 |
+| `shiftpv_provisioning_step_duration_seconds` | `step` | Controller의 admission·생성·삭제 및 helper 처리 시간. 중첩 단계이므로 합산하지 않는다 |
+
+`live_capacity_probe`는 Node 요청·응답 대기와 필요 시 helper fallback을 포함한다.
+`statfs_helper`는 실제 helper 실행 시간이며, 정상적인 Node 응답에서는 증가하지 않는다.
 
 `pool`과 `node`는 등록된 Pool 집합으로 제한한다. PersistentVolume series의 `pool`은 volume handle로 찾은
 `ShiftPVVolume`의 현재 copy가 속한 Pool이며, 대응하는 Volume이 없으면 `unknown`으로 접는다. Phase, state, source, method, code와 reason은 코드에

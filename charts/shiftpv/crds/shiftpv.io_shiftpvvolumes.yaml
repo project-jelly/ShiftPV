@@ -62,7 +62,7 @@ spec:
               properties:
                 phase:
                   type: string
-                  enum: [Pending, Ready, Deleting, Moving, Blocked]
+                  enum: [Pending, NodeCreating, Ready, Deleting, Moving, Blocked]
                 ownerNode:
                   type: string
                 activeMove:
@@ -74,6 +74,32 @@ spec:
                   x-kubernetes-list-type: set
                 creationOperationID:
                   type: string
+                creationExecutor:
+                  type: object
+                  required: [namespace, podName, podUID, nodeName]
+                  properties:
+                    namespace:
+                      type: string
+                    podName:
+                      type: string
+                    podUID:
+                      type: string
+                    nodeName:
+                      type: string
+                creationReceipt:
+                  type: object
+                  required: [operationID, executorUID, observedAt, localReceiptDigest]
+                  properties:
+                    operationID:
+                      type: string
+                    executorUID:
+                      type: string
+                    observedAt:
+                      type: string
+                      format: date-time
+                    localReceiptDigest:
+                      type: string
+                      pattern: '^[0-9a-f]{64}$'
                 deletionOperationID:
                   type: string
                 currentCopy: &copyIdentity
@@ -144,8 +170,18 @@ spec:
                           format: date-time
                         executor:
                           type: object
-                          required: [jobName, jobUID, nodeName]
+                          required: [nodeName]
+                          x-kubernetes-validations:
+                            - rule: "!has(self.kind) ? (has(self.jobName) && has(self.jobUID)) : (has(self.namespace) && has(self.podName) && has(self.podUID) && !has(self.jobName) && !has(self.jobUID))"
+                              message: "executor must bind either a legacy Job or a resident Node Pod"
                           properties:
+                            kind:
+                              type: string
+                              enum: [Node]
+                            namespace:
+                              type: string
+                            podName:
+                              type: string
                             jobName:
                               type: string
                               minLength: 1

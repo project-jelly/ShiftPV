@@ -79,7 +79,12 @@ stale, invalid 또는 incomplete observation은 allocation을 승인할 수 없�
   실제 mount가 등록된 filesystem과 일치하는지 검증한다.
 - usage의 원본은 게시되지 않은 현재 serving copy이며 installation과 디스크 marker가 일치한다.
 
-`statfs`는 syscall로, usage는 `du -sbx`로 측정하며 명령 실패를 그대로 반환한다.
+신규 Node는 Pool의 `shiftpv.io/capacity-probe-request` 변경을 watch하고 상주 프로세스에서
+`fstatfs`를 실행한다. Controller는 매 호출의 고유 request ID와 Pool evidence digest가 일치하는
+새 응답만 사용한다. Node는 측정 전후 API 권한과 mount identity를 검증하고, 응답은 일반 readiness
+status 갱신과 독립적으로 보존된다. 요청 annotation은 generation을 바꾸지 않아 absence fence에
+영향을 주지 않는다. 구버전 Node/CRD나 2초 응답 대기는 기존 live helper로 fallback한다.
+usage는 기존 helper의 `du -sbx`로 측정한다.
 Helper는 host device 권한을 갖지 않는다. `FixedBlock` Pool은 노드가 publish·identity release 직전과
 inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경을 원자적으로 차단하지는 않으므로
 [Pool 변경 절차](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.
@@ -91,6 +96,20 @@ inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경�
 요청량이 Pool 한도와 filesystem 전체 크기 안에 들어갈 수 있다면 `Unavailable`을 반환한다.
 external-provisioner가 `selected-node`를 유지한 채 재시도해야 용량 반환 후 해당 PVC가 수렴한다.
 PVC 또는 Pod 조회가 일시적으로 실패하면 재배치 결정을 추측하지 않고 재시도한다.
+
+### Capacity retry notification
+
+Node readiness reports `status.filesystemTotalBytes` with the existing generation
+and probe timestamp. A fresh Ready observation may classify a logical shortage
+as temporary without another helper. Unknown, stale or apparently undersized
+observations require a live probe; approval always checks live free space.
+
+Pod-owned PVCs fixed to a node are indexed by PVC UID, node and Pool group after
+a temporary capacity denial. Volume, Move and Pool events re-read the durable
+ledger and notify eligible Pending PVCs through `shiftpv.io/capacity-retry`.
+PVC updates retain UID and resourceVersion, and never change selected-node.
+The index is bounded and ephemeral; normal provisioner retries recover missed
+events and controller restarts. Notifications grant no capacity or fairness guarantee.
 
 ## Capacity ownership
 
@@ -113,6 +132,10 @@ Job 종료 또는 object absence 하나만으로는 capacity를 반환하지 않
 cleanup identity 모순은 cleanup subjournal `NeedsReview`로 수렴하며 관련 hold를 보존한다.
 
 ## Delete lifecycle
+
+Controller는 삭제 receipt 후 최대 5초 동안 같은 causal absence proof를 기다린다.
+그 안에 증명이 도착하면 동일한 `DeleteVolume` 호출에서 완료한다. 시간 초과나 취소는 hold를
+유지하며 다음 호출에서 재개한다. `--cleanup-absence-wait=0s`는 즉시 재시도 응답을 반환한다.
 
 ```text
 PVC 삭제

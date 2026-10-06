@@ -20,6 +20,31 @@ storage operator가 준비해야 한다.
 아래 설치 예시는 기존 ShiftPV 리소스가 없는 클러스터를 대상으로 한다.
 기존 설치는 [업그레이드 절차](../../docs/development/versioning.md#existing-installation-upgrades)를 따른다.
 
+## Provisioning retries
+
+`sidecars.provisioner.retryIntervalStart` defaults to `1s` and
+`retryIntervalMax` to `30s`; both apply to provisioning and deletion.
+Reservation changes wake waiting Pod-owned PVCs on the same node and Pool group.
+The notification grants no capacity: each retry runs admission again.
+
+Apply the updated Pool CRD before upgrading. New nodes report
+`status.filesystemTotalBytes` for inexpensive temporary rejection; older nodes
+or CRDs fall back to a live helper measurement. New controllers query resident
+Nodes over authenticated gRPC; older Nodes retain the API/helper read path.
+Deletion waits up to 5 seconds for its existing causal absence proof before
+returning a retry. No existing Pool or StorageClass settings need changing.
+
+## Resident volume effects
+
+새 Volume 생성과 삭제는 상주 Node가 실행한다. Controller가 Pod UID를 durable intent에 기록하고,
+Node receipt를 확인한 뒤 Ready 전환 또는 absence 검증을 진행한다. 기존 helper 작업과 Move는 기존 경로를 따른다.
+기본값 `nodeRPC.enabled: true`는 용량 조회·생성·삭제를 해당 Node Pod에 직접 전달한다. TLS 공개 인증서는
+인증된 Pod API에서 읽고, 호출자는 `shiftpv-node` audience의 Controller ServiceAccount 토큰으로 검증한다.
+Pod 교체 시 연결과 인증서를 갱신한다. Node RPC 포트는 기본 9760이며, Controller에서 Node Pod IP로
+접근할 수 있어야 한다. `nodeRPC.enabled: false`는 기존 API 전달 경로를 사용한다.
+배포 시 target CRD를 먼저 적용하고 Controller·Node 이미지를 함께 갱신한다. `NodeCreating` 또는 Node cleanup이
+진행 중인 동안 구버전 Controller로 되돌리면 해당 작업을 완료할 수 없으므로 먼저 정산해야 한다.
+
 ## Install
 
 다음은 공개된 Chart 0.5.10의 설치 예시다. 재마운트 확인까지 포함한 절차와 image digest pin은

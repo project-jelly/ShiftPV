@@ -41,6 +41,14 @@
     }
   },
   "properties": {
+    "nodeRPC": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "port"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535, "not": {"enum": [9808]}}
+      }
+    },
     "global": {
       "type": "object",
       "description": "Reserved for Helm's parent-chart globals; this chart reads none of them"
@@ -242,7 +250,17 @@
       "additionalProperties": false,
       "required": ["provisioner", "registrar", "livenessProbe"],
       "properties": {
-        "provisioner": {"$ref": "#/definitions/sidecar"},
+        "provisioner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image"],
+          "properties": {
+            "image": {"type": "string", "minLength": 1},
+            "resources": {"$ref": "#/definitions/resources"},
+            "retryIntervalStart": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
+            "retryIntervalMax": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"}
+          }
+        },
         "registrar": {"$ref": "#/definitions/sidecar"},
         "livenessProbe": {"$ref": "#/definitions/sidecar"}
       }

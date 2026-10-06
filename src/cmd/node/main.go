@@ -20,6 +20,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/metrics"
 	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
 	nodeobservation "github.com/project-jelly/ShiftPV/src/node/observation"
+	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
 	poolreadiness "github.com/project-jelly/ShiftPV/src/pool/readiness"
 )
 
@@ -33,6 +34,8 @@ func main() {
 		targetRoot            = flag.String("target-root", "/var/lib/kubelet/pods", "allowed kubelet publish target root")
 		poolReadinessInterval = flag.Duration("pool-readiness-interval", time.Minute, "interval between local Pool mount and write probes")
 		metricsAddress        = flag.String("metrics-listen-address", "", "metrics HTTP address; empty disables observation")
+		rpcAddress            = flag.String("node-rpc-listen-address", "", "authenticated internal gRPC address; empty keeps API transport")
+		controllerAccount     = flag.String("controller-service-account", "shiftpv-controller", "ServiceAccount authorized to call internal gRPC")
 	)
 	klog.InitFlags(nil)
 	flag.Parse()
@@ -41,6 +44,7 @@ func main() {
 	}
 
 	registry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
+	probeRegistry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -74,8 +78,16 @@ func main() {
 	}
 
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 5)
+	if os.Getenv("POD_UID") != "" {
+		startNodeEffects(ctx, *nodeName, *hostRoot, *rpcAddress, *controllerAccount, errCh)
+	}
 	go func() { errCh <- readinessReconciler.Run(ctx) }()
+	go func() {
+		worker := &poolmeasurement.Node{NodeName: *nodeName, Pools: probeRegistry,
+			Probe: &poolmeasurement.Probe{Pools: probeRegistry, HostRoot: *hostRoot}}
+		errCh <- worker.Run(ctx, probeRegistry.Client)
+	}()
 	go func() {
 		errCh <- csiserver.ServeContext(ctx, *endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)

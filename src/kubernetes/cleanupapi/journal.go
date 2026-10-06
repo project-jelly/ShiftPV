@@ -48,10 +48,13 @@ type Spec struct {
 }
 
 type Executor struct {
-	JobName  string `json:"jobName"`
-	JobUID   string `json:"jobUID"`
-	PodUID   string `json:"podUID,omitempty"`
-	NodeName string `json:"nodeName"`
+	Kind      string `json:"kind,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	PodName   string `json:"podName,omitempty"`
+	JobName   string `json:"jobName,omitempty"`
+	JobUID    string `json:"jobUID,omitempty"`
+	PodUID    string `json:"podUID,omitempty"`
+	NodeName  string `json:"nodeName"`
 }
 
 type Receipt struct {

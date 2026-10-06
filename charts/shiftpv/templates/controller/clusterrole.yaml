@@ -6,7 +6,7 @@ metadata:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["apps"]
-    resources: ["replicasets", "statefulsets"]
+    resources: ["replicasets", "statefulsets", "daemonsets"]
     verbs: ["get"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]

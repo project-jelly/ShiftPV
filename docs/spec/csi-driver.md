@@ -71,9 +71,31 @@ evidence를 대신하지 않는다.
 ## Provision and publish
 
 Provisioning은 선택된 Pool의 exact identity와 fresh, valid, complete inventory를 확인하고 durable
-`ShiftPVVolume` intent와 current-owner capacity hold를 먼저 기록한다. 그 뒤 helper가 exact directory와 marker를
-멱등 생성하고 API receipt를 남긴다. 불명확한 capacity, observation 또는 identity에서는 directory를 만들지
-않는다.
+`ShiftPVVolume` intent와 current-owner capacity hold를 먼저 기록한다. Controller는 상주 Node Pod UID를
+`creationExecutor`에 고정하고 `NodeCreating`으로 전환한다. Node가 exact directory와 marker를 멱등 생성하고
+placement digest를 포함한 `creationReceipt`를 기록하면 Controller가 `Ready`로 전환한다.
+
+Controller는 승인 기록 후 해당 Pod에 gRPC `CreateCopy`를 호출하고, 응답 뒤 API receipt를 검증한다.
+`GetCapacity`는 exact Pool UID·measurement evidence·nonce를 확인해 실시간 filesystem 용량을 반환한다.
+요청에는 filesystem 경로를 받지 않는다. Node는 API에서 승인된 경로를 읽고 mount identity를 재검증한다.
+
+삭제도 Controller가 cleanup journal에 `executor.kind: Node`와 Pod UID를 기록한 뒤 Node가 실행한다.
+Node의 purge receipt 이후 Controller가 fresh absence proof를 확인해야 capacity hold를 반환한다.
+Node는 capacity 승인, `Ready` 전환, metadata 삭제를 수행하지 않는다.
+
+gRPC `ReclaimCopy`도 같은 journal을 사용한다. RPC와 Watch 복구는 동일한 per-volume 실행 잠금과
+filesystem primitive를 공유한다. 응답 유실은 같은 operation ID의 저장된 receipt로 해결한다.
+용량 RPC는 최대 2초, effect RPC는 최대 2분이며 Controller의 더 짧은 timeout이 우선한다.
+
+통신은 TLS 1.3과 Controller 전용 projected ServiceAccount 토큰으로 인증한다. Controller는 Kubernetes에서
+확인한 정확한 Pod UID의 공개 인증서를 신뢰하고, Node는 TokenReview로 audience·namespace·account를
+확인한다. 인증서는 Node 프로세스마다 새로 생성하며 비밀키는 메모리에만 둔다. 연결은 노드별로 재사용하고
+Pod UID·주소·인증서 변경 시 교체한다. 실행과 복구의 권한은 API intent와 local proof에 남는다.
+
+Node 재시작은 같은 operation과 local marker/receipt로 재개한다. 실행 중인 Pod를 다른 Pod로 바꾸지 않으며,
+종료되거나 사라진 Pod만 receipt 기록 전에 재지정한다. Node에 고정된 작업은 시간 초과 후 helper로 전환하지
+않는다. 기존 helper Pod·Job, 구버전 Node와 Move copy/cleanup은 helper 경로를 유지한다.
+불명확한 capacity, observation 또는 identity에서는 directory를 만들지 않는다.
 
 Publish는 다음 조건을 모두 만족할 때만 같은 per-volume lock 안에서 bind mount한다.
 

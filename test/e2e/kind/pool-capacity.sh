@@ -62,6 +62,21 @@ wait_for_unavailable() {
 	return 1
 }
 
+# Make the fixed-consumer case exercise event-driven wake-up rather than the
+# provisioner's short first retry. This only changes the isolated test release.
+set_provisioner_retry() {
+	local start=$1 maximum=$2 patch
+	patch=$(kubectl -n shiftpv-system get deployment shiftpv-controller -o json | \
+	 jq --arg start "${start}" --arg maximum "${maximum}" '
+	  {spec: {template: {spec: {containers: [
+	   .spec.template.spec.containers[] | select(.name == "csi-provisioner") |
+	   {name: .name, args: ((.args | map(select(startswith("--retry-interval-") | not))) +
+	    ["--retry-interval-start=" + $start, "--retry-interval-max=" + $maximum])}
+	  ]}}}}')
+	kubectl -n shiftpv-system patch deployment shiftpv-controller --type=strategic -p "${patch}" >/dev/null
+	kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=2m
+}
+
 create_workload() {
 	local name=$1
 	local size=$2
@@ -165,6 +180,9 @@ cleanup_capacity_test() {
 }
 trap cleanup_capacity_test EXIT
 
+kubectl wait --for=jsonpath='{.status.capacityProbeSupported}'=true \
+	"shiftpvpool/${CAPACITY_POOL}" --timeout=2m
+
 kubectl patch shiftpvpool "${CAPACITY_POOL}" --type=merge -p '{"spec":{"capacity":{"limit":"128Mi"}}}' >/dev/null
 docker exec "${CAPACITY_NODE}" mount -t tmpfs -o size=128m shiftpv-capacity "${CAPACITY_PATH}"
 docker exec "${CAPACITY_NODE}" sh -c "dd if=/dev/zero of='${CAPACITY_PATH}/external-fill' bs=1M count=80 >/dev/null 2>&1"
@@ -182,9 +200,31 @@ EOF
 
 # statfs must see bytes consumed outside ShiftPV and reject before creating a
 # Volume-owned capacity hold.
+CAPACITY_READ_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 create_workload "${PHYSICAL_NAME}" 64Mi
 wait_for_resource_exhausted "${PHYSICAL_NAME}"
 wait_for_volume_hold_count 0
+# The logical budget is 128Mi and there are no holds. The 64Mi rejection with
+# the external 80Mi file therefore requires a fresh physical-space read.
+if kubectl -n shiftpv-system get deployment shiftpv-controller -o json | jq -e '
+  any(.spec.template.spec.containers[]; .name == "shiftpv-controller" and
+    any(.args[]; startswith("--node-rpc-token-file=")))
+' >/dev/null; then
+	CAPACITY_EXECUTOR=$(kubectl -n shiftpv-system get pods \
+		-l app.kubernetes.io/component=node --field-selector "spec.nodeName=${CAPACITY_NODE}" \
+		-o jsonpath='{.items[0].metadata.uid}')
+	RPC_LOGS=$(kubectl -n shiftpv-system logs deployment/shiftpv-controller \
+		-c shiftpv-controller --since-time="${CAPACITY_READ_STARTED}")
+	grep -Fq "operation=\"CAPACITY\" pool=\"${CAPACITY_POOL}\" executorUID=\"${CAPACITY_EXECUTOR}\" error=null" <<<"${RPC_LOGS}"
+else
+	LIVE_PROBE=$(kubectl get "shiftpvpool/${CAPACITY_POOL}" -o json)
+	jq -e '
+  (.metadata.annotations["shiftpv.io/capacity-probe-request"] | fromjson) as $request |
+  .status.capacityProbe as $answer |
+  $answer.requestID == $request.id and $answer.evidence == $request.evidence and
+  (($answer.error // "") == "") and $answer.availableBytes < 67108864
+' <<<"${LIVE_PROBE}" >/dev/null
+fi
 
 # Removing the external file makes the same pending claim converge.
 docker exec "${CAPACITY_NODE}" rm -f "${CAPACITY_PATH}/external-fill"
@@ -222,6 +262,7 @@ test "$(kubectl get "shiftpvvolume/${LOGICAL_VOLUME}" -o jsonpath='{.spec.initia
 
 # The Pod is already assigned to a node. ResourceExhausted would erase this
 # PVC's selected-node annotation and leave it pending after capacity returns.
+set_provisioner_retry 1m 1m
 create_fixed_consumer
 wait_for_unavailable "${FIXED_NAME}"
 test "$(kubectl get pvc "${FIXED_NAME}" -o jsonpath='{.metadata.annotations.volume\.kubernetes\.io/selected-node}')" = "${CAPACITY_NODE}"
@@ -231,12 +272,17 @@ kubectl delete pod "${LOGICAL_NAME}" --wait=true
 kubectl delete pvc "${LOGICAL_NAME}" --wait=true
 kubectl wait --for=delete "pv/${LOGICAL_PV}" --timeout=2m
 LOGICAL_PV=
+# A capacity-return notification must survive the real API server and wake the
+# upstream provisioner while its one-minute failure backoff is active.
+kubectl wait --for=jsonpath='{.metadata.annotations.shiftpv\.io/capacity-retry}' "pvc/${FIXED_NAME}" --timeout=30s
+test "$(kubectl get pvc "${FIXED_NAME}" -o jsonpath='{.metadata.annotations.volume\.kubernetes\.io/selected-node}')" = "${CAPACITY_NODE}"
 kubectl wait --for=condition=Ready "pod/${FIXED_NAME}" --timeout=5m
 kubectl wait --for=jsonpath='{.status.phase}'=Bound "pvc/${FIXED_NAME}" --timeout=2m
 FIXED_PV=$(kubectl get pvc "${FIXED_NAME}" -o jsonpath='{.spec.volumeName}')
 FIXED_VOLUME=$(kubectl get "pv/${FIXED_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 test "$(kubectl get "shiftpvvolume/${FIXED_VOLUME}" -o jsonpath='{.spec.initialNode}')" = "${CAPACITY_NODE}"
 wait_for_volume_hold_count 1
+set_provisioner_retry 1s 30s
 
 kubectl delete pod "${FIXED_NAME}" --wait=true
 kubectl delete pvc "${FIXED_NAME}" --ignore-not-found --wait=true

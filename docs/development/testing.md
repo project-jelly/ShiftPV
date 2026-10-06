@@ -100,14 +100,16 @@ patch하거나 host-side copy로 제품 effect를 대신하면 안 된다.
 전체 suite와 독립적으로 재현 가능한 lifecycle gate는 다음과 같이 실행한다.
 
 ```bash
+NODE_EFFECTS_ONLY=1 CLUSTER_NAME=shiftpv-node-focused ./test/e2e/kind/run.sh
 VOLUME_DELETE_CLEANUP_ONLY=1 CLUSTER_NAME=shiftpv-delete-focused ./test/e2e/kind/run.sh
 CLEANUP_JOB_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
 MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./test/e2e/kind/run.sh
 ```
 
-첫 번째 gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 유지되고, generation-fenced absence 뒤에만
-삭제와 용량 재사용이 일어나는지 검증한다. 두 번째 gate는 cleanup Job의 첫 Pod가 receipt 기록 전에 사라져도
-같은 Job identity 아래 새 Pod로 재결합해 수렴하는지 검증한다. 세 번째 gate는 owner commit 전후 및
+Node gate는 상주 Node 생성 receipt, Pod 교체 뒤 데이터 보존, 새 Pod UID의 purge receipt와 fenced cleanup 완료를 확인한다.
+Volume delete gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 유지되고, generation-fenced absence 뒤에만
+삭제와 용량 재사용이 일어나는지 검증한다. Job retry gate는 cleanup Job의 첫 Pod가 receipt 기록 전에 사라져도
+같은 Job identity 아래 새 Pod로 재결합해 수렴하는지 검증한다. Mobility restart gate는 owner commit 전후 및
 `CleaningSource`에서 source/destination node가 중단됐다가 돌아온 뒤 현재 transaction이 계속 수렴하는지
 검증한다.
 
@@ -148,3 +150,23 @@ capacity accounting이 같은 결론을 가리켜야 한다.
 
 Soak 시간과 횟수는 cluster 규모와 disk 속도에 맞춰 release checklist에서 고정한다. 실패한 run은
 resource snapshot, logs, metrics, directory inventory를 보존하고 자동 재실행으로 덮지 않는다.
+
+## CDI provisioning latency
+
+For the two-VM/250Gi Pool scenario, compare reservation return → next
+`CreateVolume` start, rejection helper count, and successful creation duration.
+Use Controller level-2 step logs and, when enabled,
+`shiftpv_provisioning_step_duration_seconds`. Nested durations must not be summed.
+Confirm `shiftpv.io/capacity-retry` preserves selected-node, and repeat with a
+Controller restart and a different Pool group. Check that Deleting Volumes and
+unsettled Move holds remain charged. Fake API timing is not VM latency evidence.
+
+For Node gRPC, record `live_capacity_probe` and `ShiftPV Node RPC` logs for
+CAPACITY/CREATE/RECLAIM. Verify Pod replacement reconnects, concurrent RPC and
+Watch recovery write one immutable receipt, and lost replies retain holds.
+Reject wrong caller/audience, executor UID, operation ID and Pool evidence.
+Repeat capacity reads with mount loss; Pool generation/scanEpoch must not change.
+With RPC disabled or older Nodes, verify the API probe nonce and answer still
+match and readiness updates preserve concurrently recorded answers.
+Delete completion within `--cleanup-absence-wait` must release the hold in one
+call; timeout/cancellation and stale inventory must keep it charged.

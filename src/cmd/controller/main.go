@@ -22,6 +22,7 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/cmd/internal/flagvalue"
@@ -38,7 +39,12 @@ import (
 	"github.com/project-jelly/ShiftPV/src/metrics"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	mobilitycontroller "github.com/project-jelly/ShiftPV/src/mobility/controller"
+	"github.com/project-jelly/ShiftPV/src/node/rpc/connection"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
+	remotemeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement/remote"
+	"github.com/project-jelly/ShiftPV/src/provisioning"
+	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	webhookcertificate "github.com/project-jelly/ShiftPV/src/webhook/certificate"
 )
 
@@ -48,9 +54,12 @@ var version = "dev"
 // bound directly to the flag of the same purpose, so the flag names, defaults
 // and help text stay exactly where they were declared.
 type config struct {
+	nodeDaemonSet                             string
+	nodeRPCTokenFile                          string
 	storageClassNames                         flagvalue.Names
 	endpoint, namespace, helperImage          string
 	helperWait                                time.Duration
+	cleanupAbsenceWait                        time.Duration
 	helperCPURequest, helperMemoryRequest     string
 	helperCPULimit, helperMemoryLimit         string
 	helperServiceAccount                      string
@@ -72,8 +81,11 @@ func parseFlags() config {
 	var cfg config
 	flag.StringVar(&cfg.endpoint, "endpoint", "unix:///run/csi/csi.sock", "CSI Unix socket endpoint")
 	flag.StringVar(&cfg.namespace, "namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
+	flag.StringVar(&cfg.nodeDaemonSet, "node-daemonset-name", "", "trusted resident Node DaemonSet; empty uses helper Pods")
+	flag.StringVar(&cfg.nodeRPCTokenFile, "node-rpc-token-file", "", "projected token for internal Node gRPC; empty keeps API transport")
 	flag.StringVar(&cfg.helperImage, "helper-image", "busybox:1.37", "directory helper Pod image")
 	flag.DurationVar(&cfg.helperWait, "helper-timeout", 2*time.Minute, "helper Pod completion timeout")
+	flag.DurationVar(&cfg.cleanupAbsenceWait, "cleanup-absence-wait", 5*time.Second, "bounded wait for post-delete absence proof; zero returns immediately")
 	flag.StringVar(&cfg.helperCPURequest, "helper-cpu-request", "10m", "helper Pod CPU request")
 	flag.StringVar(&cfg.helperMemoryRequest, "helper-memory-request", "16Mi", "helper Pod memory request")
 	flag.StringVar(&cfg.helperCPULimit, "helper-cpu-limit", "100m", "helper Pod CPU limit")
@@ -99,6 +111,9 @@ func parseFlags() config {
 	if cfg.poolReadinessStaleAfter <= 0 {
 		klog.Fatalf("pool readiness stale duration must be positive")
 	}
+	if cfg.cleanupAbsenceWait < 0 || cfg.cleanupAbsenceWait > 30*time.Second {
+		klog.Fatalf("cleanup absence wait must be between zero and 30 seconds")
+	}
 	if cfg.moveJournalRetention < time.Hour {
 		klog.Fatalf("move journal retention must be at least one hour")
 	}
@@ -122,13 +137,34 @@ func main() {
 		klog.Fatalf("bootstrap uninstall quiesce gate: %v", err)
 	}
 	operator := newHelperRunner(cfg, client, volumeRegistry)
+	operator.ObserveStep = exporter.ObserveProvisioningStep
+	retryClients := wiring.ForConfig(capacityRetryRESTConfig(config), "capacity retry", fatal)
+	retryPools := &volumeapi.Registry{Client: retryClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
+	capacityRetries := provisioning.NewRetries(retryClients.Typed, retryPools)
+	go capacityRetries.Run(ctx, retryClients.Dynamic)
+	probeConfig := capacityRetryRESTConfig(config)
+	probeConfig.UserAgent = "shiftpv-capacity-probe"
+	probePools := &volumeapi.Registry{Client: wiring.ForConfig(probeConfig, "capacity probe", fatal).Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
+	apiCapacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: operator, ObserveStep: exporter.ObserveProvisioningStep}
+	var capacityProbe controllercsi.PoolCapacityProbe = apiCapacityProbe
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
+	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
+	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: operator, Timeout: cfg.helperWait}
+	if cfg.nodeRPCTokenFile != "" {
+		// The outer RPC probe observes the complete call, including API fallback.
+		apiCapacityProbe.ObserveStep = nil
+		rpc := &connection.Client{TokenFile: cfg.nodeRPCTokenFile}
+		defer rpc.Close()
+		effects.RPC = rpc
+		capacityProbe = &remotemeasurement.Client{RPC: rpc, Discovery: effects.Discovery, Pools: probePools, Fallback: capacityProbe, ObserveStep: exporter.ObserveProvisioningStep}
+	}
 	controllerService := &controllercsi.Service{
-		Client: client, Namespace: cfg.namespace, Operator: operator, Volumes: volumeRegistry,
-		CapacityPools: volumeRegistry, CapacityProbe: operator, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
-		Cleanups: cleanupStore, CleanupOperator: operator,
+		Client: client, Namespace: cfg.namespace, Operator: effects, Volumes: volumeRegistry,
+		CapacityPools: volumeRegistry, CapacityProbe: capacityProbe, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
+		Cleanups: cleanupStore, CleanupOperator: effects, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
+		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, ObserveStep: exporter.ObserveProvisioningStep, RetryRequests: capacityRetries,
 	}
 	identityService := &identity.Service{Version: version}
 
@@ -158,6 +194,17 @@ func main() {
 	klog.Infof("starting ShiftPV controller %s", version)
 	awaitShutdown(ctx, errCh, stop)
 	shutdownWebhook(webhookServer)
+}
+
+// Retry observation has its own bounded API budget so status-event bursts
+// cannot consume the CSI registry's client-side rate limiter.
+func capacityRetryRESTConfig(config *rest.Config) *rest.Config {
+	retryConfig := rest.CopyConfig(config)
+	retryConfig.QPS, retryConfig.Burst = 5, 10
+	retryConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(retryConfig.QPS, retryConfig.Burst)
+	retryConfig.Timeout = 0 // Reconcile is bounded separately; watches may stay open.
+	retryConfig.UserAgent = "shiftpv-capacity-retry"
+	return retryConfig
 }
 
 // admissionRESTConfig is the higher-throughput configuration the lifecycle

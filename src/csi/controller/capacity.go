@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
@@ -28,6 +29,7 @@ type PoolCapacityProbe interface {
 }
 
 func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
+	defer s.observeStep("capacity_admission", id)()
 	existing, err := s.Volumes.Get(ctx, id)
 	if err == nil {
 		return s.resumeExistingCreate(ctx, existing, id, requestName, nodeName, requestedBytes, parameters)
@@ -153,11 +155,7 @@ func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, requestName
 	if err != nil {
 		return poolFit{}, err
 	}
-	logicalFree := int64(0)
-	if reservedBytes < limitBytes {
-		logicalFree = limitBytes - reservedBytes
-	}
-	if requestedBytes > logicalFree {
+	if !poolcapacity.FitsReservation(requestedBytes, reservedBytes, limitBytes) {
 		return poolFit{denial: s.capacityDenied(ctx, parameters, requestName, pool, requestedBytes, limitBytes, nil,
 			"Pool %q reservation limit exceeded: requested=%d reserved=%d limit=%d",
 			pool.Name, requestedBytes, reservedBytes, limitBytes)}, nil
@@ -189,57 +187,22 @@ func (s *Service) capacityDenied(ctx context.Context, parameters map[string]stri
 		return status.Errorf(codes.Unavailable, "%s; inspect PVC consumer: %v", message, err)
 	}
 	if fixed {
-		if stats == nil {
+		if stats == nil && !s.observedTotalCanFit(pool, requestedBytes) {
 			observed, err := s.CapacityProbe.StatFSForPool(ctx, pool)
 			if err != nil {
 				return capacityProbeError("inspect Pool filesystem capacity", err)
 			}
 			stats = &observed
 		}
-		if stats.TotalBytes > 0 && requestedBytes > stats.TotalBytes {
+		if stats != nil && poolcapacity.ExceedsTotal(requestedBytes, stats.TotalBytes) {
 			return status.Error(codes.ResourceExhausted, message)
+		}
+		if s.RetryRequests != nil {
+			s.RetryRequests.Register(parameters[PVCNamespaceKey], parameters[PVCNameKey], strings.TrimPrefix(requestName, "pvc-"), pool.NodeName, poolGroup(pool), requestedBytes)
 		}
 		return status.Errorf(codes.Unavailable, "%s; scheduled consumer on node %q requires same-node retry", message, pool.NodeName)
 	}
 	return status.Error(codes.ResourceExhausted, message)
-}
-
-func (s *Service) hasScheduledPodConsumer(ctx context.Context, parameters map[string]string, requestName, nodeName string) (bool, error) {
-	name, namespace := parameters[PVCNameKey], parameters[PVCNamespaceKey]
-	if name == "" || namespace == "" {
-		return false, nil
-	}
-	pvc, err := s.Client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if requestName != "pvc-"+string(pvc.UID) || pvc.Annotations[selectedNodeAnnotation] != nodeName {
-		return false, nil
-	}
-	for _, owner := range pvc.OwnerReferences {
-		if owner.APIVersion != "v1" || owner.Kind != "Pod" || owner.Name == "" {
-			continue
-		}
-		pod, err := s.Client.CoreV1().Pods(namespace).Get(ctx, owner.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			continue
-		}
-		if err != nil {
-			return false, err
-		}
-		if pod.UID != owner.UID || pod.Spec.NodeName != nodeName {
-			continue
-		}
-		for _, volume := range pod.Spec.Volumes {
-			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == name {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
 }
 
 func (s *Service) poolReservedBytes(ctx context.Context, poolUID string) (int64, error) {
@@ -291,4 +254,16 @@ func capacityProbeError(operation string, err error) error {
 		code = codes.Unavailable
 	}
 	return status.Errorf(code, "%s: %v", operation, err)
+}
+
+// A fresh node observation can justify a cheap temporary rejection. An
+// oversized or unknown observation still requires a live probe; it cannot
+// incorrectly turn a request into a permanent rejection after expansion.
+func (s *Service) observedTotalCanFit(pool volumeapi.Pool, requested int64) bool {
+	staleAfter := s.PoolReadinessStaleAfter
+	if staleAfter <= 0 {
+		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
+	}
+	ready, _ := pool.ReadyAt(time.Now(), staleAfter)
+	return ready && pool.Status.FilesystemTotalBytes > 0 && requested <= pool.Status.FilesystemTotalBytes
 }

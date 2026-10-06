@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -13,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
@@ -61,13 +63,19 @@ type cleanupOperator interface {
 
 type Service struct {
 	csi.UnimplementedControllerServer
-	Client           kubernetes.Interface
-	Namespace        string
-	Operator         DirectoryOperator
-	Volumes          VolumeRegistry
-	CapacityPools    PoolCapacityRegistry
-	CapacityProbe    PoolCapacityProbe
-	PoolLocks        *poolcapacity.Locker
+	Client                  kubernetes.Interface
+	Namespace               string
+	Operator                DirectoryOperator
+	Volumes                 VolumeRegistry
+	CapacityPools           PoolCapacityRegistry
+	CapacityProbe           PoolCapacityProbe
+	PoolLocks               *poolcapacity.Locker
+	PoolReadinessStaleAfter time.Duration
+	CleanupAbsenceWait      time.Duration
+	ObserveStep             func(string, time.Duration)
+	RetryRequests           interface {
+		Register(namespace, name, uid, node, group string, requested int64)
+	}
 	ProvisioningGate ProvisioningGate
 	Cleanups         *cleanupapi.Store
 	CleanupOperator  cleanupOperator
@@ -160,6 +168,7 @@ func parseCreateRequest(req *csi.CreateVolumeRequest) (createRequest, error) {
 // createServingCopy performs the node-local create effect and records its
 // completion, in the order a crashed create must be able to resume from.
 func (s *Service) createServingCopy(ctx context.Context, id string, state volumeapi.State) error {
+	defer s.observeStep("create_effect", id)()
 	if state.CurrentCopy == nil {
 		return status.Error(codes.FailedPrecondition, "volume creation has no copy identity")
 	}
@@ -264,6 +273,7 @@ func (s *Service) deletableState(ctx context.Context, volumeID string) (volumeap
 // while it is still pending, and requires a fresh post-receipt absence proof
 // before the caller may remove the volume's durable state.
 func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenced volumeapi.State) error {
+	defer s.observeStep("delete_settle", volumeID)()
 	cleanup, ensureErr := s.Cleanups.Ensure(ctx, cleanupapi.Spec{
 		OperationID: fenced.DeletionOperationID,
 		Target:      *fenced.CurrentCopy,
@@ -288,6 +298,9 @@ func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenc
 		return status.Errorf(codes.FailedPrecondition, "cleanup is phase=%q", cleanup.Status.Phase)
 	}
 	cleanup, settled, settleErr := s.Cleanups.ReconcileAbsence(ctx, cleanup)
+	if settleErr == nil && !settled {
+		cleanup, settled, settleErr = s.Cleanups.WaitForAbsence(ctx, cleanup, s.CleanupAbsenceWait)
+	}
 	if settleErr != nil {
 		if errors.Is(settleErr, cleanupapi.ErrConflict) {
 			return status.Errorf(codes.FailedPrecondition, "verify exact cleanup absence: %v", settleErr)
@@ -443,4 +456,15 @@ func selectedNode(requirements *csi.TopologyRequirement) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("selected topology does not contain %q", TopologyKey)
+}
+
+func (s *Service) observeStep(step, volumeID string) func() {
+	started := time.Now()
+	return func() {
+		elapsed := time.Since(started)
+		klog.V(2).InfoS("Provisioning step completed", "step", step, "volumeID", volumeID, "duration", elapsed)
+		if s.ObserveStep != nil {
+			s.ObserveStep(step, elapsed)
+		}
+	}
 }

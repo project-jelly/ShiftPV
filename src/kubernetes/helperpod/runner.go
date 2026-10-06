@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
@@ -42,9 +43,11 @@ type Runner struct {
 	Timeout                 time.Duration
 	Resources               corev1.ResourceRequirements
 	PoolReadinessStaleAfter time.Duration
+	ObserveStep             func(string, time.Duration)
 }
 
 func (r *Runner) CreateCopy(ctx context.Context, identity volume.CopyIdentity) error {
+	defer r.observeStep("create_helper")()
 	if err := identity.Validate(); err != nil {
 		return err
 	}
@@ -95,6 +98,7 @@ func (r *Runner) StatFS(ctx context.Context, nodeName string) (poolcapacity.File
 
 // StatFSForPool probes one exact capacity unit even when its node has others.
 func (r *Runner) StatFSForPool(ctx context.Context, pool volumeapi.Pool) (poolcapacity.Filesystem, error) {
+	defer r.observeStep("statfs_helper")()
 	if r.Pools == nil {
 		return poolcapacity.Filesystem{}, fmt.Errorf("ShiftPVPool registry is required")
 	}
@@ -367,3 +371,14 @@ func classifyKubernetesAPIError(err error) error {
 
 func boolPtr(value bool) *bool    { return &value }
 func int64Ptr(value int64) *int64 { return &value }
+
+func (r *Runner) observeStep(step string) func() {
+	started := time.Now()
+	return func() {
+		elapsed := time.Since(started)
+		klog.V(2).InfoS("Provisioning step completed", "step", step, "duration", elapsed)
+		if r != nil && r.ObserveStep != nil {
+			r.ObserveStep(step, elapsed)
+		}
+	}
+}

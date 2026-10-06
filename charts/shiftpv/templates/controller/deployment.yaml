@@ -37,6 +37,10 @@ spec:
           args:
             - --endpoint=unix:///run/csi/csi.sock
             - --namespace=$(POD_NAMESPACE)
+            - --node-daemonset-name={{ include "shiftpv.fullname" . }}-node
+            {{- if .Values.nodeRPC.enabled }}
+            - --node-rpc-token-file=/var/run/shiftpv-node-rpc/token
+            {{- end }}
             - --helper-image={{ include "shiftpv.helperPodImage" . }}
             - --helper-timeout={{ .Values.helperPod.timeout }}
             - --helper-service-account={{ include "shiftpv.helperServiceAccount" . }}
@@ -75,6 +79,11 @@ spec:
           securityContext:
             {{- include "shiftpv.containerSecurityContext" (dict "runAsNonRoot" true "runAsUser" 65532) | nindent 12 }}
           volumeMounts:
+            {{- if .Values.nodeRPC.enabled }}
+            - name: node-rpc-token
+              mountPath: /var/run/shiftpv-node-rpc
+              readOnly: true
+            {{- end }}
             - name: socket
               mountPath: /run/csi
           ports:
@@ -104,6 +113,8 @@ spec:
             - --leader-election-namespace=$(POD_NAMESPACE)
             - --extra-create-metadata=true
             - --timeout=2m
+            - --retry-interval-start={{ .Values.sidecars.provisioner.retryIntervalStart }}
+            - --retry-interval-max={{ .Values.sidecars.provisioner.retryIntervalMax }}
             - --v={{ .Values.controller.logLevel }}
           env:
             {{- include "shiftpv.podNamespaceEnv" . | nindent 12 }}
@@ -124,5 +135,14 @@ spec:
           "runAsNonRoot" true
           "runAsUser" 65532) | nindent 8 }}
       volumes:
+        {{- if .Values.nodeRPC.enabled }}
+        - name: node-rpc-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: shiftpv-node
+                  expirationSeconds: 3600
+        {{- end }}
         - name: socket
           emptyDir: {}
