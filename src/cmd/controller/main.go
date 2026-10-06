@@ -145,13 +145,16 @@ func main() {
 	probeConfig := capacityRetryRESTConfig(config)
 	probeConfig.UserAgent = "shiftpv-capacity-probe"
 	probePools := &volumeapi.Registry{Client: wiring.ForConfig(probeConfig, "capacity probe", fatal).Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
-	var capacityProbe controllercsi.PoolCapacityProbe = &poolmeasurement.Client{Pools: probePools, Fallback: operator, ObserveStep: exporter.ObserveProvisioningStep}
+	apiCapacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: operator, ObserveStep: exporter.ObserveProvisioningStep}
+	var capacityProbe controllercsi.PoolCapacityProbe = apiCapacityProbe
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
 	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: operator, Timeout: cfg.helperWait}
 	if cfg.nodeRPCTokenFile != "" {
+		// The outer RPC probe observes the complete call, including API fallback.
+		apiCapacityProbe.ObserveStep = nil
 		rpc := &connection.Client{TokenFile: cfg.nodeRPCTokenFile}
 		defer rpc.Close()
 		effects.RPC = rpc
