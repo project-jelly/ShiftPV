@@ -230,7 +230,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [g1, g2, g3]
+        group: [g1, g2, g3, node-rpc]
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
@@ -248,6 +248,7 @@ jobs:
         env:
           KEEP_CLUSTER: "1"
           KIND_E2E_GROUP: ${{ matrix.group }}
+          NODE_EFFECTS_ONLY: ${{ matrix.group == 'node-rpc' && '1' || '0' }}
         run: ./test/e2e/kind/run.sh
 
       - name: Export failure diagnostics
