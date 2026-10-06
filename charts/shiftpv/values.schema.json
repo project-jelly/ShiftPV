@@ -41,6 +41,14 @@
     }
   },
   "properties": {
+    "nodeRPC": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "port"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
     "global": {
       "type": "object",
       "description": "Reserved for Helm's parent-chart globals; this chart reads none of them"

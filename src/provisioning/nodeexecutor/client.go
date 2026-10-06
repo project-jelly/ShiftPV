@@ -6,6 +6,8 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/node/rpc/connection"
+	"github.com/project-jelly/ShiftPV/src/node/rpc/protocol"
 	"github.com/project-jelly/ShiftPV/src/volume"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"time"
@@ -18,6 +20,7 @@ type Client struct {
 	Volumes   *volumeapi.Registry
 	Fallback  *helperpod.Runner
 	Timeout   time.Duration
+	RPC       *connection.Client
 }
 
 func (c *Client) CreateCopy(ctx context.Context, copy volume.CopyIdentity) (result error) {
@@ -35,6 +38,14 @@ func (c *Client) CreateCopy(ctx context.Context, copy volume.CopyIdentity) (resu
 	}
 	if legacy {
 		return c.Fallback.CreateCopy(ctx, copy)
+	}
+	state, err = c.Volumes.Get(ctx, copy.VolumeID)
+	if err != nil {
+		return err
+	}
+	done, err := c.createDirect(ctx, copy, state)
+	if done || err != nil {
+		return err
 	}
 	return wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, c.Timeout, true, func(ctx context.Context) (bool, error) {
 		current, err := c.Volumes.Get(ctx, copy.VolumeID)
@@ -111,6 +122,17 @@ func (c *Client) Reclaim(ctx context.Context, expected cleanupapi.Cleanup, store
 	if current.Status.Executor == nil {
 		return c.Fallback.Reclaim(ctx, current, store)
 	}
+	direct, err := c.invoke(ctx, nodeBinding(*current.Status.Executor), protocol.Operation_RECLAIM, &protocol.EffectRequest{ExecutorUid: current.Status.Executor.PodUID, NodeName: current.Spec.Target.NodeName, VolumeName: current.Spec.Authority.Name, VolumeUid: current.Spec.Authority.UID, OperationId: current.Spec.OperationID})
+	if err != nil {
+		return current, err
+	}
+	if direct {
+		return c.cleanupResult(ctx, expected, store)
+	}
+	return c.awaitCleanup(ctx, expected, store, current)
+}
+func (c *Client) awaitCleanup(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal, current cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
+	var err error
 	err = wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, c.Timeout, true, func(ctx context.Context) (bool, error) {
 		current, err = store.Get(ctx, expected.Spec.Authority)
 		if err != nil {

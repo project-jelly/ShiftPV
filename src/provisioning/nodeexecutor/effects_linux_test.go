@@ -50,7 +50,7 @@ func TestNativeEffectsRecoverAfterLostReceipt(t *testing.T) {
 		t.Fatal("missing receipt permitted readiness")
 	}
 	// Fresh process object, same Pod UID and durable intent.
-	restarted := *node
+	restarted := &Node{Identity: node.Identity, Discovery: node.Discovery, Volumes: node.Volumes, Cleanups: node.Cleanups, HostRoot: node.HostRoot}
 	if err := restarted.execute(ctx, testID); err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/node/rpc/security"
+	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor/internal/execution"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,11 +22,14 @@ import (
 // Node watches durable Volume intents. Relists recover work after a process
 // restart. It never selects a Pool, grants capacity, or completes a deletion.
 type Node struct {
-	Identity  volumeapi.NodeExecutor
-	Discovery Discovery
-	Volumes   *volumeapi.Registry
-	Cleanups  *cleanupapi.Store
-	HostRoot  string
+	Identity       volumeapi.NodeExecutor
+	Discovery      Discovery
+	Volumes        *volumeapi.Registry
+	Cleanups       *cleanupapi.Store
+	HostRoot       string
+	RPCCertificate string
+	RPCPort        string
+	gate           execution.Gate
 }
 
 func (n *Node) Run(ctx context.Context) error {
@@ -85,6 +90,10 @@ func (n *Node) advertise(ctx context.Context) error {
 			pod.Annotations = map[string]string{}
 		}
 		pod.Annotations[capabilityAnnotation] = "v1"
+		if n.RPCCertificate != "" {
+			pod.Annotations[security.CertificateAnnotation] = n.RPCCertificate
+			pod.Annotations[security.PortAnnotation] = n.RPCPort
+		}
 		_, err = n.Discovery.Client.CoreV1().Pods(n.Identity.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
 		return err
 	})

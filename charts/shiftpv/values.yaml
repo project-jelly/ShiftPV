@@ -1,4 +1,9 @@
 imagePullSecrets: []
+
+nodeRPC:
+  # Exact Node Pod routing; TLS and a controller-only projected token.
+  enabled: true
+  port: 9760
 nameOverride: ""
 fullnameOverride: ""
 

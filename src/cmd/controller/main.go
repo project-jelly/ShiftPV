@@ -39,8 +39,10 @@ import (
 	"github.com/project-jelly/ShiftPV/src/metrics"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	mobilitycontroller "github.com/project-jelly/ShiftPV/src/mobility/controller"
+	"github.com/project-jelly/ShiftPV/src/node/rpc/connection"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
+	remotemeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement/remote"
 	"github.com/project-jelly/ShiftPV/src/provisioning"
 	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	webhookcertificate "github.com/project-jelly/ShiftPV/src/webhook/certificate"
@@ -53,6 +55,7 @@ var version = "dev"
 // and help text stay exactly where they were declared.
 type config struct {
 	nodeDaemonSet                             string
+	nodeRPCTokenFile                          string
 	storageClassNames                         flagvalue.Names
 	endpoint, namespace, helperImage          string
 	helperWait                                time.Duration
@@ -79,6 +82,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.endpoint, "endpoint", "unix:///run/csi/csi.sock", "CSI Unix socket endpoint")
 	flag.StringVar(&cfg.namespace, "namespace", os.Getenv("POD_NAMESPACE"), "namespace for helper Pods and controller state")
 	flag.StringVar(&cfg.nodeDaemonSet, "node-daemonset-name", "", "trusted resident Node DaemonSet; empty uses helper Pods")
+	flag.StringVar(&cfg.nodeRPCTokenFile, "node-rpc-token-file", "", "projected token for internal Node gRPC; empty keeps API transport")
 	flag.StringVar(&cfg.helperImage, "helper-image", "busybox:1.37", "directory helper Pod image")
 	flag.DurationVar(&cfg.helperWait, "helper-timeout", 2*time.Minute, "helper Pod completion timeout")
 	flag.DurationVar(&cfg.cleanupAbsenceWait, "cleanup-absence-wait", 5*time.Second, "bounded wait for post-delete absence proof; zero returns immediately")
@@ -141,12 +145,18 @@ func main() {
 	probeConfig := capacityRetryRESTConfig(config)
 	probeConfig.UserAgent = "shiftpv-capacity-probe"
 	probePools := &volumeapi.Registry{Client: wiring.ForConfig(probeConfig, "capacity probe", fatal).Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
-	capacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: operator, ObserveStep: exporter.ObserveProvisioningStep}
+	var capacityProbe controllercsi.PoolCapacityProbe = &poolmeasurement.Client{Pools: probePools, Fallback: operator, ObserveStep: exporter.ObserveProvisioningStep}
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
 	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: operator, Timeout: cfg.helperWait}
+	if cfg.nodeRPCTokenFile != "" {
+		rpc := &connection.Client{TokenFile: cfg.nodeRPCTokenFile}
+		defer rpc.Close()
+		effects.RPC = rpc
+		capacityProbe = &remotemeasurement.Client{RPC: rpc, Discovery: effects.Discovery, Pools: probePools, Fallback: capacityProbe, ObserveStep: exporter.ObserveProvisioningStep}
+	}
 	controllerService := &controllercsi.Service{
 		Client: client, Namespace: cfg.namespace, Operator: effects, Volumes: volumeRegistry,
 		CapacityPools: volumeRegistry, CapacityProbe: capacityProbe, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,

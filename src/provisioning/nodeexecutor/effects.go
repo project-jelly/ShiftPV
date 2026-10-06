@@ -19,6 +19,14 @@ import (
 )
 
 func (n *Node) execute(ctx context.Context, name string) error {
+	unlock, err := n.gate.Lock(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return n.executeLocked(ctx, name)
+}
+func (n *Node) executeLocked(ctx context.Context, name string) error {
 	state, err := n.Volumes.Get(ctx, name)
 	if apierrors.IsNotFound(err) {
 		return nil

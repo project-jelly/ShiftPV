@@ -40,6 +40,10 @@ spec:
             - --host-root=/host
             - --target-root={{ .Values.node.kubeletRootDir }}/pods
             - --pool-readiness-interval={{ .Values.poolReadiness.interval }}
+            {{- if .Values.nodeRPC.enabled }}
+            - --node-rpc-listen-address=:{{ .Values.nodeRPC.port }}
+            - --controller-service-account={{ include "shiftpv.controllerServiceAccount" . }}
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - --metrics-listen-address=:{{ .Values.metrics.port }}
             {{- end }}
@@ -61,10 +65,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-          {{- if .Values.metrics.enabled }}
+          {{- if or .Values.metrics.enabled .Values.nodeRPC.enabled }}
           ports:
+            {{- if .Values.nodeRPC.enabled }}
+            - name: node-rpc
+              containerPort: {{ .Values.nodeRPC.port }}
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
+            {{- end }}
           {{- end }}
           securityContext:
             privileged: true

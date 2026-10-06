@@ -161,10 +161,12 @@ Confirm `shiftpv.io/capacity-retry` preserves selected-node, and repeat with a
 Controller restart and a different Pool group. Check that Deleting Volumes and
 unsettled Move holds remain charged. Fake API timing is not VM latency evidence.
 
-For live Node capacity, match `status.capacityProbe.requestID` to the request
-annotation and record `live_capacity_probe` duration. Repeat after Node restart,
-with an unanswered request (helper fallback), and with mount loss during the
-read. Capacity requests must leave Pool generation/scanEpoch unchanged. A
-readiness status refresh must preserve a concurrently recorded probe answer.
+For Node gRPC, record `live_capacity_probe` and `ShiftPV Node RPC` logs for
+CAPACITY/CREATE/RECLAIM. Verify Pod replacement reconnects, concurrent RPC and
+Watch recovery write one immutable receipt, and lost replies retain holds.
+Reject wrong caller/audience, executor UID, operation ID and Pool evidence.
+Repeat capacity reads with mount loss; Pool generation/scanEpoch must not change.
+With RPC disabled or older Nodes, verify the API probe nonce and answer still
+match and readiness updates preserve concurrently recorded answers.
 Delete completion within `--cleanup-absence-wait` must release the hold in one
 call; timeout/cancellation and stale inventory must keep it charged.

@@ -20,6 +20,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+for node_pod in $(kubectl -n shiftpv-system get pods -l app.kubernetes.io/component=node -o name); do
+ kubectl -n shiftpv-system wait --for=jsonpath='{.metadata.annotations.shiftpv\.io/node-rpc-port}'=9760 "${node_pod}" --timeout=1m
+done
+
 kubectl apply -f - <<YAML
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -95,4 +99,8 @@ jq -e --arg old "${CREATE_UID}" '
 ' "${WATCH_FILE}" >/dev/null
 kubectl -n shiftpv-system get pods -o json | jq -e 'all(.items[]; (.metadata.name | startswith("shiftpv-create-") | not))' >/dev/null
 kubectl -n shiftpv-system get jobs -o json | jq -e 'all(.items[]; (.metadata.name | startswith("shiftpv-cleanup-") | not))' >/dev/null
-echo "Resident Node create, Pod restart, receipt and fenced delete passed"
+RPC_LOGS=$(kubectl -n shiftpv-system logs deployment/shiftpv-controller -c shiftpv-controller)
+grep -q 'operation="CREATE"' <<<"${RPC_LOGS}"
+grep -q 'operation="RECLAIM"' <<<"${RPC_LOGS}"
+grep -q 'operation="CAPACITY"' <<<"${RPC_LOGS}"
+echo "Authenticated Node gRPC capacity, create, Pod restart and fenced delete passed"

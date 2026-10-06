@@ -5,6 +5,11 @@ metadata:
   labels:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
+  {{- if .Values.nodeRPC.enabled }}
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["namespaces"]
     resourceNames: ["kube-system"]
