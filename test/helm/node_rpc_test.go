@@ -99,7 +99,7 @@ func TestNodeRPCUsesDedicatedRotatingTokenAndExactPodPort(t *testing.T) {
 	}
 }
 func TestNodeRPCRejectsInvalidOrConflictingPorts(t *testing.T) {
-	for _, args := range [][]string{{"--set", "nodeRPC.port=0"}, {"--set", "nodeRPC.port=65536"}, {"--set", "metrics.enabled=true", "--set", "metrics.port=9760"}} {
+	for _, args := range [][]string{{"--set", "nodeRPC.port=0"}, {"--set", "nodeRPC.port=65536"}, {"--set", "nodeRPC.port=9808"}, {"--set", "metrics.enabled=true", "--set", "metrics.port=9760"}} {
 		if output, err := render(t, args...); err == nil {
 			t.Fatalf("invalid RPC port rendered: %s", output)
 		}
