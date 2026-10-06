@@ -25,6 +25,24 @@ assert_cleanup_journal() {
 	executor_uid=$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.jobUID}')
 	executor_pod_uid=$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.podUID}')
 	receipt_executor_uid=$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.receipt.executorUID}')
+	case "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.kind}')" in
+	Node)
+		test "${expected_kind}" = ShiftPVVolume
+		test "${expected_reason}" = VolumeDelete
+		test -z "$(cleanup_job_name "${resource}")"
+		test -z "${executor_uid}"
+		test -n "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.namespace}')"
+		test -n "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.podName}')"
+		executor_uid=${executor_pod_uid}
+		;;
+	"")
+		test -n "$(cleanup_job_name "${resource}")"
+		;;
+	*)
+		echo "unsupported cleanup executor in ${resource}" >&2
+		return 1
+		;;
+	esac
 
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.phase}')" = Completed
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.spec.reason}')" = "${expected_reason}"
@@ -34,9 +52,10 @@ assert_cleanup_journal() {
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.spec.target.volumeID}')" = "${expected_volume}"
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.spec.target.copyID}')" = "${expected_copy}"
 	test -n "${operation_id}"
-	test -n "$(cleanup_job_name "${resource}")"
 	test -n "${executor_uid}"
 	test -n "${executor_pod_uid}"
+	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.nodeName}')" = \
+		"$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.spec.target.nodeName}')"
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.receipt.operationID}')" = "${operation_id}"
 	test "${receipt_executor_uid}" = "${executor_uid}"
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.receipt.retired}')" = true

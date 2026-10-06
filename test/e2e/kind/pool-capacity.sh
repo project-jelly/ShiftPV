@@ -200,18 +200,31 @@ EOF
 
 # statfs must see bytes consumed outside ShiftPV and reject before creating a
 # Volume-owned capacity hold.
+CAPACITY_READ_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 create_workload "${PHYSICAL_NAME}" 64Mi
 wait_for_resource_exhausted "${PHYSICAL_NAME}"
 wait_for_volume_hold_count 0
-# This rejection must come from a newly requested Node read, with the external
-# file reflected in the reply. A cached free-space value cannot approve it.
-LIVE_PROBE=$(kubectl get "shiftpvpool/${CAPACITY_POOL}" -o json)
-jq -e '
+# The logical budget is 128Mi and there are no holds. The 64Mi rejection with
+# the external 80Mi file therefore requires a fresh physical-space read.
+if kubectl -n shiftpv-system get deployment shiftpv-controller -o json | jq -e '
+  any(.spec.template.spec.containers[]; .name == "shiftpv-controller" and
+    any(.args[]; startswith("--node-rpc-token-file=")))
+' >/dev/null; then
+	CAPACITY_EXECUTOR=$(kubectl -n shiftpv-system get pods \
+		-l app.kubernetes.io/component=node --field-selector "spec.nodeName=${CAPACITY_NODE}" \
+		-o jsonpath='{.items[0].metadata.uid}')
+	RPC_LOGS=$(kubectl -n shiftpv-system logs deployment/shiftpv-controller \
+		-c shiftpv-controller --since-time="${CAPACITY_READ_STARTED}")
+	grep -Fq "operation=\"CAPACITY\" pool=\"${CAPACITY_POOL}\" executorUID=\"${CAPACITY_EXECUTOR}\" error=null" <<<"${RPC_LOGS}"
+else
+	LIVE_PROBE=$(kubectl get "shiftpvpool/${CAPACITY_POOL}" -o json)
+	jq -e '
   (.metadata.annotations["shiftpv.io/capacity-probe-request"] | fromjson) as $request |
   .status.capacityProbe as $answer |
   $answer.requestID == $request.id and $answer.evidence == $request.evidence and
   (($answer.error // "") == "") and $answer.availableBytes < 67108864
 ' <<<"${LIVE_PROBE}" >/dev/null
+fi
 
 # Removing the external file makes the same pending claim converge.
 docker exec "${CAPACITY_NODE}" rm -f "${CAPACITY_PATH}/external-fill"
