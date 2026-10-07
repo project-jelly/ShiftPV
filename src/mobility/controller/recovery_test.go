@@ -58,8 +58,8 @@ func recoveryTransactionFixture(t *testing.T, owner string, recordDestination bo
 		state.CurrentCopy = &destination
 	}
 	repo := &memoryRepository{moves: []volumeapi.Move{move}, volumes: map[string]volumeapi.State{id: state}, pools: []volumeapi.Pool{
-		{Name: source.PoolName, UID: source.PoolUID, NodeName: "source", MountPath: "/source"},
-		{Name: destination.PoolName, UID: destination.PoolUID, NodeName: "destination", MountPath: "/destination"},
+		{Name: source.PoolName, UID: source.PoolUID, NodeName: "source", MountPath: "/source", PoolGroup: volumeapi.DefaultPoolGroup, CapacityLimit: "1Gi"},
+		{Name: destination.PoolName, UID: destination.PoolUID, NodeName: "destination", MountPath: "/destination", PoolGroup: volumeapi.DefaultPoolGroup, CapacityLimit: "1Gi"},
 	}}
 	fixture := newMobilityFixture(id)
 	fixture.SourceNode.Spec.Unschedulable = false

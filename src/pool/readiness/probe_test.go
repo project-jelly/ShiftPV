@@ -175,3 +175,34 @@ func TestHostPathValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestProbeDependencyValidationAndInjectedFailure(t *testing.T) {
+	deps := HostProbeDependencies("/host")
+	for _, change := range []func(*ProbeDependencies){
+		func(d *ProbeDependencies) { d.Allocations = nil },
+		func(d *ProbeDependencies) { d.InspectDirectory = nil },
+		func(d *ProbeDependencies) { d.Write = nil },
+		func(d *ProbeDependencies) { d.StatFS = nil },
+		func(d *ProbeDependencies) { d.ListMounts = nil },
+	} {
+		d := deps
+		change(&d)
+		if p, err := NewProbeWithDependencies("/host", d); err == nil || p != nil {
+			t.Fatal("missing host dependency accepted")
+		}
+	}
+	if _, err := NewProbeWithDependencies("relative", deps); err == nil {
+		t.Fatal("invalid host root accepted")
+	}
+	writes := 0
+	deps.InspectDirectory = func(string) error { return os.ErrPermission }
+	deps.Write = func(string) error { writes++; return nil }
+	p, err := NewProbeWithDependencies("/host", deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := p.Inspect(volumeapi.Pool{MountPath: "/pool"})
+	if result.Accessible.Reason != "PermissionDenied" || writes != 0 {
+		t.Fatalf("failed prerequisite performed writes: %+v", result)
+	}
+}

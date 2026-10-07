@@ -187,7 +187,7 @@ func TestPoolGroupDefaultsAndRejectsInvalidValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{PoolResource: "ShiftPVPoolList"}, grouped)
-	if _, err := (&Registry{Client: client}).ListPools(context.Background()); !errors.Is(err, ErrPoolConfiguration) {
+	if ready, err := (&Registry{Client: client}).ReadyPools(context.Background()); err != nil || len(ready) != 0 {
 		t.Fatalf("invalid Pool group accepted: %v", err)
 	}
 }
@@ -207,6 +207,88 @@ func TestPoolNodesForGroupRestrictsAccessibleTopology(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(nodes, []string{want}) {
 			t.Fatalf("group %q nodes=%v want=%q err=%v", group, nodes, want, err)
 		}
+	}
+}
+
+func TestPoolTopologySurvivesLimitErrorsAndRecovery(t *testing.T) {
+	for _, limit := range []string{"not-a-quantity", "0", "1500m", "9223372036854775808"} {
+		t.Run(limit, func(t *testing.T) {
+			ctx := context.Background()
+			a, b := pool("a", "node-a"), pool("b", "node-b")
+			a.SetUID("a-uid")
+			b.SetUID("b-uid")
+			if err := unstructured.SetNestedField(b.Object, true, "status", "registrationApproved"); err != nil {
+				t.Fatal(err)
+			}
+			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{PoolResource: "ShiftPVPoolList"}, a, b)
+			registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
+			for i, value := range []string{limit, "10Gi"} {
+				object, err := client.Resource(PoolResource).Get(ctx, "b", metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				object.SetGeneration(int64(i + 2))
+				if err := unstructured.SetNestedField(object.Object, value, "spec", "capacity", "limit"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := client.Resource(PoolResource).Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				nodes, err := registry.PoolNodesForGroup(ctx, DefaultPoolGroup)
+				if err != nil || !reflect.DeepEqual(nodes, []string{"node-a", "node-b"}) {
+					t.Fatalf("limit %q shrank topology: nodes=%v err=%v", value, nodes, err)
+				}
+				ready, err := registry.ReadyPools(ctx)
+				if err != nil || len(ready) != 1 || ready[0].UID != "a-uid" {
+					t.Fatalf("invalid limit or old observation admitted placement: ready=%v err=%v", ready, err)
+				}
+			}
+			object, err := client.Resource(PoolResource).Get(ctx, "b", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered, err := poolFrom(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered.Status.ObservedGeneration = recovered.Generation
+			for i := range recovered.Status.Conditions {
+				recovered.Status.Conditions[i].ObservedGeneration = recovered.Generation
+			}
+			if err := registry.SetPoolStatus(ctx, "b", "b-uid", "node-b", recovered.Status); err != nil {
+				t.Fatal(err)
+			}
+			ready, err := registry.ReadyPools(ctx)
+			if err != nil || len(ready) != 2 {
+				t.Fatalf("fresh recovered Pool stayed unavailable: ready=%v err=%v", ready, err)
+			}
+		})
+	}
+}
+
+func TestPoolTopologyRejectsInvalidRegistrationShape(t *testing.T) {
+	for _, tc := range []struct {
+		field, value string
+	}{
+		{"nodeName", ""},
+		{"poolGroup", "Invalid.Group"},
+		{"mountPath", "/"},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			a, b := pool("a", "node-a"), pool("b", "node-b")
+			if err := unstructured.SetNestedField(b.Object, true, "status", "registrationApproved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := unstructured.SetNestedField(b.Object, tc.value, "spec", tc.field); err != nil {
+				t.Fatal(err)
+			}
+			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{PoolResource: "ShiftPVPoolList"}, a, b)
+			registry := &Registry{Client: client}
+			nodes, err := registry.PoolNodes(context.Background())
+			if err != nil || !reflect.DeepEqual(nodes, []string{"node-a"}) {
+				t.Fatalf("invalid registration added a node: nodes=%v err=%v", nodes, err)
+			}
+		})
 	}
 }
 
@@ -932,6 +1014,7 @@ func TestTerminatingPoolSeparatesPlacementFromExactCleanup(t *testing.T) {
 	deletionTime := metav1.NewTime(now.Add(-time.Second))
 	pool := Pool{
 		Name: "pool", UID: "pool-uid", Generation: 2, DeletionTimestamp: &deletionTime,
+		NodeName: "node", MountPath: "/mnt/pool", PoolGroup: DefaultPoolGroup, CapacityLimit: "1Gi",
 		Status: PoolStatus{
 			ObservedGeneration: 2, LastProbeTime: metav1.NewTime(now),
 			Conditions: []metav1.Condition{
@@ -952,6 +1035,47 @@ func TestTerminatingPoolSeparatesPlacementFromExactCleanup(t *testing.T) {
 	pool.Status.Conditions[1].Reason = "PathMissing"
 	if ready, reason := pool.CleanupReadyAt(now, time.Minute); ready || reason != "PathMissing" {
 		t.Fatalf("failed cleanup readiness = %v, %s", ready, reason)
+	}
+}
+
+func TestInvalidLimitCleanupRequiresFreshPhysicalProof(t *testing.T) {
+	now := time.Date(2026, 9, 12, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		change func(*Pool)
+		ready  bool
+	}{
+		{"current backing", func(p *Pool) {}, true},
+		{"outdated generation", func(p *Pool) { p.Status.ObservedGeneration-- }, false},
+		{"outdated condition", func(p *Pool) { p.Status.Conditions[1].ObservedGeneration-- }, false},
+		{"stale probe", func(p *Pool) { p.Status.LastProbeTime = metav1.NewTime(now.Add(-2 * time.Minute)) }, false},
+		{"future probe", func(p *Pool) { p.Status.LastProbeTime = metav1.NewTime(now.Add(time.Minute)) }, false},
+		{"failed directory", func(p *Pool) { p.Status.Conditions[1].Status = metav1.ConditionFalse }, false},
+		{"unknown directory", func(p *Pool) { p.Status.Conditions[1].Status = metav1.ConditionUnknown }, false},
+		{"invalid path", func(p *Pool) { p.MountPath = "/" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := Pool{
+				Name: "pool", UID: "pool-uid", NodeName: "node", MountPath: "/mnt/pool", PoolGroup: DefaultPoolGroup,
+				Generation: 2, CapacityLimit: "not-a-quantity",
+				Status: PoolStatus{
+					RegistrationApproved: true, ObservedGeneration: 2, LastProbeTime: metav1.NewTime(now),
+					Conditions: []metav1.Condition{
+						{Type: PoolConditionReady, Status: metav1.ConditionFalse, Reason: "PoolCapacityLimitInvalid", ObservedGeneration: 2},
+						{Type: PoolConditionAccessible, Status: metav1.ConditionTrue, Reason: "DirectoryAccessible", ObservedGeneration: 2},
+						{Type: PoolConditionWritable, Status: metav1.ConditionTrue, Reason: "DirectoryWritable", ObservedGeneration: 2},
+						{Type: PoolConditionCapacityReadable, Status: metav1.ConditionTrue, Reason: "CapacityReadable", ObservedGeneration: 2},
+					},
+				},
+			}
+			tc.change(&pool)
+			if ready, reason := pool.CleanupReadyAt(now, time.Minute); ready != tc.ready {
+				t.Fatalf("cleanup ready=%v reason=%s want=%v", ready, reason, tc.ready)
+			}
+			if ready, _ := poolReady(pool, now, time.Minute); ready {
+				t.Fatal("invalid placement settings admitted new work")
+			}
+		})
 	}
 }
 

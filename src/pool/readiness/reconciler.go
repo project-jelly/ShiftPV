@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -19,16 +20,25 @@ type Repository interface {
 }
 
 type Reconciler struct {
-	NodeName   string
-	Pools      Repository
-	Inspector  Inspector
-	Interval   time.Duration
-	Wake       <-chan struct{}
-	Now        func() time.Time
-	Observe    func(volumeapi.Pool, Result, error)
-	ObserveAll func([]Observation, error)
-	Inventory  func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
-	Release    func(context.Context, volumeapi.Pool) error
+	reconcileMu sync.Mutex
+	NodeName    string
+	Pools       Repository
+	Inspector   Inspector
+	Interval    time.Duration
+	Wake        <-chan struct{}
+	Now         func() time.Time
+	Observe     func(volumeapi.Pool, Result, error)
+	ObserveAll  func([]Observation, error)
+	Inventory   func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
+	Release     func(context.Context, volumeapi.Pool) error
+}
+
+func NewReconciler(nodeName string, pools Repository, inspector Inspector, interval time.Duration) (*Reconciler, error) {
+	r := &Reconciler{NodeName: nodeName, Pools: pools, Inspector: inspector, Interval: interval}
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 // Observation is one Pool's result from a node reconciliation pass.
@@ -64,6 +74,8 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	if err := r.validate(); err != nil {
 		return err
 	}
+	r.reconcileMu.Lock()
+	defer r.reconcileMu.Unlock()
 	var observations []Observation
 	if r.ObserveAll != nil {
 		defer func() { r.ObserveAll(observations, reconcileErr) }()
@@ -100,10 +112,15 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
-	if allocation.check.Reason != "" && !allocation.check.OK {
+	if (allocation.check.Reason != "" && !allocation.check.OK) ||
+		invalidRegistrationCandidate(pool) {
 		result = Result{Independent: allocation.check, Accessible: skipped(), Writable: skipped(), CapacityReadable: skipped()}
 	} else {
-		result = r.Inspector.Inspect(pool)
+		candidate := pool
+		if candidate.Status.CapacityUnit == nil {
+			candidate.Status.CapacityUnit = allocation.unit
+		}
+		result = r.Inspector.Inspect(candidate)
 		if allocation.unit != nil && !volumeapi.SameCapacityUnit(allocation.unit, result.CapacityUnit) {
 			result.Independent = capacityFailure("CapacityIdentityChanged", fmt.Errorf("capacity allocation changed during node observation"))
 		}
@@ -115,6 +132,14 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 		result.Mounted = Check{Known: true, Reason: "MountIdentityMissing", Message: "mount probe did not return an identity"}
 	}
 	status, cleanupReady := r.observedStatus(ctx, pool, result, now)
+	if !pool.RegistrationApproved() && status.RegistrationApproved {
+		if err := r.recheckRegistration(ctx, pool, &result); err != nil {
+			return result, err
+		}
+		if !result.Independent.OK && result.Independent.Reason != "" {
+			status, cleanupReady = r.observedStatus(ctx, pool, result, now)
+		}
+	}
 	releaseErr := r.recordIdentityRelease(ctx, pool, &status, cleanupReady, now)
 	return result, errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
 }
@@ -123,6 +148,8 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 // cleanup-ready even though it is no longer eligible for new placement.
 func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, result Result, now time.Time) (volumeapi.PoolStatus, bool) {
 	status := pool.Status
+	status.Conditions = append([]metav1.Condition(nil), pool.Status.Conditions...)
+	status.RegistrationApproved = pool.RegistrationApproved()
 	status.CapacityProbeSupported = true
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
@@ -135,13 +162,19 @@ func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, re
 	}
 	ready := meta.FindStatusCondition(status.Conditions, volumeapi.PoolConditionReady)
 	cleanupReady := ready != nil && ready.Status == metav1.ConditionTrue
-	if pool.DeletionTimestamp != nil && cleanupReady {
+	configuration := pool.ConfigurationCheck()
+	if !configuration.OK {
+		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, configuration, pool.Generation, now))
+	} else if pool.DeletionTimestamp != nil && cleanupReady {
 		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, Check{
 			Known: true, Reason: "PoolDeregistering", Message: "Pool rejects new placement while deregistration converges",
 		}, pool.Generation, now))
 	}
 	status.Inventory = r.observedInventory(ctx, pool, result, status, now)
 	if cleanupReady && completeInventory(status.Inventory) {
+		if pool.DeletionTimestamp == nil && configuration.OK {
+			status.RegistrationApproved = true
+		}
 		if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && status.MountIdentity == nil {
 			status.MountIdentity = result.MountIdentity
 		}
@@ -154,6 +187,9 @@ func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, re
 }
 
 func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool, result Result, status volumeapi.PoolStatus, now time.Time) *volumeapi.PoolInventory {
+	if invalidRegistrationCandidate(pool) {
+		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "ConfigurationUnavailable: " + pool.ConfigurationCheck().Reason}
+	}
 	if result.Independent.Reason != "" && !result.Independent.OK {
 		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "CapacityUnavailable: " + result.Independent.Reason}
 	}
@@ -221,7 +257,7 @@ func (r *Reconciler) reconcileAndLog(ctx context.Context) error {
 }
 
 func (r *Reconciler) validate() error {
-	if r.NodeName == "" || r.Pools == nil || r.Inspector == nil || r.Interval <= 0 {
+	if r == nil || r.NodeName == "" || r.Pools == nil || r.Inspector == nil || r.Interval <= 0 {
 		return fmt.Errorf("Pool readiness reconciler configuration is incomplete")
 	}
 	return nil

@@ -827,6 +827,52 @@ func TestCreateVolumeTopologyFollowsMobilityOptIn(t *testing.T) {
 	}
 }
 
+type poolTopologyRegistry struct {
+	*fakeVolumeRegistry
+	pools *volumeapi.Registry
+}
+
+func (r *poolTopologyRegistry) PoolNodesForGroup(ctx context.Context, group string) ([]string, error) {
+	return r.pools.PoolNodesForGroup(ctx, group)
+}
+
+func TestCreateVolumeKeepsUnreadyRegisteredNodeInMobilityTopology(t *testing.T) {
+	ctx := context.Background()
+	objects := []runtime.Object{}
+	for _, node := range []string{"worker-a", "worker-b"} {
+		limit := "1Gi"
+		if node == "worker-b" {
+			limit = "not-a-quantity"
+		}
+		objects = append(objects, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
+			"metadata": map[string]any{"name": node, "uid": node + "-uid"},
+			"spec": map[string]any{
+				"nodeName": node, "mountPath": "/mnt/pool", "capacity": map[string]any{"limit": limit},
+			},
+			"status": map[string]any{"registrationApproved": true},
+		}})
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), cleanupListKinds, objects...)
+	registry := &poolTopologyRegistry{
+		fakeVolumeRegistry: &fakeVolumeRegistry{state: volumeapi.State{OwnerNode: "worker-a"}},
+		pools:              &volumeapi.Registry{Client: client},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mobile", Labels: map[string]string{MobilityAdmissionLabel: mobilityEnabledValue}}}
+	service := configuredService(&Service{Client: fake.NewClientset(namespace), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
+	req := validCreateRequest("worker-a")
+	req.Parameters[PVCNameKey] = "claim"
+	req.Parameters[PVCNamespaceKey] = namespace.Name
+	req.Parameters[PVNameKey] = "pv-test"
+	response, err := service.CreateVolume(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := topologyNodes(response.Volume.AccessibleTopology); !equalStrings(got, []string{"worker-a", "worker-b"}) {
+		t.Fatalf("temporary limit error narrowed PV topology: %v", got)
+	}
+}
+
 func TestCreateVolumeWithoutProvisionerMetadataStaysOwnerLocal(t *testing.T) {
 	registry := &fakeVolumeRegistry{state: volumeapi.State{OwnerNode: "worker-a"}, poolNodes: []string{"worker-a", "worker-b"}}
 	service := configuredService(&Service{Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})

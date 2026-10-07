@@ -10,7 +10,7 @@ import (
 	mountutils "k8s.io/mount-utils"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/project-jelly/ShiftPV/src/pool/capacityunit"
+	"github.com/project-jelly/ShiftPV/src/pool/registration"
 )
 
 type AllocationInspector interface {
@@ -112,36 +112,37 @@ func (p *Probe) VerifyCapacityUnit(pool volumeapi.Pool) error {
 	return nil
 }
 
-// capacityIsolation inspects all local backing allocations before any writable
-// probe or inventory scan. Unsupported peers never become additional capacity.
+// capacityIsolation collects read-only evidence before any write or inventory.
 func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]allocationObservation {
-	local := []volumeapi.Pool{}
-	for _, p := range pools {
-		if p.NodeName == r.NodeName {
-			local = append(local, p)
-		}
-	}
-	results := make(map[string]allocationObservation, len(local))
-	inspector, configured := r.Inspector.(AllocationInspector)
-	for _, p := range local {
-		if p.CapacityPolicy == "" && (len(local) == 1 || p.DeletionTimestamp != nil) {
+	results := make(map[string]allocationObservation)
+	allocations := []registration.Allocation{}
+	for _, pool := range pools {
+		if pool.NodeName != r.NodeName {
 			continue
 		}
-		if p.CapacityPolicy != volumeapi.PoolCapacityPolicyFixedBlock {
-			results[p.UID] = allocationObservation{check: capacityFailure("CapacityIsolationRequired", fmt.Errorf("multiple Pools on one node require capacityPolicy FixedBlock"))}
-		} else if !configured {
-			results[p.UID] = allocationObservation{check: capacityFailure("CapacityInspectorUnavailable", fmt.Errorf("block allocation inspector is unavailable"))}
-		} else {
-			unit, check := inspector.InspectCapacityUnit(p)
-			results[p.UID] = allocationObservation{unit: unit, check: check}
+		observed := allocationObservation{}
+		if check := pool.BackingConfigurationCheck(); !check.OK {
+			observed.check = check
+		} else if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
+			observed.unit, observed.check = r.Inspector.InspectCapacityUnit(pool)
 		}
+		results[pool.UID] = observed
+		allocations = append(allocations, registration.Allocation{
+			UID: pool.UID, NodeName: pool.NodeName, MountPath: pool.MountPath,
+			Policy: pool.CapacityPolicy, Approved: pool.RegistrationApproved(), Deleting: pool.DeletionTimestamp != nil,
+			Unit: observed.unit, Evidence: observed.check,
+		})
 	}
-	for i, p := range local {
-		for _, peer := range local[i+1:] {
-			if p.DeletionTimestamp == nil && peer.DeletionTimestamp == nil {
-				compareAllocations(p, peer, results)
-			}
+	for _, target := range allocations {
+		observed := results[target.UID]
+		if observed.check.Reason != "" && !observed.check.OK {
+			continue
 		}
+		check := registration.Independent(target, allocations)
+		if target.Policy != "" || !check.OK {
+			observed.check = check
+		}
+		results[target.UID] = observed
 	}
 	return results
 }
@@ -149,30 +150,6 @@ func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]alloca
 type allocationObservation struct {
 	unit  *volumeapi.PoolCapacityUnit
 	check Check
-}
-
-func compareAllocations(left, right volumeapi.Pool, results map[string]allocationObservation) {
-	a, b := results[left.UID], results[right.UID]
-	leftUnit, rightUnit := a.unit, b.unit
-	reason, message := "", ""
-	if volumeapi.PoolPathsOverlap(left.MountPath, right.MountPath) {
-		reason, message = "CapacityPathsOverlap", "Pool paths overlap or are nested"
-	} else if leftUnit == nil || rightUnit == nil {
-		reason, message = "CapacityPeerUnproven", "a registered peer has no fixed capacity evidence"
-	} else if overlap, err := capacityunit.Overlap(leftUnit.Extents, rightUnit.Extents); err != nil || overlap {
-		reason, message = "CapacityBackingOverlap", "registered Pools have overlapping or unproven backing allocations"
-	}
-	if reason == "" {
-		return
-	}
-	for _, p := range []volumeapi.Pool{left, right} {
-		observed := results[p.UID]
-		if !observed.check.OK && observed.check.Reason != "" && reason == "CapacityPeerUnproven" {
-			continue
-		}
-		observed.check = Check{Known: true, Reason: reason, Message: message}
-		results[p.UID] = observed
-	}
 }
 
 func verifyCapacityMountedPath(path string, pool volumeapi.Pool) error {
