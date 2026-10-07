@@ -52,13 +52,21 @@ parameters:
   shiftpv.io/pool-group: fast
 ```
 
-한 node의 여러 Pool은 모두 `capacityPolicy: FixedBlock`으로 독립 용량을 검증해야 한다.
+한 node에서 함께 사용하는 Pool은 모두 `capacityPolicy: FixedBlock`으로 독립 용량을 검증해야 한다.
 지원하는 ext4/xfs의 fixed block backing 구간과 경로가 겹치면 배치할 수 없다.
 같은 그룹에서는 각 Pool의 한도·예약·filesystem 여유를 따로 검사해 수용 가능한 Pool
 하나를 선택한다. PVC를 여러 Pool로 나누거나 그룹 용량을 합산하지 않는다.
+노드는 kube-scheduler가 선택한다. 선택된 node·그룹의 Ready Pool을 이름 사전순으로 검사해
+용량 조건을 처음 충족한 Pool에 할당한다. 이동의 destination Pool도 같은 순서로 선택하며,
+기록된 생성·이동 승인의 재시도는 기존 Pool UID를 유지한다.
 지원 구성과 등록 절차는 [Chart guide](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.
 기존 class에 parameter를 추가하려면 Kubernetes의 immutable parameter 제약을 고려해
 새 class를 생성한다.
+
+mobility를 허용한 PVC의 topology는 그룹에 등록된 node 범위다. 일시적인 Ready 실패나
+용량 한도 오류로 이 범위를 줄이지 않으며, 실제 배치는 현재 Ready와 용량 조건을 검사한다.
+기존 PV의 topology는 소급 변경되지 않는다. 점검·보정 조건은
+[Existing PV topology](../../charts/shiftpv/README.md#existing-pv-topology)를 따른다.
 
 첫 consumer가 정한 topology 안에서 Ready Pool을 선택한다. 할당은 다음을 모두 확인해야 한다.
 

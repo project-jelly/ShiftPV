@@ -18,6 +18,9 @@ var testTime = time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
 type fakeInspector struct{ result Result }
 
 func (f fakeInspector) Inspect(volumeapi.Pool) Result { return f.result }
+func (f fakeInspector) InspectCapacityUnit(volumeapi.Pool) (*volumeapi.PoolCapacityUnit, Check) {
+	return nil, Check{Known: true, Reason: "CapacityAllocationUnproven", Message: "fake has no allocation evidence"}
+}
 
 type fakeRepository struct {
 	pool       volumeapi.Pool
@@ -29,6 +32,19 @@ type fakeRepository struct {
 	statusSets int
 }
 
+func testRegistration(pool volumeapi.Pool) volumeapi.Pool {
+	if pool.MountPath == "" {
+		pool.MountPath = "/" + pool.Name
+	}
+	if pool.PoolGroup == "" {
+		pool.PoolGroup = volumeapi.DefaultPoolGroup
+	}
+	if pool.CapacityLimit == "" {
+		pool.CapacityLimit = "1Gi"
+	}
+	return pool
+}
+
 func (f *fakeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
 	if errors.Is(f.err, volumeapi.ErrPoolNotFound) {
 		return nil, nil
@@ -37,9 +53,13 @@ func (f *fakeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Poo
 		return nil, f.err
 	}
 	if f.pools != nil {
-		return f.pools, nil
+		pools := make([]volumeapi.Pool, len(f.pools))
+		for i, pool := range f.pools {
+			pools[i] = testRegistration(pool)
+		}
+		return pools, nil
 	}
-	return []volumeapi.Pool{f.pool}, nil
+	return []volumeapi.Pool{testRegistration(f.pool)}, nil
 }
 
 func (f *fakeRepository) SetPoolStatus(_ context.Context, name, uid, node string, status volumeapi.PoolStatus) error {

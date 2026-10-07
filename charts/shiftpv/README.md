@@ -127,12 +127,21 @@ spec:
 
 ## Multiple Pools on one node
 
-한 Pool은 한 filesystem 용량 단위를 소유한다. 같은 node의 여러 Pool은 모두
+한 Pool은 한 filesystem 용량 단위를 소유한다. 같은 node에서 함께 사용하는 Pool은 모두
 `spec.capacityPolicy: FixedBlock`이어야 하며, Ready 전에 실제 backing 영역이
 서로 겹치지 않는지 확인한다. 기존 directory Pool도 지원하는 filesystem 위에
 있으면 이 필드를 추가할 수 있다. 전환은 inventory가 healthy·complete이고 진행 중인
 Move가 없는 상태에서 수행한다. 검증을 켠 뒤에는 정책을 제거하거나 바꿀 수 없다.
 새 CRD를 먼저 적용한 뒤 controller/node/helper 이미지를 함께 갱신한다.
+
+Node는 설정·backing·쓰기 검사와 complete inventory를 확인한 뒤
+`status.registrationApproved: true`를 기록한다. 승인 이력은 이후 검사 실패에도 유지한다.
+설정 누락, 경로 중복 또는 backing 중복으로 거부된 신규 후보는 기존 승인 Pool의
+Ready를 내리지 않는다. 승인된 Pool의 backing이 바뀌거나 증거가 없어지면 해당 Pool과
+같은 node의 승인 Pool 배치를 보류한다. 함께 등록한 후보끼리 충돌하면 모두 거부한다.
+승인 직전 등록 목록과 backing을 다시 확인하며 외부 mount 변경을 원자적으로 막지는 않는다.
+승인된 Pool의 `capacity.limit` 오류는 해당 Pool의 신규 배치를 막지만 backing 검증과
+정리용 inventory는 계속 수행한다. 한도는 양수의 정수 바이트로 정확히 변환 가능해야 한다.
 
 다음은 **이미 준비하고 마운트한** 독립 thick LV 두 개를 등록하는 예다.
 ShiftPV가 LV, filesystem 또는 mount를 만들지 않는다.
@@ -168,6 +177,8 @@ spec:
 `fast`와 `bulk` 그룹을 선택하는 StorageClass로 용도를 나눈다. 두 Pool의 그룹을
 같게 설정하면 한 StorageClass에서 요청량을 수용할 수 있는 Pool 하나를 선택한다.
 한 PVC는 선택된 Pool 하나에 고정되며 두 filesystem에 걸쳐 분할되지 않는다.
+선택된 node와 그룹 안에서 Pool 이름 순서로 용량 조건을 만족하는 첫 Pool을 사용한다.
+남은 용량의 균등 분산이나 round-robin은 수행하지 않는다.
 자동 cold move는 같은 그룹의 다른 node로만 진행한다. 같은 node 안의 Pool 간 이동과
 그룹 간 수동 이동은 후속 기능이다.
 
@@ -308,11 +319,34 @@ and then removed with a UID precondition. Configure whole-hour retention with
 `mobility.journalRetention`. This policy never deletes copy data and never
 removes unresolved, active, or finalizer-protected journals.
 
-Mobility admission을 사용할 workload namespace만 opt in한다.
+Mobility admission을 사용할 workload namespace는 PVC 생성 전에 opt in한다.
 
 ```bash
 kubectl label namespace my-workload shiftpv.io/admission=enabled
 ```
+
+### Existing PV topology
+
+Chart upgrade나 namespace opt-in은 기존 PV의 `spec.nodeAffinity`를 변경하지 않는다.
+생성 당시 mobility가 꺼져 있었거나 그룹에 node가 하나뿐이었다면 단일 node topology는 정상이다.
+
+```bash
+kubectl --context <context> get pv -o jsonpath='{range .items[?(@.spec.csi.driver=="csi.shiftpv.io")]}{.metadata.name}{"\t"}{.spec.claimRef.namespace}{"/"}{.spec.claimRef.name}{"\t"}{.spec.storageClassName}{"\t"}{.spec.nodeAffinity.required.nodeSelectorTerms}{"\n"}{end}'
+kubectl --context <context> get namespaces -l shiftpv.io/admission=enabled
+kubectl --context <context> get shiftpvpools -o yaml
+```
+
+보정 대상은 **생성 당시 mobility가 활성화되어 있었고, 그때 등록된 같은 그룹의 node가
+용량 한도 오류로 topology에서 빠졌다고 확인된 PV**다. 현재 namespace label이나 Pool 목록만으로
+과거 의도를 판정하지 않는다. StorageClass·사용자 affinity 제약과 현재 owner node를 보존한다.
+
+Kubernetes의 [MutablePVNodeAffinity](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#updates-to-node-affinity)
+기능이 활성화된 환경에서만 기존 PV topology를 수정할 수 있다. 보정 patch는 PV UID와
+resourceVersion을 `test`하는 JSON Patch로 만들고 `kubectl patch --dry-run=server`로 먼저 검증한다.
+허용된 node 범위만 복구하고 PVC/PV/volume handle identity가 유지됐는지 확인한다.
+`field is immutable`이면 보정을 중단하고, 필요 시 새 PVC로 데이터를 이전하는 절차를 별도로 수립한다.
+
+### Move preflight
 
 계획 이동 전 다음을 확인한다.
 

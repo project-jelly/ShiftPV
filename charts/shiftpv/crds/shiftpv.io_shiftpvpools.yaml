@@ -34,6 +34,8 @@ spec:
           type: object
           required: [spec]
           x-kubernetes-validations:
+            - rule: '!has(oldSelf.status) || !has(oldSelf.status.registrationApproved) || !oldSelf.status.registrationApproved || (has(self.status) && has(self.status.registrationApproved) && self.status.registrationApproved)'
+              message: registration approval cannot be removed
             - rule: '!has(oldSelf.status) || !has(oldSelf.status.capacityUnit) || (has(self.status) && has(self.status.capacityUnit) && self.status.capacityUnit == oldSelf.status.capacityUnit)'
               message: recorded capacityUnit cannot be changed or removed
           properties:
@@ -98,6 +100,9 @@ spec:
             status:
               type: object
               properties:
+                registrationApproved:
+                  description: Successful registration history; retained when later probes fail.
+                  type: boolean
                 observedGeneration:
                   type: integer
                   format: int64

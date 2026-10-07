@@ -58,10 +58,15 @@ func main() {
 		Pools:      registry,
 	}
 	identityService := &identity.Service{Version: version}
-	readinessReconciler := &poolreadiness.Reconciler{
-		Wake:     poolreadiness.WatchPoolChanges(ctx, registry.Client, *nodeName),
-		NodeName: *nodeName, Pools: registry, Inspector: poolreadiness.NewProbe(*hostRoot), Interval: *poolReadinessInterval,
+	probe, err := poolreadiness.NewProbeWithDependencies(*hostRoot, poolreadiness.HostProbeDependencies(*hostRoot))
+	if err != nil {
+		fatal("configure Pool probe", err)
 	}
+	readinessReconciler, err := poolreadiness.NewReconciler(*nodeName, registry, probe, *poolReadinessInterval)
+	if err != nil {
+		fatal("configure Pool readiness", err)
+	}
+	readinessReconciler.Wake = poolreadiness.WatchPoolChanges(ctx, registry.Client, *nodeName)
 	inventoryScanner := &nodeobservation.Scanner{
 		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: registry, Publications: binder, Limit: 256,
 	}

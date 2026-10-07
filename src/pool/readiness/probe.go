@@ -14,14 +14,10 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/pool/capacityunit"
+	"github.com/project-jelly/ShiftPV/src/pool/registration"
 )
 
-type Check struct {
-	OK      bool
-	Known   bool
-	Reason  string
-	Message string
-}
+type Check = registration.Check
 
 type Result struct {
 	Independent      Check
@@ -35,30 +31,53 @@ type Result struct {
 }
 
 type Inspector interface {
+	AllocationInspector
 	Inspect(volumeapi.Pool) Result
 }
 
+type AllocationResolver interface {
+	Resolve(string) ([]capacityunit.Extent, error)
+}
+
+// ProbeDependencies exposes only host operations used by registration checks.
+type ProbeDependencies struct {
+	Allocations      AllocationResolver
+	InspectDirectory func(string) error
+	Write            func(string) error
+	StatFS           func(string) (poolcapacity.Filesystem, error)
+	ListMounts       func() ([]mountutils.MountInfo, error)
+}
+
 type Probe struct {
-	allocations interface {
-		Resolve(string) ([]capacityunit.Extent, error)
+	allocations AllocationResolver
+	HostRoot    string
+	inspect     func(string) error
+	write       func(string) error
+	statFS      func(string) (poolcapacity.Filesystem, error)
+	listMounts  func() ([]mountutils.MountInfo, error)
+}
+
+func NewProbeWithDependencies(hostRoot string, d ProbeDependencies) (*Probe, error) {
+	if !filepath.IsAbs(hostRoot) || d.Allocations == nil || d.InspectDirectory == nil || d.Write == nil || d.StatFS == nil || d.ListMounts == nil {
+		return nil, fmt.Errorf("Pool probe configuration is incomplete")
 	}
-	HostRoot   string
-	inspect    func(string) error
-	write      func(string) error
-	statFS     func(string) (poolcapacity.Filesystem, error)
-	listMounts func() ([]mountutils.MountInfo, error)
+	return &Probe{HostRoot: hostRoot, allocations: d.Allocations, inspect: d.InspectDirectory, write: d.Write, statFS: d.StatFS, listMounts: d.ListMounts}, nil
 }
 
 func NewProbe(hostRoot string) *Probe {
-	return &Probe{
-		HostRoot:    hostRoot,
-		allocations: capacityunit.NewResolver(filepath.Join(hostRoot, "sys"), filepath.Join(hostRoot, "dev/mapper/control")),
-		inspect:     inspectDirectory,
-		write:       writeProbe,
-		listMounts: func() ([]mountutils.MountInfo, error) {
+	d := HostProbeDependencies(hostRoot)
+	return &Probe{HostRoot: hostRoot, allocations: d.Allocations, inspect: d.InspectDirectory, write: d.Write, statFS: d.StatFS, listMounts: d.ListMounts}
+}
+
+func HostProbeDependencies(hostRoot string) ProbeDependencies {
+	return ProbeDependencies{
+		Allocations:      capacityunit.NewResolver(filepath.Join(hostRoot, "sys"), filepath.Join(hostRoot, "dev/mapper/control")),
+		InspectDirectory: inspectDirectory,
+		Write:            writeProbe,
+		ListMounts: func() ([]mountutils.MountInfo, error) {
 			return mountutils.ParseMountInfo("/proc/self/mountinfo")
 		},
-		statFS: func(path string) (poolcapacity.Filesystem, error) {
+		StatFS: func(path string) (poolcapacity.Filesystem, error) {
 			var stat syscall.Statfs_t
 			if err := syscall.Statfs(path, &stat); err != nil {
 				return poolcapacity.Filesystem{}, err

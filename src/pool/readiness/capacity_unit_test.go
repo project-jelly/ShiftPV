@@ -133,7 +133,7 @@ func TestNestedPoolRootsAreRejectedBeforeWrites(t *testing.T) {
 	a := volumeapi.Pool{Name: "pool-a", UID: "a-uid", NodeName: "node", MountPath: "/mnt/a", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
 	b := volumeapi.Pool{Name: "pool-b", UID: "b-uid", NodeName: "node", MountPath: "/mnt/a/nested", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
 	r := &Reconciler{NodeName: "node", Inspector: fakeAllocationInspector{}}
-	observations := r.capacityIsolation([]volumeapi.Pool{a, b})
+	observations := r.capacityIsolation([]volumeapi.Pool{testRegistration(a), testRegistration(b)})
 	for _, p := range []volumeapi.Pool{a, b} {
 		if observed := observations[p.UID]; observed.check.OK || observed.check.Reason != "CapacityPathsOverlap" {
 			t.Fatalf("nested root approved: %+v", observed)
@@ -148,8 +148,11 @@ func TestDeletingLegacyDuplicateStillCanBeInspected(t *testing.T) {
 		{Name: "b", UID: "b-uid", NodeName: "node", MountPath: "/b"},
 	}
 	r := &Reconciler{NodeName: "node", Inspector: fakeInspector{}}
+	for i := range pools {
+		pools[i] = testRegistration(pools[i])
+	}
 	observations := r.capacityIsolation(pools)
-	if _, exists := observations["a-uid"]; exists {
+	if observed := observations["a-uid"]; observed.check.Reason != "" && !observed.check.OK {
 		t.Fatal("terminating legacy Pool was blocked from cleanup inspection")
 	}
 	if observations["b-uid"].check.OK || observations["b-uid"].check.Reason != "CapacityIsolationRequired" {
@@ -177,17 +180,23 @@ func TestFixedBlockRejectsSymlinkBeforeWrite(t *testing.T) {
 	}
 }
 
+type changedPeerInspector struct{ fakeAllocationInspector }
+
+func (f changedPeerInspector) InspectCapacityUnit(pool volumeapi.Pool) (*volumeapi.PoolCapacityUnit, Check) {
+	if pool.Name == "pool-b" {
+		return nil, capacityFailure("CapacityAllocationUnproven", fmt.Errorf("unsupported changed backing"))
+	}
+	return f.fakeAllocationInspector.InspectCapacityUnit(pool)
+}
+
 func TestMissingLivePeerEvidenceDoesNotReuseOldAnchor(t *testing.T) {
 	inspector := fakeAllocationInspector{}
-	left := volumeapi.Pool{Name: "pool-a", UID: "a", MountPath: "/a"}
-	right := volumeapi.Pool{Name: "pool-b", UID: "b", MountPath: "/b"}
-	unit, check := inspector.InspectCapacityUnit(left)
+	left := volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", MountPath: "/a", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
+	right := volumeapi.Pool{Name: "pool-b", UID: "b", NodeName: "node", MountPath: "/b", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
+	left.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(left)
 	right.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(right)
-	results := map[string]allocationObservation{
-		"a": {unit: unit, check: check},
-		"b": {check: capacityFailure("CapacityAllocationUnproven", fmt.Errorf("unsupported changed backing"))},
-	}
-	compareAllocations(left, right, results)
+	r := &Reconciler{NodeName: "node", Inspector: changedPeerInspector{inspector}}
+	results := r.capacityIsolation([]volumeapi.Pool{testRegistration(left), testRegistration(right)})
 	if results["a"].check.Reason != "CapacityPeerUnproven" || results["b"].check.Reason != "CapacityAllocationUnproven" {
 		t.Fatalf("ambiguous peer results=%+v", results)
 	}

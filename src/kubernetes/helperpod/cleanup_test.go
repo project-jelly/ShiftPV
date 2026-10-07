@@ -692,6 +692,11 @@ func cleanupFixture(t *testing.T) (*cleanupapi.Store, cleanupapi.Cleanup) {
 
 func readyCleanupPool(pool volumeapi.Pool) volumeapi.Pool {
 	now := metav1.Now()
+	if pool.NodeName == "" {
+		pool.NodeName = "worker-a"
+	}
+	pool.PoolGroup = volumeapi.DefaultPoolGroup
+	pool.CapacityLimit = "1Gi"
 	pool.Generation = 1
 	pool.Finalizers = []string{volumeapi.PoolProtectionFinalizer}
 	pool.Status = volumeapi.PoolStatus{

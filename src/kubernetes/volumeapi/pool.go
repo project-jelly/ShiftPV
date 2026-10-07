@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -39,6 +38,7 @@ type Pool struct {
 const DefaultPoolGroup = "default"
 
 type PoolStatus struct {
+	RegistrationApproved   bool                     `json:"registrationApproved,omitempty"`
 	CapacityProbeSupported bool                     `json:"capacityProbeSupported,omitempty"`
 	CapacityProbe          *PoolCapacityProbeResult `json:"capacityProbe,omitempty"`
 	// FilesystemTotalBytes is a node observation for rejection classification,
@@ -97,23 +97,12 @@ func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
 	return pools, err
 }
 
-// ListPools permits an empty registry for read-only inventory.
+// ListPools retains every registration for inventory and peer safety checks.
+// Placement validates each Pool independently; an empty registry is allowed.
 func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
 	pools, err := r.ListPoolRegistrations(ctx)
 	if err != nil {
 		return nil, err
-	}
-	nodes := make(map[string]Pool, len(pools))
-	for _, pool := range pools {
-		if pool.NodeName == "" || len(validation.IsDNS1123Label(pool.PoolGroup)) != 0 || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" ||
-			(pool.MountPolicy != "" && pool.MountPolicy != PoolMountPolicyRequireMountPoint) ||
-			(pool.CapacityPolicy != "" && pool.CapacityPolicy != PoolCapacityPolicyFixedBlock) {
-			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName, poolGroup, mountPath, mountPolicy, or capacityPolicy", ErrPoolConfiguration, pool.Name)
-		}
-		if previous, duplicate := nodes[pool.NodeName]; duplicate && (pool.CapacityPolicy != PoolCapacityPolicyFixedBlock || previous.CapacityPolicy != PoolCapacityPolicyFixedBlock) {
-			return nil, duplicatePoolError(pool.NodeName)
-		}
-		nodes[pool.NodeName] = pool
 	}
 	sort.Slice(pools, func(left, right int) bool {
 		if pools[left].NodeName != pools[right].NodeName {
@@ -192,6 +181,9 @@ func (r *Registry) PoolNodesForGroup(ctx context.Context, group string) ([]strin
 	}
 	nodes := make(map[string]struct{}, len(pools))
 	for _, pool := range pools {
+		if !pool.TopologyConfigurationCheck().OK {
+			continue
+		}
 		if group != "" && pool.PoolGroup != group {
 			continue
 		}
@@ -375,6 +367,9 @@ func (r *Registry) readiness() (time.Time, time.Duration) {
 // poolReady is the single gate that admits a Pool for new placement: a fresh
 // Ready probe, a complete inventory, and installed deregistration protection.
 func poolReady(pool Pool, now time.Time, staleAfter time.Duration) (bool, string) {
+	if check := pool.ConfigurationCheck(); !check.OK {
+		return false, check.Reason
+	}
 	if ready, reason := pool.ReadyAt(now, staleAfter); !ready {
 		return false, reason
 	}
@@ -473,6 +468,12 @@ func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string
 			}
 			if current.Status.CapacityUnit != nil && !SameCapacityUnit(current.Status.CapacityUnit, status.CapacityUnit) {
 				return fmt.Errorf("%w: ShiftPVPool %q capacity identity cannot be changed or cleared", ErrStateConflict, name)
+			}
+			if current.Status.RegistrationApproved && !status.RegistrationApproved {
+				return fmt.Errorf("%w: ShiftPVPool %q registration approval cannot be cleared", ErrStateConflict, name)
+			}
+			if status.ObservedGeneration != 0 && status.ObservedGeneration != current.Generation {
+				return fmt.Errorf("%w: ShiftPVPool %q observation generation changed", ErrStateConflict, name)
 			}
 			if status.CapacityUnit != nil {
 				if err := status.CapacityUnit.Validate(); err != nil {
@@ -590,12 +591,15 @@ func (p Pool) mountReady() (bool, string) {
 	return true, ""
 }
 
-// CleanupReadyAt keeps an exact, already-approved cleanup executable while a
-// Pool is terminating. New placement continues to use ReadyAt and remains
-// closed for the same Pool.
+// CleanupReadyAt keeps exact, already-approved cleanup executable while a Pool
+// is terminating or has invalid placement settings. Both require fresh backing
+// and directory observations independently of placement Ready.
 func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
-	if p.DeletionTimestamp == nil {
+	if p.DeletionTimestamp == nil && p.ConfigurationCheck().OK {
 		return p.ReadyAt(now, staleAfter)
+	}
+	if check := p.BackingConfigurationCheck(); !check.OK {
+		return false, check.Reason
 	}
 	if p.MountPolicy == PoolMountPolicyRequireMountPoint && p.Status.MountIdentity == nil {
 		return false, "MountIdentityMissing"

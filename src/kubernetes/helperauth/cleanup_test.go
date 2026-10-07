@@ -270,7 +270,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 					"name": destination.PoolName, "uid": destination.PoolUID, "generation": int64(1),
 					"finalizers": []any{volumeapi.PoolProtectionFinalizer},
 				},
-				"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool"},
+				"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool", "capacity": map[string]any{"limit": "1Gi"}},
 			}}
 			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 				volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList",
@@ -419,7 +419,7 @@ func TestMoveSourceCleanupAuthorityHonorsOperatorPoolReadinessBudget(t *testing.
 			"name": destination.PoolName, "uid": destination.PoolUID, "generation": int64(1),
 			"finalizers": []any{volumeapi.PoolProtectionFinalizer},
 		},
-		"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool"},
+		"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool", "capacity": map[string]any{"limit": "1Gi"}},
 	}}
 	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "Namespace",
