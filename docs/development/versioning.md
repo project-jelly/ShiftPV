@@ -71,3 +71,6 @@ helm upgrade shiftpv "${CHART_WORKDIR}/shiftpv" --namespace shiftpv-system --val
 ```
 
 GitOps에서도 target CRD schema 적용이 Controller rollout보다 먼저 완료되도록 순서를 보장한다.
+
+Node 0.4.13이 Pool의 `status.registrationApproved: true`를 기록하면 이 값은 제거할 수 없다.
+Node 0.4.12 이하로 되돌리면 전체 status 쓰기가 이 필드를 보존하지 않아 새 CRD에서 거부된다.
