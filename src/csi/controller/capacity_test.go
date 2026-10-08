@@ -154,7 +154,7 @@ func (r *capacityTrackingVolumeRegistry) BeginCreateInPool(ctx context.Context, 
 	unlock := writeLock(r.mu)
 	defer unlock()
 	if state, ok := r.volumes[volumeID]; ok {
-		if err := validateCreateIntent(state, requestName, nodeName, capacityBytes); err != nil {
+		if err := validateFixtureCreateIntent(state, requestName, nodeName, capacityBytes); err != nil {
 			return volumeapi.State{}, err
 		}
 		return state, nil
@@ -205,8 +205,8 @@ func TestCreateVolumeUsesPoolLimitAndFilesystemCapacity(t *testing.T) {
 		wantCode  codes.Code
 	}{
 		"accepted":             {limit: "128Mi", available: 128 << 20, wantCode: codes.OK},
-		"logical limit":        {limit: "32Mi", available: 128 << 20, wantCode: codes.ResourceExhausted},
-		"filesystem available": {limit: "128Mi", available: 32 << 20, wantCode: codes.ResourceExhausted},
+		"logical limit":        {limit: "32Mi", available: 128 << 20, wantCode: codes.Unavailable},
+		"filesystem available": {limit: "128Mi", available: 32 << 20, wantCode: codes.Unavailable},
 		"missing limit":        {available: 128 << 20, wantCode: codes.FailedPrecondition},
 		"invalid limit":        {limit: "not-a-quantity", available: 128 << 20, wantCode: codes.FailedPrecondition},
 	} {
@@ -355,12 +355,13 @@ func TestCreateVolumeRetriesScheduledPodOwnedPVCWhenFilesystemSpaceReturns(t *te
 	}
 }
 
-func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *testing.T) {
+func TestCreateVolumeDenialPreservesPlacementAndRejectsStaleIdentity(t *testing.T) {
 	for name, test := range map[string]struct {
 		change func(*corev1.PersistentVolumeClaim, *corev1.Pod)
 		size   int64
 		limit  string
 		total  int64
+		code   codes.Code
 	}{
 		"no Pod owner":             {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.OwnerReferences = nil }},
 		"consumer not scheduled":   {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) { pod.Spec.NodeName = "" }},
@@ -369,8 +370,8 @@ func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *tes
 		"unrelated Pod volume": {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) {
 			pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other"
 		}},
-		"wrong PVC identity": {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.UID = "other" }},
-		"selected node mismatch": {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) {
+		"wrong PVC identity": {code: codes.FailedPrecondition, change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.UID = "other" }},
+		"selected node mismatch": {code: codes.FailedPrecondition, change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) {
 			pvc.Annotations[selectedNodeAnnotation] = "worker-b"
 		}},
 		"oversized request": {size: 129 << 20},
@@ -397,8 +398,12 @@ func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *tes
 			if test.size != 0 {
 				req.CapacityRange.RequiredBytes = test.size
 			}
-			if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.ResourceExhausted {
-				t.Fatalf("capacity denial = %v, want ResourceExhausted", err)
+			want := test.code
+			if want == codes.OK {
+				want = codes.Unavailable
+			}
+			if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != want {
+				t.Fatalf("capacity denial = %v, want %s", err, want)
 			}
 		})
 	}
@@ -472,7 +477,7 @@ func TestCreateVolumeCountsReservationsAtCurrentVolumeOwner(t *testing.T) {
 	req := validCreateRequest("worker-b")
 	req.Name = "new-pvc"
 	_, err := service.CreateVolume(context.Background(), req)
-	if status.Code(err) != codes.ResourceExhausted {
+	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("moved reservation was not charged to current owner: %v", err)
 	}
 }
@@ -496,7 +501,7 @@ func TestCreateVolumeCountsCapacityApprovedMoveAtDestination(t *testing.T) {
 		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
 	})
 	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b"))
-	if status.Code(err) != codes.ResourceExhausted {
+	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("approved move was not charged to destination: %v", err)
 	}
 }
@@ -522,7 +527,7 @@ func TestCreateVolumeRetainsRecoveredMoveCapacityUntilSettled(t *testing.T) {
 		CapacityPools: registry,
 		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
 	})
-	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b")); status.Code(err) != codes.ResourceExhausted {
+	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b")); status.Code(err) != codes.Unavailable {
 		t.Fatalf("recovered move released capacity before settlement: %v", err)
 	}
 }
@@ -587,7 +592,7 @@ func TestCreateVolumeSerializesPoolReservationAdmission(t *testing.T) {
 	for range requests {
 		counts[<-results]++
 	}
-	if counts[codes.OK] != 1 || counts[codes.ResourceExhausted] != 1 {
+	if counts[codes.OK] != 1 || counts[codes.Unavailable] != 1 {
 		t.Fatalf("result codes = %v", counts)
 	}
 }

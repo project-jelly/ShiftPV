@@ -13,9 +13,10 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 )
 
-const selectedNodeAnnotation = "volume.kubernetes.io/selected-node"
+const selectedNodeAnnotation = consumer.SelectedNode
 
 type PoolCapacityRegistry interface {
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
@@ -28,11 +29,12 @@ type PoolCapacityProbe interface {
 	StatFSForPool(context.Context, volumeapi.Pool) (poolcapacity.Filesystem, error)
 }
 
-func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
+func (s *Service) beginCreateWithinPool(ctx context.Context, request createRequest, parameters map[string]string) (volumeapi.State, error) {
+	id, requestName, nodeName, requestedBytes := request.id, request.name, request.nodeName, request.capacity
 	defer s.observeStep("capacity_admission", id)()
 	existing, err := s.Volumes.Get(ctx, id)
 	if err == nil {
-		return s.resumeExistingCreate(ctx, existing, id, requestName, nodeName, requestedBytes, parameters)
+		return s.resumeExistingCreate(ctx, existing, request, parameters)
 	}
 	if !apierrors.IsNotFound(err) {
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
@@ -43,7 +45,7 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 
 	existing, err = s.Volumes.Get(ctx, id)
 	if err == nil {
-		return s.resumeExistingCreate(ctx, existing, id, requestName, nodeName, requestedBytes, parameters)
+		return s.resumeExistingCreate(ctx, existing, request, parameters)
 	}
 	if !apierrors.IsNotFound(err) {
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
@@ -66,8 +68,8 @@ func poolGroup(pool volumeapi.Pool) string {
 	return volumeapi.DefaultPoolGroup
 }
 
-func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.State, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
-	if err := validateCreateIntent(existing, requestName, nodeName, requestedBytes); err != nil {
+func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) (volumeapi.State, error) {
+	if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
 		return volumeapi.State{}, err
 	}
 	if existing.CurrentCopy == nil {
@@ -79,9 +81,10 @@ func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.S
 		return volumeapi.State{}, poolSelectionError(err)
 	}
 	if poolGroup(pool) != requestedPoolGroup(parameters) {
-		return volumeapi.State{}, status.Errorf(codes.AlreadyExists, "volume %q belongs to Pool group %q", requestName, poolGroup(pool))
+		return volumeapi.State{}, status.Errorf(codes.AlreadyExists, "volume %q belongs to Pool group %q", request.name, poolGroup(pool))
 	}
-	return s.Volumes.BeginCreateInPool(ctx, id, requestName, nodeName, requestedBytes, pool.Name, pool.UID)
+	// Keep the registry's exact identity checks and the original capacity hold.
+	return s.Volumes.BeginCreateInPool(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, pool.Name, pool.UID)
 }
 
 func poolSelectionError(err error) error {
@@ -173,21 +176,25 @@ func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, requestName
 	return poolFit{allowed: true}, nil
 }
 
-// A scheduler-owned PVC can be moved to another node after ResourceExhausted.
-// A Pod-owned PVC created after its consumer was assigned a node cannot: CDI
-// scratch PVCs are one example. Keep its selected node so provisioning retries
-// there when a reservation or filesystem space becomes available.
+// Capacity size and placement ownership are independent. Only a scheduler-managed
+// claim may release its selected node; fixed or unknown placement must retry.
 func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, requestName string, pool volumeapi.Pool, requestedBytes, limitBytes int64, stats *poolcapacity.Filesystem, format string, args ...any) error {
 	message := fmt.Sprintf(format, args...)
-	if requestedBytes > limitBytes {
-		return status.Error(codes.ResourceExhausted, message)
+	if s.ConsumerPlacement == nil {
+		return status.Error(codes.Unavailable, "consumer placement inspection is not configured")
 	}
-	fixed, err := s.hasScheduledPodConsumer(ctx, parameters, requestName, pool.NodeName)
+	placement, err := s.ConsumerPlacement.Inspect(ctx, consumer.Request{Namespace: parameters[PVCNamespaceKey], Name: parameters[PVCNameKey], UID: strings.TrimPrefix(requestName, "pvc-"), Node: pool.NodeName})
+	if errors.Is(err, consumer.ErrIdentity) {
+		return status.Errorf(codes.FailedPrecondition, "%s; %v", message, err)
+	}
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "%s; inspect PVC consumer: %v", message, err)
 	}
-	if fixed {
-		if stats == nil && !s.observedTotalCanFit(pool, requestedBytes) {
+	if placement.Placement != consumer.Reschedulable {
+		if requestedBytes > limitBytes {
+			message += "; request exceeds Pool limit; change capacity configuration or request size"
+		}
+		if requestedBytes <= limitBytes && placement.Placement == consumer.Fixed && stats == nil && !s.observedTotalCanFit(pool, requestedBytes) {
 			observed, err := s.CapacityProbe.StatFSForPool(ctx, pool)
 			if err != nil {
 				return capacityProbeError("inspect Pool filesystem capacity", err)
@@ -195,12 +202,12 @@ func (s *Service) capacityDenied(ctx context.Context, parameters map[string]stri
 			stats = &observed
 		}
 		if stats != nil && poolcapacity.ExceedsTotal(requestedBytes, stats.TotalBytes) {
-			return status.Error(codes.ResourceExhausted, message)
+			message += "; request exceeds filesystem total; change capacity configuration or request size"
 		}
 		if s.RetryRequests != nil {
 			s.RetryRequests.Register(parameters[PVCNamespaceKey], parameters[PVCNameKey], strings.TrimPrefix(requestName, "pvc-"), pool.NodeName, poolGroup(pool), requestedBytes)
 		}
-		return status.Errorf(codes.Unavailable, "%s; scheduled consumer on node %q requires same-node retry", message, pool.NodeName)
+		return status.Errorf(codes.Unavailable, "%s; %s; preserve node %q and retry", message, placement.Reason, pool.NodeName)
 	}
 	return status.Error(codes.ResourceExhausted, message)
 }
@@ -227,19 +234,6 @@ func poolLimitBytes(pool volumeapi.Pool) (int64, error) {
 		return 0, fmt.Errorf("spec.capacity.limit is required")
 	}
 	return poolcapacity.LimitBytes(pool)
-}
-
-func validateCreateIntent(existing volumeapi.State, requestName, nodeName string, capacityBytes int64) error {
-	if existing.RequestName != requestName {
-		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible requestName", requestName)
-	}
-	if existing.InitialNode != nodeName {
-		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible initialNode", requestName)
-	}
-	if existing.CapacityBytes != capacityBytes {
-		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible capacityBytes", requestName)
-	}
-	return nil
 }
 
 func capacityProbeError(operation string, err error) error {

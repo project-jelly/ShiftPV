@@ -44,6 +44,7 @@ import (
 	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
 	remotemeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement/remote"
 	"github.com/project-jelly/ShiftPV/src/provisioning"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	webhookcertificate "github.com/project-jelly/ShiftPV/src/webhook/certificate"
 )
@@ -162,7 +163,8 @@ func main() {
 	}
 	controllerService := &controllercsi.Service{
 		Client: client, Namespace: cfg.namespace, Operator: effects, Volumes: volumeRegistry,
-		CapacityPools: volumeRegistry, CapacityProbe: capacityProbe, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
+		ConsumerPlacement: consumer.Inspector{Reader: consumer.KubernetesReader{Client: client}},
+		CapacityPools:     volumeRegistry, CapacityProbe: capacityProbe, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
 		Cleanups: cleanupStore, CleanupOperator: effects, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
 		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, ObserveStep: exporter.ObserveProvisioningStep, RetryRequests: capacityRetries,
 	}

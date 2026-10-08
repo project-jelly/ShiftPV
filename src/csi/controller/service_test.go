@@ -24,6 +24,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -157,7 +158,7 @@ func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, requestNam
 			UID: copy.VolumeUID, RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: nodeName,
 			Phase: volumeapi.PhasePending, OwnerNode: nodeName, CurrentCopy: &copy,
 		}
-	} else if err := validateCreateIntent(f.state, requestName, nodeName, capacityBytes); err != nil {
+	} else if err := validateFixtureCreateIntent(f.state, requestName, nodeName, capacityBytes); err != nil {
 		return volumeapi.State{}, err
 	}
 	return f.state, nil
@@ -204,8 +205,9 @@ type durableCreateRegistry struct {
 	completeCalls int
 }
 
-func (r *durableCreateRegistry) BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error) {
+func (r *durableCreateRegistry) BeginCreate(_ context.Context, _, name, node string, capacity int64) (volumeapi.State, error) {
 	*r.events = append(*r.events, "intent")
+	r.state.RequestName, r.state.InitialNode, r.state.CapacityBytes = name, node, capacity
 	return r.state, r.beginErr
 }
 
@@ -258,6 +260,9 @@ func (o *blockingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupap
 }
 
 func configuredService(service *Service) *Service {
+	if service.ConsumerPlacement == nil {
+		service.ConsumerPlacement = consumer.Inspector{Reader: consumer.KubernetesReader{Client: service.Client}}
+	}
 	if service.Volumes == nil {
 		service.Volumes = &fakeVolumeRegistry{poolNodes: []string{"worker-a", "worker-b"}}
 	}
@@ -1098,4 +1103,17 @@ func equalStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func validateFixtureCreateIntent(existing volumeapi.State, requestName, nodeName string, capacityBytes int64) error {
+	if existing.RequestName != requestName {
+		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible requestName", requestName)
+	}
+	if existing.InitialNode != nodeName {
+		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible initialNode", requestName)
+	}
+	if existing.CapacityBytes != capacityBytes {
+		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible capacityBytes", requestName)
+	}
+	return nil
 }
