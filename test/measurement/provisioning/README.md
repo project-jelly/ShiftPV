@@ -72,6 +72,8 @@ delay in this configuration. CSI typed and dynamic clients now share a dedicated
 This increases possible API load. Fresh reads, locks, capacity holds and receipt
 guards remain in place. Capacity-probe median grew from 29ms to 560ms under the
 faster request stream; its remaining API budget is a follow-up measurement target.
+The [probe budget comparison](results/2026-10-08-probe-budget.md) records the
+subsequent change and its limited overall improvement.
 
 Same-node independent Pool admission is covered by DI tests: one blocked probe,
 node serialization and two separate Pool UID holds. Live independent-disk and

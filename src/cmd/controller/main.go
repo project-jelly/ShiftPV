@@ -145,8 +145,7 @@ func main() {
 	retryPools := &volumeapi.Registry{Client: retryClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
 	capacityRetries := provisioning.NewRetries(retryClients.Typed, retryPools)
 	go capacityRetries.Run(ctx, retryClients.Dynamic)
-	probeConfig := capacityRetryRESTConfig(config)
-	probeConfig.UserAgent = "shiftpv-capacity-probe"
+	probeConfig := capacityProbeRESTConfig(config)
 	probePools := &volumeapi.Registry{Client: wiring.ForConfig(probeConfig, "capacity probe", fatal).Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
 	apiCapacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: csiOperator, ObserveStep: exporter.ObserveProvisioningStep}
 	var capacityProbe controllercsi.PoolCapacityProbe = apiCapacityProbe
@@ -206,6 +205,15 @@ func capacityRetryRESTConfig(config *rest.Config) *rest.Config {
 	retryConfig.Timeout = 0 // Reconcile is bounded separately; watches may stay open.
 	retryConfig.UserAgent = "shiftpv-capacity-retry"
 	return retryConfig
+}
+
+// Live capacity reads have their own budget for pre/post measurement validation.
+func capacityProbeRESTConfig(config *rest.Config) *rest.Config {
+	probeConfig := admissionRESTConfig(config)
+	probeConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(probeConfig.QPS, probeConfig.Burst)
+	probeConfig.Timeout = 0 // Probe requests have their own context deadline.
+	probeConfig.UserAgent = "shiftpv-capacity-probe"
+	return probeConfig
 }
 
 // admissionRESTConfig is the higher-throughput configuration the lifecycle

@@ -1,4 +1,4 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template chart-render-diff complexity linux-mount-integration kind-e2e kind-mobility-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
+.PHONY: verify fmt fmt-check mod-verify test coverage cmd-test vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template chart-render-diff complexity linux-mount-integration kind-e2e kind-mobility-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
 
 CONTROLLER_VERSION_FILE ?= versions/controller
 NODE_VERSION_FILE ?= versions/node
@@ -16,7 +16,7 @@ SHELL_SCRIPTS := $(shell find build test -type f -name '*.sh' | LC_ALL=C sort)
 # helm-template is not listed here: COVERAGE_PACKAGES already contains ./test/...,
 # so coverage runs ./test/helm once with -race. The target stays for running the
 # chart render contracts on their own.
-verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint complexity v04-model
+verify: fmt-check mod-verify coverage cmd-test vet build image-version-check release-workflow-test shellcheck actionlint helm-lint complexity v04-model
 
 fmt:
 	gofmt -w $$(find src test -name '*.go' -type f)
@@ -50,6 +50,9 @@ coverage:
 			} \
 			printf "coverage %.1f%% meets %.1f%% minimum\n", total, minimum; \
 		}'
+
+cmd-test:
+	go test -race -count=1 ./src/cmd/...
 
 vet:
 	go vet ./...
