@@ -191,6 +191,8 @@ Node effect observation tests block authority API reads independently of the
 shared gate, reject failed authority before filesystem work, and preserve the
 creation receipt on retry. An injected clock verifies local durations exclude
 nested authority checks, including failures and subsequent stages.
+Inject invalid inventory after the serving directory exists: withhold the API
+receipt, then restore inventory and resume the same copy and operation.
 Reject wrong caller/audience, executor UID, operation ID and Pool evidence.
 Repeat capacity reads with mount loss; Pool generation/scanEpoch must not change.
 With RPC disabled or older Nodes, verify the API probe nonce and answer still

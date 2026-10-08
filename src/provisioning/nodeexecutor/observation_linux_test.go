@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ktesting "k8s.io/client-go/testing"
 )
@@ -47,6 +49,61 @@ func TestNativeCreationObservationKeepsReceiptOnRetry(t *testing.T) {
 	retried, err := client.Volumes.Get(ctx, testID)
 	if err != nil || !reflect.DeepEqual(created, retried) || !reflect.DeepEqual(counts, want) {
 		t.Fatalf("retry repeated creation or changed receipt: err=%v steps=%v", err, counts)
+	}
+}
+
+func TestCreationObservationRejectsInventoryChangeAfterEffectAndResumes(t *testing.T) {
+	client, node, dynamic, _, state := fixture(t)
+	ctx := context.Background()
+	node.HostRoot = t.TempDir()
+	root := filepath.Join(node.HostRoot, "mnt", "pool")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Volumes.BindCreation(ctx, state, node.Identity); err != nil {
+		t.Fatal(err)
+	}
+	injected := false
+	dynamic.PrependReactor("get", "shiftpvpools", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if _, err := os.Stat(filepath.Join(root, "volumes", testID)); err != nil || injected {
+			return false, nil, nil
+		}
+		injected = true
+		object, err := dynamic.Tracker().Get(volumeapi.PoolResource, "", action.(ktesting.GetAction).GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		pool := object.(*unstructured.Unstructured).DeepCopy()
+		if err := unstructured.SetNestedField(pool.Object, false, "status", "inventory", "valid"); err != nil {
+			return true, nil, err
+		}
+		return true, pool, dynamic.Tracker().Update(volumeapi.PoolResource, pool, "")
+	})
+	counts := map[string]int{}
+	node.ObserveStep = func(step string, _ time.Duration) { counts[step]++ }
+	if err := node.execute(ctx, testID); !errors.Is(err, volumeapi.ErrPoolNotReady) || !injected {
+		t.Fatalf("post-effect invalid inventory permitted receipt: injected=%v err=%v", injected, err)
+	}
+	interrupted, err := client.Volumes.Get(ctx, testID)
+	if err != nil || interrupted.CreationReceipt != nil || interrupted.Phase != volumeapi.PhaseNodeCreating || counts["node_create_receipt_record"] != 0 || counts["node_create_prepare_local"] != 1 {
+		t.Fatalf("failed authority was not preserved: state=%+v steps=%v err=%v", interrupted, counts, err)
+	}
+	pool, err := dynamic.Resource(volumeapi.PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(pool.Object, true, "status", "inventory", "valid"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dynamic.Resource(volumeapi.PoolResource).UpdateStatus(ctx, pool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := node.execute(ctx, testID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := client.Volumes.Get(ctx, testID)
+	if err != nil || !volumeapi.ValidCreationReceipt(resumed) || resumed.UID != interrupted.UID || resumed.CreationOperationID != interrupted.CreationOperationID || !reflect.DeepEqual(resumed.CurrentCopy, interrupted.CurrentCopy) || !reflect.DeepEqual(resumed.CreationExecutor, interrupted.CreationExecutor) || counts["node_create_effect"] != 2 || counts["node_create_receipt_record"] != 1 {
+		t.Fatalf("resume replaced intent or failed receipt: state=%+v steps=%v err=%v", resumed, counts, err)
 	}
 }
 

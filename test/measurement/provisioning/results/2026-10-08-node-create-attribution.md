@@ -58,6 +58,9 @@ The transient inventory reason had already cleared in the later Pool snapshot,
 so its underlying scan failure was not captured. Investigation of inventory
 observation during concurrent creation remains a separate candidate; this run
 does not establish a new safety regression or a successful retry convergence.
+A DI regression models the observed post-effect inventory rejection and verifies
+receipt withholding and resumption with unchanged copy, operation and executor;
+it does not reproduce the scanner's underlying failure.
 
 ## Interpretation and provenance
 
