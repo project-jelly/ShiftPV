@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/project-jelly/ShiftPV/src/cmd/internal/wiring"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
@@ -16,13 +17,14 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-func startNodeEffects(ctx context.Context, nodeName, hostRoot, address, controllerAccount string, errCh chan<- error) {
+func startNodeEffects(ctx context.Context, nodeName, hostRoot, address, controllerAccount string, observe func(string, time.Duration), errCh chan<- error) {
 	clients := wiring.InCluster(fatal)
 	config := rest.CopyConfig(clients.Config)
 	config.QPS, config.Burst, config.RateLimiter = 50, 100, nil
 	effectClients := wiring.ForConfig(config, "resident Node effects", fatal)
 	volumes := &volumeapi.Registry{Client: effectClients.Dynamic}
 	effects := &nodeexecutor.Node{Identity: volumeapi.NodeExecutor{Namespace: os.Getenv("POD_NAMESPACE"), PodName: os.Getenv("POD_NAME"), PodUID: os.Getenv("POD_UID"), NodeName: nodeName}, Discovery: nodeexecutor.Discovery{Client: effectClients.Typed}, Volumes: volumes, Cleanups: &cleanupapi.Store{Client: effectClients.Dynamic}, HostRoot: hostRoot}
+	effects.ObserveStep = observe
 	if address != "" {
 		certificate, public, err := security.NewCertificate(effects.Identity.PodUID)
 		if err != nil {

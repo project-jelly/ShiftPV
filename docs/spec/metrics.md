@@ -40,7 +40,7 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 | `shiftpv_persistent_volumes_released_bytes` | `pool` | `Released` PersistentVolume의 요청 capacity 합계 |
 | `shiftpv_csi_requests_total` | `method`, `code` | 지원하는 CSI lifecycle RPC 완료 횟수 |
 | `shiftpv_csi_request_duration_seconds` | `method` | 지원하는 CSI lifecycle RPC 처리 시간 |
-| `shiftpv_provisioning_step_duration_seconds` | `step` | Controller의 admission·생성·삭제 및 helper 처리 시간. 중첩 단계이므로 합산하지 않는다 |
+| `shiftpv_provisioning_step_duration_seconds` | `step` | Controller의 admission·생성·삭제·helper 및 Node 실행 시간. 중첩 단계이므로 합산하지 않는다 |
 
 `live_capacity_probe`는 Node 요청·응답 대기와 필요 시 helper fallback을 포함한다.
 `statfs_helper`는 실제 helper 실행 시간이며, 정상적인 Node 응답에서는 증가하지 않는다.
@@ -64,6 +64,24 @@ CreateVolume의 세부 `step`은 다음과 같다. 같은 volume의 로그를 �
 `create_intent_read`는 신규 생성에서 잠금 전후 두 번, 기존 intent 재시도에서 한 번 발생할 수 있다.
 `create_resume`는 재개 시도 횟수이며 성공·중복 파일 생성 횟수가 아니다. 실패한 단계도 시간을 기록한다.
 CSI 재시도는 정상 동작이므로 호출 횟수와 node-local effect 횟수를 구분한다.
+
+Node metrics endpoint와 level-2 로그는 다음 실행 단계를 기록한다.
+
+| `step` | 범위 |
+|---|---|
+| `node_effect_lock_wait` | RPC와 Watch가 공유하는 volume 잠금 획득 대기 |
+| `node_effect_intent_read` | 잠금 획득 후 durable intent 조회 |
+| `node_create_effect` | 로컬 생성부터 API 영수증 기록까지 전체 |
+| `node_create_pool_root` | 생성 대상 Pool 경로 조회 |
+| `node_create_authority` | 각 승인 재검증의 API 대기와 읽기 전용 backing 확인 |
+| `node_create_prepare_local` | 승인 재검증 시간을 제외한 소유권 잠금과 로컬 생성 작업 |
+| `node_create_receipt_local` | 승인 재검증 시간을 제외한 로컬 영수증 확인·해시 |
+| `node_create_receipt_record` | 완료 영수증의 API 기록 |
+
+실패·취소된 단계도 기록한다. 로컬 시간에는 filesystem 작업 외에 잠금과 CPU 시간이 포함되며,
+`node_create_authority`는 API rate limiter 대기만의 측정값이 아니다. Watch가 RPC보다 먼저 실행할 수
+있으므로 Controller의 CREATE RPC 시간과 Node의 생성 시간을 volume 로그로 함께 비교한다.
+기존 완료 영수증을 재사용한 호출은 생성 단계를 다시 기록하지 않는다.
 
 `pool`과 `node`는 등록된 Pool 집합으로 제한한다. PersistentVolume series의 `pool`은 volume handle로 찾은
 `ShiftPVVolume`의 현재 copy가 속한 Pool이며, 대응하는 Volume이 없으면 `unknown`으로 접는다. Phase, state, source, method, code와 reason은 코드에
