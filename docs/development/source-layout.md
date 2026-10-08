@@ -43,6 +43,7 @@ src/
 test/
 ├── model/                  exhaustive state/invariant checks
 ├── integration/            Linux mount boundary
+├── measurement/            isolated direct CSI latency profiles
 ├── e2e/kind/               isolated Kubernetes fault injection
 └── e2e/real-node/          service, reboot and soak qualification
 ```

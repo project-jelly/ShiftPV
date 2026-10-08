@@ -127,6 +127,7 @@ func main() {
 	config, client, dynamicClient := clients.Config, clients.Typed, clients.Dynamic
 	admissionClients := wiring.ForConfig(admissionRESTConfig(config), "lifecycle admission", fatal)
 	admissionClient, admissionDynamicClient := admissionClients.Typed, admissionClients.Dynamic
+	controllerService, csiOperator := newCSILifecycle(cfg, config, fatal)
 	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
 	cleanupStore := &cleanupapi.Store{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -139,6 +140,7 @@ func main() {
 	}
 	operator := newHelperRunner(cfg, client, volumeRegistry)
 	operator.ObserveStep = exporter.ObserveProvisioningStep
+	csiOperator.ObserveStep = exporter.ObserveProvisioningStep
 	retryClients := wiring.ForConfig(capacityRetryRESTConfig(config), "capacity retry", fatal)
 	retryPools := &volumeapi.Registry{Client: retryClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
 	capacityRetries := provisioning.NewRetries(retryClients.Typed, retryPools)
@@ -146,13 +148,13 @@ func main() {
 	probeConfig := capacityRetryRESTConfig(config)
 	probeConfig.UserAgent = "shiftpv-capacity-probe"
 	probePools := &volumeapi.Registry{Client: wiring.ForConfig(probeConfig, "capacity probe", fatal).Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
-	apiCapacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: operator, ObserveStep: exporter.ObserveProvisioningStep}
+	apiCapacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: csiOperator, ObserveStep: exporter.ObserveProvisioningStep}
 	var capacityProbe controllercsi.PoolCapacityProbe = apiCapacityProbe
 	poolLocks := &poolcapacity.Locker{}
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
-	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: operator, Timeout: cfg.helperWait}
+	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: csiOperator, Timeout: cfg.helperWait}
 	if cfg.nodeRPCTokenFile != "" {
 		// The outer RPC probe observes the complete call, including API fallback.
 		apiCapacityProbe.ObserveStep = nil
@@ -161,13 +163,10 @@ func main() {
 		effects.RPC = rpc
 		capacityProbe = &remotemeasurement.Client{RPC: rpc, Discovery: effects.Discovery, Pools: probePools, Fallback: capacityProbe, ObserveStep: exporter.ObserveProvisioningStep}
 	}
-	controllerService := &controllercsi.Service{
-		Client: client, Namespace: cfg.namespace, Operator: effects, Volumes: volumeRegistry,
-		ConsumerPlacement: consumer.Inspector{Reader: consumer.KubernetesReader{Client: client}},
-		CapacityPools:     volumeRegistry, CapacityProbe: capacityProbe, PoolLocks: poolLocks, ProvisioningGate: quiesceGate,
-		Cleanups: cleanupStore, CleanupOperator: effects, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
-		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, ObserveStep: exporter.ObserveProvisioningStep, RetryRequests: capacityRetries,
-	}
+	controllerService.Operator, controllerService.CleanupOperator = effects, effects
+	controllerService.CapacityProbe, controllerService.PoolLocks = capacityProbe, poolLocks
+	controllerService.ProvisioningGate = quiesceGate
+	controllerService.ObserveStep, controllerService.RetryRequests = exporter.ObserveProvisioningStep, capacityRetries
 	identityService := &identity.Service{Version: version}
 
 	errCh := make(chan error, 6)
@@ -216,6 +215,23 @@ func admissionRESTConfig(restConfig *rest.Config) *rest.Config {
 	admissionConfig.QPS = 50
 	admissionConfig.Burst = 100
 	return admissionConfig
+}
+
+// newCSILifecycle owns the CSI API budget. Effect execution and capacity probes
+// are injected by main; background observation retains its separate clients.
+func newCSILifecycle(cfg config, restConfig *rest.Config, fail wiring.Fail) (*controllercsi.Service, *helperpod.Runner) {
+	lifecycleConfig := admissionRESTConfig(restConfig)
+	lifecycleConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(lifecycleConfig.QPS, lifecycleConfig.Burst)
+	lifecycleConfig.UserAgent = "shiftpv-csi-lifecycle"
+	clients := wiring.ForConfig(lifecycleConfig, "CSI lifecycle", fail)
+	volumes := &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
+	service := &controllercsi.Service{
+		Client: clients.Typed, Namespace: cfg.namespace, Volumes: volumes, CapacityPools: volumes,
+		ConsumerPlacement: consumer.Inspector{Reader: consumer.KubernetesReader{Client: clients.Typed}},
+		Cleanups:          &cleanupapi.Store{Client: clients.Dynamic}, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
+		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter,
+	}
+	return service, newHelperRunner(cfg, clients.Typed, volumes)
 }
 
 // startMetrics starts the metrics endpoint and inventory observer when the

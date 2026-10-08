@@ -56,6 +56,8 @@ vet:
 
 build:
 	go build ./src/cmd/controller ./src/cmd/node ./src/cmd/uninstall-guard ./src/cmd/volume-helper
+	mkdir -p .tmp
+	go build -tags shiftpv_profile -o .tmp/provisioning-profile ./test/measurement/provisioning
 
 image: image-controller image-node
 
