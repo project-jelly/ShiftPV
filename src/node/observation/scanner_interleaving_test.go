@@ -211,3 +211,67 @@ func interleavingFixture(t *testing.T) (*Scanner, volumeapi.Pool, string, volume
 	scanner := &Scanner{HostRoot: host, TargetRoot: "/pods", Installation: installation{id: copy.InstallationID}, Publications: publications{published: true}, Limit: 256}
 	return scanner, pool, root, copy
 }
+
+func TestScannerPromotionAfterPhysicalCollection(t *testing.T) {
+	scanner, pool, root, seed := interleavingFixture(t)
+	incoming := seed
+	incoming.VolumeID = "shiftpv-22222222222222222222222222222222"
+	incoming.VolumeUID, incoming.CopyID, incoming.Role = "move-volume", "incoming-copy", volume.RoleIncoming
+	serving := incoming
+	serving.CopyID, serving.Role = "promoted-copy", volume.RoleServing
+	authority := func(context.Context) error { return nil }
+	if err := ownership.PopulateIncoming(context.Background(), root, incoming, "copy-operation", authority, func(_ context.Context, path string) error {
+		return os.WriteFile(filepath.Join(path, "payload"), []byte("preserve"), 0600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result := scanner.scan(context.Background(), pool, time.Now(), func(ctx context.Context, root string, known map[string]struct{}, limit int) ([]volumeapi.CopyObservation, bool, error) {
+		paths, truncated, err := scanPhysical(ctx, root, known, limit)
+		if err := ownership.PromoteIncoming(ctx, root, incoming, serving, "promote-operation", authority); err != nil {
+			t.Fatal(err)
+		}
+		return paths, truncated, err
+	}, physicalPathType)
+	if result.Valid || result.Message != "PhysicalInventoryChanged" {
+		t.Fatalf("changing promotion accepted: %+v", result)
+	}
+	fresh := scanner.Scan(context.Background(), pool, time.Now())
+	if !fresh.Valid || fresh.Truncated || len(fresh.Copies) != 2 {
+		t.Fatalf("promotion did not converge: %+v", fresh)
+	}
+	found := false
+	for _, copy := range fresh.Copies {
+		if copy.Identity != nil && *copy.Identity == serving && copy.Present {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("serving copy not verified: %+v", fresh)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "volumes", serving.VolumeID, "payload"))
+	if err != nil || string(data) != "preserve" {
+		t.Fatalf("payload changed: %q %v", data, err)
+	}
+}
+
+func TestScannerReclaimAfterPhysicalCollection(t *testing.T) {
+	scanner, pool, root, copy := interleavingFixture(t)
+	result := scanner.scan(context.Background(), pool, time.Now(), func(ctx context.Context, root string, known map[string]struct{}, limit int) ([]volumeapi.CopyObservation, bool, error) {
+		paths, truncated, err := scanPhysical(ctx, root, known, limit)
+		receipt, digest, reclaimErr := ownership.ReclaimWithResume(ctx, root, copy, "cleanup-operation", func(context.Context, bool) error { return nil })
+		if reclaimErr != nil || digest == "" || !receipt.Purged {
+			t.Fatalf("reclaim failed: %+v %v", receipt, reclaimErr)
+		}
+		return paths, truncated, err
+	}, physicalPathType)
+	if result.Valid || result.Message != "PhysicalInventoryChanged" {
+		t.Fatalf("changing reclaim accepted: %+v", result)
+	}
+	fresh := scanner.Scan(context.Background(), pool, time.Now())
+	if !fresh.Valid || fresh.Truncated || len(fresh.Copies) != 0 {
+		t.Fatalf("reclaim did not converge: %+v", fresh)
+	}
+	if _, err := os.Stat(filepath.Join(root, "volumes", copy.VolumeID)); !os.IsNotExist(err) {
+		t.Fatalf("reclaimed copy remains: %v", err)
+	}
+}
