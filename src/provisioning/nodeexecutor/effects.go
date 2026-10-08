@@ -19,7 +19,7 @@ import (
 )
 
 func (n *Node) execute(ctx context.Context, name string) error {
-	unlock, err := n.gate.Lock(ctx, name)
+	unlock, err := n.lockEffect(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -27,7 +27,7 @@ func (n *Node) execute(ctx context.Context, name string) error {
 	return n.executeLocked(ctx, name)
 }
 func (n *Node) executeLocked(ctx context.Context, name string) error {
-	state, err := n.Volumes.Get(ctx, name)
+	state, err := n.readEffectState(ctx, name)
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -95,31 +95,46 @@ func (n *Node) create(ctx context.Context, expected volumeapi.State) error {
 		return volumeapi.ErrStateConflict
 	}
 	copy := *expected.CurrentCopy
+	defer n.observeStep("node_create_effect", copy.VolumeID)()
+	observation := creationObservation{node: n, volumeID: copy.VolumeID, now: time.Now}
+	rootDone := n.observeStep("node_create_pool_root", copy.VolumeID)
 	root, err := n.poolRoot(ctx, copy)
+	rootDone()
 	if err != nil {
 		return err
 	}
 	authority := func(ctx context.Context) error {
-		current, err := n.Volumes.Get(ctx, copy.VolumeID)
-		if err != nil {
-			return err
-		}
-		if current.UID != copy.VolumeUID || current.Phase != volumeapi.PhaseNodeCreating || current.CurrentCopy == nil || *current.CurrentCopy != copy || current.CreationExecutor == nil || *current.CreationExecutor != n.Identity || current.CreationOperationID != "create-"+copy.VolumeUID || current.ActiveMove != "" || len(current.PublishedNodes) != 0 || !slices.Contains(current.Finalizers, volumeapi.VolumeProtectionFinalizer) {
-			return volumeapi.ErrStateConflict
-		}
-		if _, err := n.Volumes.ReadyPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName); err != nil {
-			return err
-		}
-		return n.localAuthority(ctx, copy, root)
+		return observation.authorize(func() error { return n.creationAuthority(ctx, copy, root) })
 	}
-	if err := ownership.PrepareServing(ctx, root, copy, authority); err != nil {
+	if err := observation.local("node_create_prepare_local", func() error {
+		return ownership.PrepareServing(ctx, root, copy, authority)
+	}); err != nil {
 		return err
 	}
-	digest, err := ownership.ServingReceipt(ctx, root, copy, authority)
+	var digest string
+	if err := observation.local("node_create_receipt_local", func() error {
+		var err error
+		digest, err = ownership.ServingReceipt(ctx, root, copy, authority)
+		return err
+	}); err != nil {
+		return err
+	}
+	defer n.observeStep("node_create_receipt_record", copy.VolumeID)()
+	return n.Volumes.RecordCreationReceipt(ctx, expected, volumeapi.CreationReceipt{OperationID: expected.CreationOperationID, ExecutorUID: n.Identity.PodUID, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), LocalReceiptDigest: digest})
+}
+
+func (n *Node) creationAuthority(ctx context.Context, copy volume.CopyIdentity, root string) error {
+	current, err := n.Volumes.Get(ctx, copy.VolumeID)
 	if err != nil {
 		return err
 	}
-	return n.Volumes.RecordCreationReceipt(ctx, expected, volumeapi.CreationReceipt{OperationID: expected.CreationOperationID, ExecutorUID: n.Identity.PodUID, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), LocalReceiptDigest: digest})
+	if current.UID != copy.VolumeUID || current.Phase != volumeapi.PhaseNodeCreating || current.CurrentCopy == nil || *current.CurrentCopy != copy || current.CreationExecutor == nil || *current.CreationExecutor != n.Identity || current.CreationOperationID != "create-"+copy.VolumeUID || current.ActiveMove != "" || len(current.PublishedNodes) != 0 || !slices.Contains(current.Finalizers, volumeapi.VolumeProtectionFinalizer) {
+		return volumeapi.ErrStateConflict
+	}
+	if _, err := n.Volumes.ReadyPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName); err != nil {
+		return err
+	}
+	return n.localAuthority(ctx, copy, root)
 }
 func (n *Node) reclaim(ctx context.Context, approved cleanupapi.Cleanup) error {
 	root, err := n.poolRoot(ctx, approved.Spec.Target)

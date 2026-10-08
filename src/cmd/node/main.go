@@ -85,7 +85,7 @@ func main() {
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
 	errCh := make(chan error, 5)
 	if os.Getenv("POD_UID") != "" {
-		startNodeEffects(ctx, *nodeName, *hostRoot, *rpcAddress, *controllerAccount, errCh)
+		startNodeEffects(ctx, *nodeName, *hostRoot, *rpcAddress, *controllerAccount, exporter.ObserveProvisioningStep, errCh)
 	}
 	go func() { errCh <- readinessReconciler.Run(ctx) }()
 	go func() {

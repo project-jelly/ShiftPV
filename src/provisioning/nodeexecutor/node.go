@@ -29,6 +29,7 @@ type Node struct {
 	HostRoot       string
 	RPCCertificate string
 	RPCPort        string
+	ObserveStep    func(string, time.Duration)
 	gate           execution.Gate
 }
 

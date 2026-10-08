@@ -74,12 +74,12 @@ func (n *Node) Execute(ctx context.Context, req *protocol.EffectRequest, operati
 	if req == nil || req.ExecutorUid != n.Identity.PodUID || req.NodeName != n.Identity.NodeName {
 		return volumeapi.ErrStateConflict
 	}
-	unlock, err := n.gate.Lock(ctx, req.VolumeName)
+	unlock, err := n.lockEffect(ctx, req.VolumeName)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	state, err := n.Volumes.Get(ctx, req.VolumeName)
+	state, err := n.readEffectState(ctx, req.VolumeName)
 	if err != nil {
 		return err
 	}
