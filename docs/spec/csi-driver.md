@@ -75,6 +75,10 @@ Provisioning은 선택된 Pool의 exact identity와 fresh, valid, complete inven
 `creationExecutor`에 고정하고 `NodeCreating`으로 전환한다. Node가 exact directory와 marker를 멱등 생성하고
 placement digest를 포함한 `creationReceipt`를 기록하면 Controller가 `Ready`로 전환한다.
 
+승인된 생성의 실행·복구는 동일한 Volume·copy·operation·executor와 보호된 Pool의 최신 backing을
+재검증한다. 생성 중간 경로 때문에 inventory가 invalid여도 이 작업은 복구할 수 있으며, 로컬 marker와
+inode 검증은 유지한다. 전체 inventory 검사는 새 배치 승인에 계속 적용한다.
+
 Controller는 승인 기록 후 해당 Pod에 gRPC `CreateCopy`를 호출하고, 응답 뒤 API receipt를 검증한다.
 `GetCapacity`는 exact Pool UID·measurement evidence·nonce를 확인해 실시간 filesystem 용량을 반환한다.
 요청에는 filesystem 경로를 받지 않는다. Node는 API에서 승인된 경로를 읽고 mount identity를 재검증한다.

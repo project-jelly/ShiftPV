@@ -58,9 +58,13 @@ The transient inventory reason had already cleared in the later Pool snapshot,
 so its underlying scan failure was not captured. Investigation of inventory
 observation during concurrent creation remains a separate candidate; this run
 does not establish a new safety regression or a successful retry convergence.
-A DI regression models the observed post-effect inventory rejection and verifies
-receipt withholding and resumption with unchanged copy, operation and executor;
-it does not reproduce the scanner's underlying failure.
+The initial DI regression withheld the receipt and manually restored inventory
+before retry. Follow-up tests connect persisted creation interruption states to
+the production scanner, Pool reconciliation and Node authorization. They exposed
+a recovery blocker before the final rename: the incomplete serving stage makes
+inventory invalid, preventing its own recovery. Approved Node creation now checks
+exact authority and fresh backing separately from new-placement inventory.
+These tests do not identify the original run's scan failure or measure new latency.
 
 ## Interpretation and provenance
 

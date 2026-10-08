@@ -45,6 +45,27 @@ func ValidCreationReceipt(s State) bool {
 		receipt.OperationID == operation && receipt.OperationID == s.CreationOperationID && receipt.ExecutorUID == s.CreationExecutor.PodUID && s.CreationExecutor.NodeName == s.CurrentCopy.NodeName
 }
 
+// CreationPoolForIdentity checks the protected Pool and fresh backing for an
+// already-approved creation. The caller must verify the live operation and
+// executor; complete inventory and peer admission apply to new placement.
+func (r *Registry) CreationPoolForIdentity(ctx context.Context, copy volume.CopyIdentity) (Pool, error) {
+	if copy.Validate() != nil || copy.Role != volume.RoleServing {
+		return Pool{}, ErrStateConflict
+	}
+	pool, err := r.protectedCreationPool(ctx, copy)
+	if err != nil {
+		return Pool{}, err
+	}
+	if check := pool.ConfigurationCheck(); !check.OK {
+		return Pool{}, fmt.Errorf("%w: creation Pool %q: %s", ErrPoolNotReady, pool.Name, check.Reason)
+	}
+	now, staleAfter := r.readiness()
+	if ready, reason := pool.ReadyAt(now, staleAfter); !ready {
+		return Pool{}, fmt.Errorf("%w: creation Pool %q: %s", ErrPoolNotReady, pool.Name, reason)
+	}
+	return pool, nil
+}
+
 // BindCreation switches an unexecuted Pending intent to NodeCreating. Older
 // helpers cannot authorize this phase. Rebinding retains the exact operation
 // and copy, whose local filesystem lock serializes Pod incarnations.

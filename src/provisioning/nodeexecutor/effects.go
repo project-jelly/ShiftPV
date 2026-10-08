@@ -131,7 +131,7 @@ func (n *Node) creationAuthority(ctx context.Context, copy volume.CopyIdentity, 
 	if current.UID != copy.VolumeUID || current.Phase != volumeapi.PhaseNodeCreating || current.CurrentCopy == nil || *current.CurrentCopy != copy || current.CreationExecutor == nil || *current.CreationExecutor != n.Identity || current.CreationOperationID != "create-"+copy.VolumeUID || current.ActiveMove != "" || len(current.PublishedNodes) != 0 || !slices.Contains(current.Finalizers, volumeapi.VolumeProtectionFinalizer) {
 		return volumeapi.ErrStateConflict
 	}
-	if _, err := n.Volumes.ReadyPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName); err != nil {
+	if _, err := n.Volumes.CreationPoolForIdentity(ctx, copy); err != nil {
 		return err
 	}
 	return n.localAuthority(ctx, copy, root)

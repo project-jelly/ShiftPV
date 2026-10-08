@@ -61,6 +61,7 @@ git diff --check
 
 | Contract | 최소 fault boundary |
 |---|---|
+| Node creation | copy intent·stage mkdir·placement marker·rename·API receipt 경계의 중단 상태를 실제 Pool reconcile·승인 검사에 연결; inventory 수동 보정 없이 동일 작업으로 복구 |
 | Owner commit | CAS 수락 전/후, 응답 유실, stale currentCopy/owner 관찰, 동시 delete/move |
 | Publication | NodePublish lock 획득 전/후, publishedNodes와 actual mount 관찰 차이, kubelet target 잔존, 재시작 |
 | Copy | partial write, ENOSPC, read-only, checksum mismatch, Job 교체, copy receipt 응답 유실 |
@@ -191,8 +192,9 @@ Node effect observation tests block authority API reads independently of the
 shared gate, reject failed authority before filesystem work, and preserve the
 creation receipt on retry. An injected clock verifies local durations exclude
 nested authority checks, including failures and subsequent stages.
-Inject invalid inventory after the serving directory exists: withhold the API
-receipt, then restore inventory and resume the same copy and operation.
+Inject invalid inventory after the serving directory exists: the approved
+creation must record the same operation's receipt while new placement stays
+blocked. Reconcile interrupted serving stages without manually restoring inventory.
 Reject wrong caller/audience, executor UID, operation ID and Pool evidence.
 Repeat capacity reads with mount loss; Pool generation/scanEpoch must not change.
 With RPC disabled or older Nodes, verify the API probe nonce and answer still

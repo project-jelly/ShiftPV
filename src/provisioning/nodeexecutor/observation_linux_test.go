@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ktesting "k8s.io/client-go/testing"
@@ -52,7 +51,7 @@ func TestNativeCreationObservationKeepsReceiptOnRetry(t *testing.T) {
 	}
 }
 
-func TestCreationObservationRejectsInventoryChangeAfterEffectAndResumes(t *testing.T) {
+func TestCreationObservationCompletesDespiteInventoryChangeAfterEffect(t *testing.T) {
 	client, node, dynamic, _, state := fixture(t)
 	ctx := context.Background()
 	node.HostRoot = t.TempDir()
@@ -81,29 +80,22 @@ func TestCreationObservationRejectsInventoryChangeAfterEffectAndResumes(t *testi
 	})
 	counts := map[string]int{}
 	node.ObserveStep = func(step string, _ time.Duration) { counts[step]++ }
-	if err := node.execute(ctx, testID); !errors.Is(err, volumeapi.ErrPoolNotReady) || !injected {
-		t.Fatalf("post-effect invalid inventory permitted receipt: injected=%v err=%v", injected, err)
+	if err := node.execute(ctx, testID); err != nil || !injected {
+		t.Fatalf("inventory change blocked approved creation: injected=%v err=%v", injected, err)
 	}
-	interrupted, err := client.Volumes.Get(ctx, testID)
-	if err != nil || interrupted.CreationReceipt != nil || interrupted.Phase != volumeapi.PhaseNodeCreating || counts["node_create_receipt_record"] != 0 || counts["node_create_prepare_local"] != 1 {
-		t.Fatalf("failed authority was not preserved: state=%+v steps=%v err=%v", interrupted, counts, err)
+	created, err := client.Volumes.Get(ctx, testID)
+	if err != nil || !volumeapi.ValidCreationReceipt(created) || counts["node_create_receipt_record"] != 1 || counts["node_create_prepare_local"] != 1 {
+		t.Fatalf("approved creation lacks receipt: state=%+v steps=%v err=%v", created, counts, err)
 	}
-	pool, err := dynamic.Resource(volumeapi.PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := unstructured.SetNestedField(pool.Object, true, "status", "inventory", "valid"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := dynamic.Resource(volumeapi.PoolResource).UpdateStatus(ctx, pool, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
+	if _, err := client.Volumes.ReadyPoolForIdentity(ctx, "pool-a", "pool-uid", node.Identity.NodeName); !errors.Is(err, volumeapi.ErrPoolNotReady) {
+		t.Fatalf("invalid inventory admitted new placement: %v", err)
 	}
 	if err := node.execute(ctx, testID); err != nil {
 		t.Fatal(err)
 	}
 	resumed, err := client.Volumes.Get(ctx, testID)
-	if err != nil || !volumeapi.ValidCreationReceipt(resumed) || resumed.UID != interrupted.UID || resumed.CreationOperationID != interrupted.CreationOperationID || !reflect.DeepEqual(resumed.CurrentCopy, interrupted.CurrentCopy) || !reflect.DeepEqual(resumed.CreationExecutor, interrupted.CreationExecutor) || counts["node_create_effect"] != 2 || counts["node_create_receipt_record"] != 1 {
-		t.Fatalf("resume replaced intent or failed receipt: state=%+v steps=%v err=%v", resumed, counts, err)
+	if err != nil || !reflect.DeepEqual(created, resumed) || counts["node_create_effect"] != 1 || counts["node_create_receipt_record"] != 1 {
+		t.Fatalf("retry changed intent or receipt: state=%+v steps=%v err=%v", resumed, counts, err)
 	}
 }
 
