@@ -17,7 +17,7 @@ Set `KUBECONFIG` to that installation. Build for the node architecture (`arm64`
 or `amd64`), then copy the binary into the controller:
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o .tmp/provisioning-profile ./test/measurement/provisioning
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags shiftpv_profile -o .tmp/provisioning-profile ./test/measurement/provisioning
 kubectl -n shiftpv-system exec -i deployment/shiftpv-controller -c shiftpv-controller -- \
   sh -c 'cat > /tmp/provisioning-profile; chmod 700 /tmp/provisioning-profile' < .tmp/provisioning-profile
 kubectl -n shiftpv-system exec deployment/shiftpv-controller -c shiftpv-controller -- \
@@ -35,6 +35,9 @@ Concurrent cases default to ten iterations (twenty samples). Use `-count 5`
 for ten samples. `same-pool` requires exactly one eligible Pool in the group.
 `different-pool` requires registered independent disks or thick LVM volumes;
 Kind directory Pools and unsupported loop devices do not qualify.
+
+The `shiftpv_profile` build tag keeps this manual driver out of product coverage.
+`make build` compiles it separately so CI still checks the executable.
 
 JSONL start/end timestamps bound the timed window. Seed creation, state checks
 and deletion are outside it. Correlate level-2 controller logs by volume ID and

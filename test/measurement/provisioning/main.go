@@ -1,3 +1,5 @@
+//go:build shiftpv_profile
+
 // provisioning measures direct CSI calls in an isolated test installation.
 // It creates no PVC/Pod and excludes scheduler, provisioner and CDI latency.
 package main
