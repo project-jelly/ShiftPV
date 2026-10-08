@@ -45,6 +45,26 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 `live_capacity_probe`는 Node 요청·응답 대기와 필요 시 helper fallback을 포함한다.
 `statfs_helper`는 실제 helper 실행 시간이며, 정상적인 Node 응답에서는 증가하지 않는다.
 
+CreateVolume의 세부 `step`은 다음과 같다. 같은 volume의 로그를 연결해 재시도를 구분한다.
+
+| 단계 | `step` |
+|---|---|
+| 잠금 획득까지의 대기 | `create_volume_lock_wait`, `create_node_lock_wait`, `create_pool_lock_wait` |
+| cleanup fence 확인 | `create_cleanup_fence` |
+| 기존 생성 조회·재개 | `create_intent_read`, `create_resume` |
+| 신규 Pool 후보 조회 | `create_pool_list` |
+| 예약 합계와 API 목록 조회 | `create_capacity_ledger`, `create_volume_list`, `create_move_list` |
+| 실제 filesystem 용량 확인 | `create_filesystem_capacity` |
+| 신규 생성 intent 기록 | `create_intent_record` |
+| 디렉터리 실행·완료 기록·helper 정리 | `create_directory`, `create_complete`, `create_finalize` |
+| 응답 topology 조회·검증 | `create_topology` |
+
+`capacity_admission`은 기존 intent 재개 또는 신규 admission 전체를, `create_effect`는 생성 효과와
+완료·정리를 포함한다. 잠금 대기는 획득 직후 끝나며 잠금 보유 시간을 포함하지 않는다.
+`create_intent_read`는 신규 생성에서 잠금 전후 두 번, 기존 intent 재시도에서 한 번 발생할 수 있다.
+`create_resume`는 재개 시도 횟수이며 성공·중복 파일 생성 횟수가 아니다. 실패한 단계도 시간을 기록한다.
+CSI 재시도는 정상 동작이므로 호출 횟수와 node-local effect 횟수를 구분한다.
+
 `pool`과 `node`는 등록된 Pool 집합으로 제한한다. PersistentVolume series의 `pool`은 volume handle로 찾은
 `ShiftPVVolume`의 현재 copy가 속한 Pool이며, 대응하는 Volume이 없으면 `unknown`으로 접는다. Phase, state, source, method, code와 reason은 코드에
 고정된 집합 밖의 값을 `Unknown`으로 접는다. Volume UID, Move UID, copy ID, operation/executor ID,

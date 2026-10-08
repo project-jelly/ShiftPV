@@ -100,10 +100,13 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		}
 		defer leave()
 	}
-	unlock := s.lifecycles.Lock(request.id)
+	unlock := s.observeLock("create_volume_lock_wait", request.id, &s.lifecycles, request.id)
 	defer unlock()
-	if err := s.ensureNoCleanupFence(ctx, request.id); err != nil {
-		return nil, err
+	fenceDone := s.observeStep("create_cleanup_fence", request.id)
+	fenceErr := s.ensureNoCleanupFence(ctx, request.id)
+	fenceDone()
+	if fenceErr != nil {
+		return nil, fenceErr
 	}
 
 	state, beginErr := s.beginCreate(ctx, request, req.GetParameters())
@@ -121,19 +124,24 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	}
 	// A compatible retry resumes the stored intent, not the latest preference.
 	request.nodeName, request.capacity = state.InitialNode, state.CapacityBytes
-	poolNodes, poolErr := s.Volumes.PoolNodesForGroup(ctx, requestedPoolGroup(req.GetParameters()))
+	return s.createVolumeResponse(ctx, request.id, request.nodeName, request.capacity, req.GetParameters())
+}
+
+func (s *Service) createVolumeResponse(ctx context.Context, id, nodeName string, capacity int64, parameters map[string]string) (*csi.CreateVolumeResponse, error) {
+	defer s.observeStep("create_topology", id)()
+	poolNodes, poolErr := s.Volumes.PoolNodesForGroup(ctx, requestedPoolGroup(parameters))
 	if poolErr != nil {
 		return nil, kubernetesAPIError("list volume topology", poolErr)
 	}
-	if !slices.Contains(poolNodes, request.nodeName) {
-		return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", request.nodeName)
+	if !slices.Contains(poolNodes, nodeName) {
+		return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", nodeName)
 	}
-	accessibleNodes, err := s.accessibleNodes(ctx, req.GetParameters(), request.nodeName, poolNodes)
+	accessibleNodes, err := s.accessibleNodes(ctx, parameters, nodeName, poolNodes)
 	if err != nil {
 		return nil, err
 	}
 
-	return volumeResponse(request.id, request.nodeName, accessibleNodes, request.capacity), nil
+	return volumeResponse(id, nodeName, accessibleNodes, capacity), nil
 }
 
 // createServingCopy performs the node-local create effect and records its
@@ -143,13 +151,22 @@ func (s *Service) createServingCopy(ctx context.Context, id string, state volume
 	if state.CurrentCopy == nil {
 		return status.Error(codes.FailedPrecondition, "volume creation has no copy identity")
 	}
-	if createErr := s.Operator.CreateCopy(ctx, *state.CurrentCopy); createErr != nil {
+	createDone := s.observeStep("create_directory", id)
+	createErr := s.Operator.CreateCopy(ctx, *state.CurrentCopy)
+	createDone()
+	if createErr != nil {
 		return directoryOperationError("prepare identified volume directory", createErr)
 	}
-	if completeErr := s.Volumes.CompleteCreate(ctx, id, state.UID, *state.CurrentCopy); completeErr != nil {
+	completeDone := s.observeStep("create_complete", id)
+	completeErr := s.Volumes.CompleteCreate(ctx, id, state.UID, *state.CurrentCopy)
+	completeDone()
+	if completeErr != nil {
 		return kubernetesAPIError("complete volume creation", completeErr)
 	}
-	if finalizeErr := s.Operator.FinalizeCreate(ctx, *state.CurrentCopy); finalizeErr != nil {
+	finalizeDone := s.observeStep("create_finalize", id)
+	finalizeErr := s.Operator.FinalizeCreate(ctx, *state.CurrentCopy)
+	finalizeDone()
+	if finalizeErr != nil {
 		return directoryOperationError("settle volume creation helper", finalizeErr)
 	}
 	return nil
@@ -410,4 +427,11 @@ func (s *Service) observeStep(step, volumeID string) func() {
 			s.ObserveStep(step, elapsed)
 		}
 	}
+}
+
+func (s *Service) observeLock(step, volumeID string, locker *poolcapacity.Locker, key string) func() {
+	done := s.observeStep(step, volumeID)
+	unlock := locker.Lock(key)
+	done()
+	return unlock
 }
