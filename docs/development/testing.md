@@ -164,10 +164,22 @@ negative bounds and invalid topology before admission. Compatible retries cover
 Pending/NodeCreating/Ready and retain actual capacity and copy identity; a real
 Registry test resumes a saved intent through fresh controller instances.
 
+Create observation tests separate new admission from existing-intent retries,
+inject Volume/Move list failures, and block a real Pool UID lock and capacity
+probe independently. Lock-wait timing must finish before protected work; failed
+API stages must report duration without proceeding to intent or filesystem work.
+
 For the two-VM/250Gi Pool scenario, compare reservation return → next
 `CreateVolume` start, rejection helper count, and successful creation duration.
 Use Controller level-2 step logs and, when enabled,
 `shiftpv_provisioning_step_duration_seconds`. Nested durations must not be summed.
+Use the [CreateVolume step names](../spec/metrics.md#emitted-signals) to separate
+lock wait, API lists, intent recording, node effects and topology response.
+Compare repeated calls for the same volume ID; `create_resume` marks an existing
+intent retry, while `create_intent_record` marks a new admission attempt.
+The [direct CSI profile](../../test/measurement/provisioning/README.md) compares
+new calls, completed-intent retries and concurrent callers in an isolated cluster.
+Its DI regression checks CSI client budget isolation and independent Pool holds.
 Confirm `shiftpv.io/capacity-retry` preserves selected-node, and repeat with a
 Controller restart and a different Pool group. Check that Deleting Volumes and
 unsettled Move holds remain charged. Fake API timing is not VM latency evidence.

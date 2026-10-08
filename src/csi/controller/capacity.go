@@ -32,7 +32,7 @@ type PoolCapacityProbe interface {
 func (s *Service) beginCreateWithinPool(ctx context.Context, request createRequest, parameters map[string]string) (volumeapi.State, error) {
 	id, requestName, nodeName, requestedBytes := request.id, request.name, request.nodeName, request.capacity
 	defer s.observeStep("capacity_admission", id)()
-	existing, err := s.Volumes.Get(ctx, id)
+	existing, err := s.readCreationIntent(ctx, id)
 	if err == nil {
 		return s.resumeExistingCreate(ctx, existing, request, parameters)
 	}
@@ -40,10 +40,10 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, request createReque
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
 
-	unlock := s.poolLifecycles.Lock(nodeName)
+	unlock := s.observeLock("create_node_lock_wait", id, &s.poolLifecycles, nodeName)
 	defer unlock()
 
-	existing, err = s.Volumes.Get(ctx, id)
+	existing, err = s.readCreationIntent(ctx, id)
 	if err == nil {
 		return s.resumeExistingCreate(ctx, existing, request, parameters)
 	}
@@ -52,6 +52,11 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, request createReque
 	}
 
 	return s.placeNewCreate(ctx, id, requestName, nodeName, requestedBytes, parameters)
+}
+
+func (s *Service) readCreationIntent(ctx context.Context, id string) (volumeapi.State, error) {
+	defer s.observeStep("create_intent_read", id)()
+	return s.Volumes.Get(ctx, id)
 }
 
 func requestedPoolGroup(parameters map[string]string) string {
@@ -69,6 +74,7 @@ func poolGroup(pool volumeapi.Pool) string {
 }
 
 func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) (volumeapi.State, error) {
+	defer s.observeStep("create_resume", request.id)()
 	if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
 		return volumeapi.State{}, err
 	}
@@ -95,7 +101,9 @@ func poolSelectionError(err error) error {
 }
 
 func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
+	poolsDone := s.observeStep("create_pool_list", id)
 	pools, err := s.CapacityPools.ReadyPools(ctx)
+	poolsDone()
 	if err != nil {
 		return volumeapi.State{}, poolSelectionError(err)
 	}
@@ -133,14 +141,16 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 // mobility holds. Node serialization alone cannot protect independent Pools.
 func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, id, requestName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, poolFit, error) {
 	if s.PoolLocks != nil {
-		unlock := s.PoolLocks.Lock(pool.UID)
+		unlock := s.observeLock("create_pool_lock_wait", id, s.PoolLocks, pool.UID)
 		defer unlock()
 	}
-	fit, err := s.poolFits(ctx, pool, requestName, requestedBytes, parameters)
+	fit, err := s.poolFits(ctx, pool, id, requestName, requestedBytes, parameters)
 	if err != nil || !fit.allowed {
 		return volumeapi.State{}, fit, err
 	}
+	intentDone := s.observeStep("create_intent_record", id)
 	created, err := s.Volumes.BeginCreateInPool(ctx, id, requestName, pool.NodeName, requestedBytes, pool.Name, pool.UID)
+	intentDone()
 	return created, fit, err
 }
 
@@ -149,27 +159,27 @@ type poolFit struct {
 	denial  error
 }
 
-func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, requestName string, requestedBytes int64, parameters map[string]string) (poolFit, error) {
+func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, id, requestName string, requestedBytes int64, parameters map[string]string) (poolFit, error) {
 	limitBytes, err := poolLimitBytes(pool)
 	if err != nil {
 		return poolFit{denial: status.Errorf(codes.FailedPrecondition, "Pool %q capacity limit is invalid: %v", pool.Name, err)}, nil
 	}
-	reservedBytes, err := s.poolReservedBytes(ctx, pool.UID)
+	reservedBytes, err := s.poolReservedBytes(ctx, pool.UID, id)
 	if err != nil {
 		return poolFit{}, err
 	}
 	if !poolcapacity.FitsReservation(requestedBytes, reservedBytes, limitBytes) {
-		return poolFit{denial: s.capacityDenied(ctx, parameters, requestName, pool, requestedBytes, limitBytes, nil,
+		return poolFit{denial: s.capacityDenied(ctx, parameters, id, requestName, pool, requestedBytes, limitBytes, nil,
 			"Pool %q reservation limit exceeded: requested=%d reserved=%d limit=%d",
 			pool.Name, requestedBytes, reservedBytes, limitBytes)}, nil
 	}
 
-	stats, err := s.CapacityProbe.StatFSForPool(ctx, pool)
+	stats, err := s.inspectCapacity(ctx, pool, id)
 	if err != nil {
 		return poolFit{denial: capacityProbeError("inspect Pool filesystem capacity", err)}, nil
 	}
 	if requestedBytes > stats.AvailableBytes {
-		return poolFit{denial: s.capacityDenied(ctx, parameters, requestName, pool, requestedBytes, limitBytes, &stats,
+		return poolFit{denial: s.capacityDenied(ctx, parameters, id, requestName, pool, requestedBytes, limitBytes, &stats,
 			"Pool %q filesystem space is insufficient: requested=%d available=%d",
 			pool.Name, requestedBytes, stats.AvailableBytes)}, nil
 	}
@@ -178,7 +188,7 @@ func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, requestName
 
 // Capacity size and placement ownership are independent. Only a scheduler-managed
 // claim may release its selected node; fixed or unknown placement must retry.
-func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, requestName string, pool volumeapi.Pool, requestedBytes, limitBytes int64, stats *poolcapacity.Filesystem, format string, args ...any) error {
+func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, id, requestName string, pool volumeapi.Pool, requestedBytes, limitBytes int64, stats *poolcapacity.Filesystem, format string, args ...any) error {
 	message := fmt.Sprintf(format, args...)
 	if s.ConsumerPlacement == nil {
 		return status.Error(codes.Unavailable, "consumer placement inspection is not configured")
@@ -195,7 +205,7 @@ func (s *Service) capacityDenied(ctx context.Context, parameters map[string]stri
 			message += "; request exceeds Pool limit; change capacity configuration or request size"
 		}
 		if requestedBytes <= limitBytes && placement.Placement == consumer.Fixed && stats == nil && !s.observedTotalCanFit(pool, requestedBytes) {
-			observed, err := s.CapacityProbe.StatFSForPool(ctx, pool)
+			observed, err := s.inspectCapacity(ctx, pool, id)
 			if err != nil {
 				return capacityProbeError("inspect Pool filesystem capacity", err)
 			}
@@ -212,12 +222,22 @@ func (s *Service) capacityDenied(ctx context.Context, parameters map[string]stri
 	return status.Error(codes.ResourceExhausted, message)
 }
 
-func (s *Service) poolReservedBytes(ctx context.Context, poolUID string) (int64, error) {
+func (s *Service) inspectCapacity(ctx context.Context, pool volumeapi.Pool, id string) (poolcapacity.Filesystem, error) {
+	defer s.observeStep("create_filesystem_capacity", id)()
+	return s.CapacityProbe.StatFSForPool(ctx, pool)
+}
+
+func (s *Service) poolReservedBytes(ctx context.Context, poolUID, volumeID string) (int64, error) {
+	defer s.observeStep("create_capacity_ledger", volumeID)()
+	volumesDone := s.observeStep("create_volume_list", volumeID)
 	volumes, err := s.CapacityPools.ListVolumes(ctx)
+	volumesDone()
 	if err != nil {
 		return 0, kubernetesAPIError("list volume owners", err)
 	}
+	movesDone := s.observeStep("create_move_list", volumeID)
 	moves, err := s.CapacityPools.ListMoves(ctx)
+	movesDone()
 	if err != nil {
 		return 0, kubernetesAPIError("list capacity-approved moves", err)
 	}
