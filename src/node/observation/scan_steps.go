@@ -4,16 +4,16 @@ package observation
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
-
-// This file holds the per-step halves of Scan. Scan itself keeps the ownership
-// store and the inventory handle so their lifetimes are unchanged, and calls
-// these helpers in the order the original body ran them; every guard, early
-// return and message string is kept exactly as it was.
 
 // configurationInvalid repeats the fail-closed precondition of an inventory
 // scan: a scanner that cannot name an installation, a publication, an absolute
@@ -77,6 +77,94 @@ func (s *Scanner) observeItem(item ownership.Observation, pool volumeapi.Pool, r
 		}
 	}
 	return observation
+}
+
+// Physical paths are collected before placements: native creation writes its
+// placement before exposing the serving directory. Paths moved or removed since
+// collection are rechecked; every remaining unrecorded path stays a problem.
+func (s *Scanner) observeUnrecorded(ctx context.Context, root string, paths []volumeapi.CopyObservation,
+	known map[string]struct{}, result *volumeapi.PoolInventory, pathType func(string, string) (bool, bool, error)) bool {
+	for _, item := range paths {
+		if err := ctx.Err(); err != nil {
+			result.Message = "PhysicalInventoryFailed: " + err.Error()
+			return false
+		}
+		key := strings.TrimPrefix(item.Marker, "path:")
+		if _, found := known[key]; found {
+			continue
+		}
+		present, directory, err := pathType(root, key)
+		if err != nil {
+			result.Message = "PhysicalInventoryFailed: " + err.Error()
+			return false
+		}
+		if !present {
+			if !completedCreationStage(key, result.Copies) {
+				result.Message = "PhysicalInventoryChanged"
+				return false
+			}
+			continue
+		}
+		if len(result.Copies) == s.Limit {
+			result.Truncated = true
+			break
+		}
+		item.Problem = "UnrecordedPath"
+		if !directory {
+			item.Problem = "UnexpectedPathType"
+		}
+		result.Copies = append(result.Copies, item)
+	}
+	return true
+}
+
+// Only a verified present serving copy explains its vanished creation stage.
+// Other disappearing paths require a fresh scan rather than an absence proof.
+func completedCreationStage(key string, copies []volumeapi.CopyObservation) bool {
+	for _, item := range copies {
+		if item.Identity == nil || !item.Present || item.Problem != "" {
+			continue
+		}
+		if item.Identity.Role == volume.RoleServing && key == ".shiftpv/incoming/create-"+item.Identity.CopyID {
+			return true
+		}
+	}
+	return false
+}
+
+// Walk each parent without following symlinks, including .shiftpv. A missing
+// collected path is not a copy-absence receipt or permission to delete data.
+func physicalPathType(root, key string) (bool, bool, error) {
+	parts := strings.Split(key, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return false, false, ownership.ErrIdentity
+		}
+	}
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return false, false, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	for _, part := range parts[:len(parts)-1] {
+		next, err := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				return false, false, nil
+			}
+			return false, false, err
+		}
+		_ = unix.Close(fd)
+		fd = next
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstatat(fd, parts[len(parts)-1], &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	return true, stat.Mode&unix.S_IFMT == unix.S_IFDIR, nil
 }
 
 // copyProblemMessage summarizes an otherwise clean inventory: a single troubled
