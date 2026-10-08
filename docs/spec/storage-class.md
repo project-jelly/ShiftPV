@@ -99,11 +99,18 @@ inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경�
 
 ### Capacity denial
 
-용량 부족 시 scheduler가 아직 배치할 수 있는 consumer에는 `ResourceExhausted`를 반환해 다른 노드
-선택을 허용한다. CDI scratch처럼 PVC가 Pod 소유이고 그 Pod가 이미 선택 노드에 배치된 경우에는,
-요청량이 Pool 한도와 filesystem 전체 크기 안에 들어갈 수 있다면 `Unavailable`을 반환한다.
-external-provisioner가 `selected-node`를 유지한 채 재시도해야 용량 반환 후 해당 PVC가 수렴한다.
-PVC 또는 Pod 조회가 일시적으로 실패하면 재배치 결정을 추측하지 않고 재시도한다.
+용량 부족의 원인과 PVC 재배치 가능 여부를 별도로 판정한다.
+
+- 일반 미배치 consumer는 `ResourceExhausted`로 다른 노드 선택을 허용한다.
+- 배치된 consumer와 CDI prime·scratch는 `Unavailable`로 노드 지정을 유지한다.
+  prime은 원본 PVC의 UID·selected-node·populator 종류를 확인하므로 Pod 생성 전에도 보호한다.
+- 조회 실패·불명확한 배치 계약은 재시도한다. PVC UID·노드 변경은 `FailedPrecondition`이다.
+- 고정된 요청이 개별 Pool 한도나 filesystem 전체 크기를 초과해도 노드를 지우지 않는다.
+  이 경우 공간 반환만으로 해결되지 않으며 Pool 설정 또는 요청 크기 변경이 필요하다.
+
+이미 selected-node가 지워진 CDI PVC는 이 수정으로 자동 보정되지 않는다. 원본 PVC·prime·
+consumer의 identity를 확인하고 CDI 운영 절차로 작업 Pod를 재생성해야 한다. ShiftPV는
+노드 annotation을 임의 복원하거나 importer Pod를 삭제하지 않는다.
 
 ### Capacity retry notification
 
@@ -112,8 +119,8 @@ and probe timestamp. A fresh Ready observation may classify a logical shortage
 as temporary without another helper. Unknown, stale or apparently undersized
 observations require a live probe; approval always checks live free space.
 
-Pod-owned PVCs fixed to a node are indexed by PVC UID, node and Pool group after
-a temporary capacity denial. Volume, Move and Pool events re-read the durable
+Fixed or uncertain PVCs are indexed by PVC UID, node and Pool group after
+a capacity denial. Volume, Move and Pool events re-read the durable
 ledger and notify eligible Pending PVCs through `shiftpv.io/capacity-retry`.
 PVC updates retain UID and resourceVersion, and never change selected-node.
 The index is bounded and ephemeral; normal provisioner retries recover missed

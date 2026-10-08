@@ -20,6 +20,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -67,6 +68,7 @@ type Service struct {
 	Namespace               string
 	Operator                DirectoryOperator
 	Volumes                 VolumeRegistry
+	ConsumerPlacement       consumer.Inspection
 	CapacityPools           PoolCapacityRegistry
 	CapacityProbe           PoolCapacityProbe
 	PoolLocks               *poolcapacity.Locker

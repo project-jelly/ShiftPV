@@ -153,6 +153,12 @@ resource snapshot, logs, metrics, directory inventory를 보존하고 자동 재
 
 ## CDI provisioning latency
 
+Inject claim/Pod reads and placement inspection failures. Cover CDI import/upload
+prime before Pod creation, reverse ownership, ordinary scheduler consumers,
+fixed oversized requests, UID/node changes, and capacity-return convergence.
+The focused Pool capacity Kind test models scratch and prime with the real
+external-provisioner; full CDI DataVolume import remains a separate qualification.
+
 For the two-VM/250Gi Pool scenario, compare reservation return → next
 `CreateVolume` start, rejection helper count, and successful creation duration.
 Use Controller level-2 step logs and, when enabled,

@@ -24,6 +24,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -258,6 +259,9 @@ func (o *blockingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupap
 }
 
 func configuredService(service *Service) *Service {
+	if service.ConsumerPlacement == nil {
+		service.ConsumerPlacement = consumer.Inspector{Reader: consumer.KubernetesReader{Client: service.Client}}
+	}
 	if service.Volumes == nil {
 		service.Volumes = &fakeVolumeRegistry{poolNodes: []string{"worker-a", "worker-b"}}
 	}

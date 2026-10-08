@@ -13,9 +13,10 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 )
 
-const selectedNodeAnnotation = "volume.kubernetes.io/selected-node"
+const selectedNodeAnnotation = consumer.SelectedNode
 
 type PoolCapacityRegistry interface {
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
@@ -173,21 +174,25 @@ func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, requestName
 	return poolFit{allowed: true}, nil
 }
 
-// A scheduler-owned PVC can be moved to another node after ResourceExhausted.
-// A Pod-owned PVC created after its consumer was assigned a node cannot: CDI
-// scratch PVCs are one example. Keep its selected node so provisioning retries
-// there when a reservation or filesystem space becomes available.
+// Capacity size and placement ownership are independent. Only a scheduler-managed
+// claim may release its selected node; fixed or unknown placement must retry.
 func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, requestName string, pool volumeapi.Pool, requestedBytes, limitBytes int64, stats *poolcapacity.Filesystem, format string, args ...any) error {
 	message := fmt.Sprintf(format, args...)
-	if requestedBytes > limitBytes {
-		return status.Error(codes.ResourceExhausted, message)
+	if s.ConsumerPlacement == nil {
+		return status.Error(codes.Unavailable, "consumer placement inspection is not configured")
 	}
-	fixed, err := s.hasScheduledPodConsumer(ctx, parameters, requestName, pool.NodeName)
+	placement, err := s.ConsumerPlacement.Inspect(ctx, consumer.Request{Namespace: parameters[PVCNamespaceKey], Name: parameters[PVCNameKey], UID: strings.TrimPrefix(requestName, "pvc-"), Node: pool.NodeName})
+	if errors.Is(err, consumer.ErrIdentity) {
+		return status.Errorf(codes.FailedPrecondition, "%s; %v", message, err)
+	}
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "%s; inspect PVC consumer: %v", message, err)
 	}
-	if fixed {
-		if stats == nil && !s.observedTotalCanFit(pool, requestedBytes) {
+	if placement.Placement != consumer.Reschedulable {
+		if requestedBytes > limitBytes {
+			message += "; request exceeds Pool limit; change capacity configuration or request size"
+		}
+		if requestedBytes <= limitBytes && placement.Placement == consumer.Fixed && stats == nil && !s.observedTotalCanFit(pool, requestedBytes) {
 			observed, err := s.CapacityProbe.StatFSForPool(ctx, pool)
 			if err != nil {
 				return capacityProbeError("inspect Pool filesystem capacity", err)
@@ -195,12 +200,12 @@ func (s *Service) capacityDenied(ctx context.Context, parameters map[string]stri
 			stats = &observed
 		}
 		if stats != nil && poolcapacity.ExceedsTotal(requestedBytes, stats.TotalBytes) {
-			return status.Error(codes.ResourceExhausted, message)
+			message += "; request exceeds filesystem total; change capacity configuration or request size"
 		}
 		if s.RetryRequests != nil {
 			s.RetryRequests.Register(parameters[PVCNamespaceKey], parameters[PVCNameKey], strings.TrimPrefix(requestName, "pvc-"), pool.NodeName, poolGroup(pool), requestedBytes)
 		}
-		return status.Errorf(codes.Unavailable, "%s; scheduled consumer on node %q requires same-node retry", message, pool.NodeName)
+		return status.Errorf(codes.Unavailable, "%s; %s; preserve node %q and retry", message, placement.Reason, pool.NodeName)
 	}
 	return status.Error(codes.ResourceExhausted, message)
 }

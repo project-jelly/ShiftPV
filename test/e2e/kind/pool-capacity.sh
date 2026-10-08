@@ -9,6 +9,9 @@ CAPACITY_PATH=/mnt/shiftpv
 PHYSICAL_NAME=shiftpv-capacity-physical
 LOGICAL_NAME=shiftpv-capacity-logical
 FIXED_NAME=shiftpv-capacity-fixed
+PRIME_NAME=shiftpv-capacity-prime
+TARGET_NAME=shiftpv-capacity-target
+PRIME_PV=
 PHYSICAL_PV=
 LOGICAL_PV=
 FIXED_PV=
@@ -163,8 +166,8 @@ EOF
 }
 
 cleanup_capacity_test() {
-	kubectl delete pod "${PHYSICAL_NAME}" "${LOGICAL_NAME}" "${FIXED_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-	kubectl delete pvc "${PHYSICAL_NAME}" "${LOGICAL_NAME}" "${FIXED_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kubectl delete pod "${PHYSICAL_NAME}" "${LOGICAL_NAME}" "${FIXED_NAME}" "${PRIME_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	kubectl delete pvc "${PHYSICAL_NAME}" "${LOGICAL_NAME}" "${FIXED_NAME}" "${PRIME_NAME}" "${TARGET_NAME}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
 	if [[ -n "${PHYSICAL_PV}" ]]; then
 		kubectl wait --for=delete "pv/${PHYSICAL_PV}" --timeout=2m >/dev/null 2>&1 || true
 	fi
@@ -174,6 +177,9 @@ cleanup_capacity_test() {
 	if [[ -n "${FIXED_PV}" ]]; then
 		kubectl wait --for=delete "pv/${FIXED_PV}" --timeout=2m >/dev/null 2>&1 || true
 	fi
+ if [[ -n "${PRIME_PV}" ]]; then
+  kubectl wait --for=delete "pv/${PRIME_PV}" --timeout=2m >/dev/null 2>&1 || true
+ fi
 	kubectl delete storageclass shiftpv-capacity-test --ignore-not-found --wait=true >/dev/null 2>&1 || true
 	docker exec "${CAPACITY_NODE}" sh -c "rm -f '${CAPACITY_PATH}/external-fill'; mountpoint -q '${CAPACITY_PATH}' && umount '${CAPACITY_PATH}' || true" >/dev/null 2>&1 || true
 	kubectl patch shiftpvpool "${CAPACITY_POOL}" --type=merge -p '{"spec":{"capacity":{"limit":"10Gi"}}}' >/dev/null 2>&1 || true
@@ -282,12 +288,100 @@ FIXED_PV=$(kubectl get pvc "${FIXED_NAME}" -o jsonpath='{.spec.volumeName}')
 FIXED_VOLUME=$(kubectl get "pv/${FIXED_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 test "$(kubectl get "shiftpvvolume/${FIXED_VOLUME}" -o jsonpath='{.spec.initialNode}')" = "${CAPACITY_NODE}"
 wait_for_volume_hold_count 1
-set_provisioner_retry 1s 30s
+# Model CDI prime before importer creation. Its owner is the original PVC,
+# and the importer is owned by prime: the reverse of scratch ownership.
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${TARGET_NAME}
+  annotations:
+    volume.kubernetes.io/selected-node: ${CAPACITY_NODE}
+    cdi.kubevirt.io/storage.populator.pvcPrime: ${PRIME_NAME}
+spec:
+  storageClassName: shiftpv-capacity-test
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 80Mi
+  dataSourceRef:
+    apiGroup: cdi.kubevirt.io
+    kind: VolumeImportSource
+    name: capacity-test-source
+EOF
+TARGET_UID=$(kubectl get pvc "${TARGET_NAME}" -o jsonpath='{.metadata.uid}')
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${PRIME_NAME}
+  annotations:
+    volume.kubernetes.io/selected-node: ${CAPACITY_NODE}
+    cdi.kubevirt.io/storage.populator.kind: VolumeImportSource
+  ownerReferences:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      name: ${TARGET_NAME}
+      uid: ${TARGET_UID}
+      controller: true
+spec:
+  storageClassName: shiftpv-capacity-test
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 80Mi
+EOF
+wait_for_unavailable "${PRIME_NAME}"
+test "$(kubectl get pvc "${PRIME_NAME}" -o jsonpath='{.metadata.annotations.volume\.kubernetes\.io/selected-node}')" = "${CAPACITY_NODE}"
+wait_for_volume_hold_count 1
+PRIME_UID=$(kubectl get pvc "${PRIME_NAME}" -o jsonpath='{.metadata.uid}')
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${PRIME_NAME}
+  ownerReferences:
+    - apiVersion: v1
+      kind: PersistentVolumeClaim
+      name: ${PRIME_NAME}
+      uid: ${PRIME_UID}
+      controller: true
+spec:
+  nodeName: ${CAPACITY_NODE}
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: importer
+      image: busybox:1.37
+      command: ["sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: ${PRIME_NAME}
+EOF
 
 kubectl delete pod "${FIXED_NAME}" --wait=true
 kubectl delete pvc "${FIXED_NAME}" --ignore-not-found --wait=true
 kubectl wait --for=delete "pv/${FIXED_PV}" --timeout=2m
 FIXED_PV=
+kubectl wait --for=jsonpath='{.metadata.annotations.shiftpv\.io/capacity-retry}' "pvc/${PRIME_NAME}" --timeout=30s
+kubectl wait --for=jsonpath='{.status.phase}'=Bound "pvc/${PRIME_NAME}" --timeout=2m
+kubectl wait --for=condition=Ready "pod/${PRIME_NAME}" --timeout=5m
+test "$(kubectl get pvc "${PRIME_NAME}" -o jsonpath='{.metadata.annotations.volume\.kubernetes\.io/selected-node}')" = "${CAPACITY_NODE}"
+test "$(kubectl get pvc "${PRIME_NAME}" -o jsonpath='{.metadata.uid}')" = "${PRIME_UID}"
+wait_for_volume_hold_count 1
+PRIME_PV=$(kubectl get pvc "${PRIME_NAME}" -o jsonpath='{.spec.volumeName}')
+PRIME_VOLUME=$(kubectl get pv "${PRIME_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
+test "$(kubectl get "shiftpvvolume/${PRIME_VOLUME}" -o jsonpath='{.spec.capacityBytes}')" = 83886080
+set_provisioner_retry 1s 30s
+kubectl delete pod "${PRIME_NAME}" --wait=true
+kubectl delete pvc "${PRIME_NAME}" "${TARGET_NAME}" --wait=true
+kubectl wait --for=delete "pv/${PRIME_PV}" --timeout=2m
+PRIME_PV=
 wait_for_volume_hold_count 0
 
 trap - EXIT
