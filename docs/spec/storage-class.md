@@ -101,6 +101,10 @@ inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경�
 
 용량 부족의 원인과 PVC 재배치 가능 여부를 별도로 판정한다.
 
+CSI는 topology 내 생성 불가에 `ResourceExhausted`를 지정한다. ShiftPV의 고정 consumer
+`Unavailable` 응답은 external-provisioner가 selected-node를 지우는 것을 막기 위한 Kubernetes/CDI
+호환성 정책이다. 다른 CSI orchestrator에 동일한 재시도 동작을 보장하지 않는다.
+
 - 일반 미배치 consumer는 `ResourceExhausted`로 다른 노드 선택을 허용한다.
 - 배치된 consumer와 CDI prime·scratch는 `Unavailable`로 노드 지정을 유지한다.
   prime은 원본 PVC의 UID·selected-node·populator 종류를 확인하므로 Pod 생성 전에도 보호한다.
@@ -111,6 +115,17 @@ inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경�
 이미 selected-node가 지워진 CDI PVC는 이 수정으로 자동 보정되지 않는다. 원본 PVC·prime·
 consumer의 identity를 확인하고 CDI 운영 절차로 작업 Pod를 재생성해야 한다. ShiftPV는
 노드 annotation을 임의 복원하거나 importer Pod를 삭제하지 않는다.
+
+### Create request compatibility
+
+미지원 snapshot/clone source와 mutable parameters, 음수 capacity bound는 생성 전에 거절한다.
+새 볼륨은 양수 required bound를 사용하고, upper bound만 있으면 그 크기를 사용한다.
+기존 볼륨이 요청 범위에 들어가고 원래 노드가 허용 topology에 포함되면 원래 크기·Pool·copy로
+재시도한다. 범위 또는 preference 변경은 resize나 이동을 요청하지 않는다. Pool group 변경이나
+원래 노드를 제외한 요청은 `AlreadyExists`다. Requisite가 없는 단일 Preferred 노드는 기존
+WaitForFirstConsumer 배치 계약으로 취급한다.
+PVC metadata가 있고 선호 노드가 바뀌면 저장된 노드의 UID·selected-node도 확인한다.
+배치 identity 변경은 `FailedPrecondition`, 조회 실패나 불명확한 배치는 `Unavailable`이다.
 
 ### Capacity retry notification
 

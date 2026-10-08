@@ -154,7 +154,7 @@ func (r *capacityTrackingVolumeRegistry) BeginCreateInPool(ctx context.Context, 
 	unlock := writeLock(r.mu)
 	defer unlock()
 	if state, ok := r.volumes[volumeID]; ok {
-		if err := validateCreateIntent(state, requestName, nodeName, capacityBytes); err != nil {
+		if err := validateFixtureCreateIntent(state, requestName, nodeName, capacityBytes); err != nil {
 			return volumeapi.State{}, err
 		}
 		return state, nil

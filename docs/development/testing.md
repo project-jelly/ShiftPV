@@ -159,6 +159,11 @@ fixed oversized requests, UID/node changes, and capacity-return convergence.
 The focused Pool capacity Kind test models scratch and prime with the real
 external-provisioner; full CDI DataVolume import remains a separate qualification.
 
+CSI request regression tests reject unsupported sources, mutable parameters,
+negative bounds and invalid topology before admission. Compatible retries cover
+Pending/NodeCreating/Ready and retain actual capacity and copy identity; a real
+Registry test resumes a saved intent through fresh controller instances.
+
 For the two-VM/250Gi Pool scenario, compare reservation return → next
 `CreateVolume` start, rejection helper count, and successful creation duration.
 Use Controller level-2 step logs and, when enabled,

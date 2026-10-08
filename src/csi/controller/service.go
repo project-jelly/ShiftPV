@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -12,7 +13,6 @@ import (
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
@@ -106,7 +106,7 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		return nil, err
 	}
 
-	state, beginErr := s.beginCreate(ctx, request.id, request.name, request.nodeName, request.capacity, req.GetParameters())
+	state, beginErr := s.beginCreate(ctx, request, req.GetParameters())
 	if beginErr != nil {
 		if errors.Is(beginErr, volumeapi.ErrPoolCopyConflict) {
 			return nil, status.Error(codes.FailedPrecondition, beginErr.Error())
@@ -119,6 +119,8 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	if err := s.createServingCopy(ctx, request.id, state); err != nil {
 		return nil, err
 	}
+	// A compatible retry resumes the stored intent, not the latest preference.
+	request.nodeName, request.capacity = state.InitialNode, state.CapacityBytes
 	poolNodes, poolErr := s.Volumes.PoolNodesForGroup(ctx, requestedPoolGroup(req.GetParameters()))
 	if poolErr != nil {
 		return nil, kubernetesAPIError("list volume topology", poolErr)
@@ -132,39 +134,6 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 	}
 
 	return volumeResponse(request.id, request.nodeName, accessibleNodes, request.capacity), nil
-}
-
-// createRequest is the exact volume identity a validated CSI request names.
-type createRequest struct {
-	id       string
-	name     string
-	nodeName string
-	capacity int64
-}
-
-func parseCreateRequest(req *csi.CreateVolumeRequest) (createRequest, error) {
-	if req.GetName() == "" {
-		return createRequest{}, status.Error(codes.InvalidArgument, "name is required")
-	}
-	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	if err := validateParameters(req.GetParameters()); err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	capacity, err := requestedCapacity(req.GetCapacityRange())
-	if err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	nodeName, err := selectedNode(req.GetAccessibilityRequirements())
-	if err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	id, err := volume.IDFromName(req.GetName())
-	if err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	return createRequest{id: id, name: req.GetName(), nodeName: nodeName, capacity: capacity}, nil
 }
 
 // createServingCopy performs the node-local create effect and records its
@@ -338,17 +307,54 @@ func (s *Service) ValidateVolumeCapabilities(_ context.Context, req *csi.Validat
 	}}, nil
 }
 
-func (s *Service) beginCreate(ctx context.Context, id, requestName, nodeName string, capacity int64, parameters map[string]string) (volumeapi.State, error) {
+func (s *Service) beginCreate(ctx context.Context, request createRequest, parameters map[string]string) (volumeapi.State, error) {
 	if s.CapacityPools != nil || s.CapacityProbe != nil {
 		if s.CapacityPools == nil || s.CapacityProbe == nil {
 			return volumeapi.State{}, status.Error(codes.Internal, "Pool capacity admission is incompletely configured")
 		}
-		return s.beginCreateWithinPool(ctx, id, requestName, nodeName, capacity, parameters)
+		return s.beginCreateWithinPool(ctx, request, parameters)
 	}
 	if requestedPoolGroup(parameters) != volumeapi.DefaultPoolGroup {
 		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "Pool group selection requires Pool capacity admission")
 	}
-	return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, capacity)
+	existing, err := s.Volumes.Get(ctx, request.id)
+	if err == nil {
+		if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
+			return volumeapi.State{}, err
+		}
+		return s.Volumes.BeginCreate(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes)
+	}
+	if !apierrors.IsNotFound(err) {
+		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
+	}
+	return s.Volumes.BeginCreate(ctx, request.id, request.name, request.nodeName, request.capacity)
+}
+
+func (s *Service) validateExistingCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) error {
+	if err := compatibleCreateRequest(existing, request); err != nil {
+		return err
+	}
+	if request.nodeName == existing.InitialNode || (parameters[PVCNamespaceKey] == "" && parameters[PVCNameKey] == "") {
+		return nil
+	}
+	// A broad CSI topology does not prove that a Kubernetes consumer can move.
+	if s.ConsumerPlacement == nil {
+		return status.Error(codes.Unavailable, "consumer placement inspection is not configured")
+	}
+	placement, err := s.ConsumerPlacement.Inspect(ctx, consumer.Request{
+		Namespace: parameters[PVCNamespaceKey], Name: parameters[PVCNameKey],
+		UID: strings.TrimPrefix(request.name, "pvc-"), Node: existing.InitialNode,
+	})
+	if errors.Is(err, consumer.ErrIdentity) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "inspect existing PVC placement: %v", err)
+	}
+	if placement.Placement != consumer.Fixed && placement.Placement != consumer.Reschedulable {
+		return status.Error(codes.Unavailable, "existing PVC placement is unproven")
+	}
+	return nil
 }
 
 func (s *Service) validate() error {
@@ -393,71 +399,6 @@ func volumeResponse(id, nodeName string, poolNodes []string, capacity int64) *cs
 		},
 		AccessibleTopology: topologies,
 	}}
-}
-
-func requestedCapacity(capacityRange *csi.CapacityRange) (int64, error) {
-	if capacityRange == nil {
-		return 0, fmt.Errorf("capacity range is required")
-	}
-	required := capacityRange.GetRequiredBytes()
-	limit := capacityRange.GetLimitBytes()
-	if required <= 0 {
-		return 0, fmt.Errorf("required capacity must be greater than zero")
-	}
-	if limit > 0 && required > limit {
-		return 0, fmt.Errorf("required capacity exceeds the limit")
-	}
-	return required, nil
-}
-
-func validateParameters(parameters map[string]string) error {
-	for key, value := range parameters {
-		switch key {
-		case PVCNameKey, PVCNamespaceKey, PVNameKey:
-			// Added by csi-provisioner --extra-create-metadata, not by the StorageClass.
-		case CapacityEnforcementKey:
-			// Kept as a no-op because StorageClass parameters are immutable.
-			if value != capacityEnforcementNone {
-				return fmt.Errorf("unsupported StorageClass parameter %q value %q", key, value)
-			}
-		case PoolGroupKey:
-			if len(validation.IsDNS1123Label(value)) != 0 {
-				return fmt.Errorf("invalid StorageClass pool group %q", value)
-			}
-		default:
-			return fmt.Errorf("unsupported StorageClass parameter %q", key)
-		}
-	}
-	return nil
-}
-
-func validateCapabilities(capabilities []*csi.VolumeCapability) error {
-	if len(capabilities) == 0 {
-		return fmt.Errorf("at least one volume capability is required")
-	}
-	for _, capability := range capabilities {
-		if capability.GetMount() == nil {
-			return fmt.Errorf("only filesystem volumes are supported")
-		}
-		if capability.GetAccessMode() == nil || capability.GetAccessMode().GetMode() != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
-			return fmt.Errorf("only SINGLE_NODE_WRITER is supported")
-		}
-	}
-	return nil
-}
-
-func selectedNode(requirements *csi.TopologyRequirement) (string, error) {
-	if requirements == nil {
-		return "", fmt.Errorf("selected topology is required; use WaitForFirstConsumer")
-	}
-	for _, candidates := range [][]*csi.Topology{requirements.GetPreferred(), requirements.GetRequisite()} {
-		for _, topology := range candidates {
-			if node := topology.GetSegments()[TopologyKey]; node != "" {
-				return node, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("selected topology does not contain %q", TopologyKey)
 }
 
 func (s *Service) observeStep(step, volumeID string) func() {

@@ -29,11 +29,12 @@ type PoolCapacityProbe interface {
 	StatFSForPool(context.Context, volumeapi.Pool) (poolcapacity.Filesystem, error)
 }
 
-func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
+func (s *Service) beginCreateWithinPool(ctx context.Context, request createRequest, parameters map[string]string) (volumeapi.State, error) {
+	id, requestName, nodeName, requestedBytes := request.id, request.name, request.nodeName, request.capacity
 	defer s.observeStep("capacity_admission", id)()
 	existing, err := s.Volumes.Get(ctx, id)
 	if err == nil {
-		return s.resumeExistingCreate(ctx, existing, id, requestName, nodeName, requestedBytes, parameters)
+		return s.resumeExistingCreate(ctx, existing, request, parameters)
 	}
 	if !apierrors.IsNotFound(err) {
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
@@ -44,7 +45,7 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, id, requestName, no
 
 	existing, err = s.Volumes.Get(ctx, id)
 	if err == nil {
-		return s.resumeExistingCreate(ctx, existing, id, requestName, nodeName, requestedBytes, parameters)
+		return s.resumeExistingCreate(ctx, existing, request, parameters)
 	}
 	if !apierrors.IsNotFound(err) {
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
@@ -67,8 +68,8 @@ func poolGroup(pool volumeapi.Pool) string {
 	return volumeapi.DefaultPoolGroup
 }
 
-func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.State, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
-	if err := validateCreateIntent(existing, requestName, nodeName, requestedBytes); err != nil {
+func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) (volumeapi.State, error) {
+	if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
 		return volumeapi.State{}, err
 	}
 	if existing.CurrentCopy == nil {
@@ -80,9 +81,10 @@ func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.S
 		return volumeapi.State{}, poolSelectionError(err)
 	}
 	if poolGroup(pool) != requestedPoolGroup(parameters) {
-		return volumeapi.State{}, status.Errorf(codes.AlreadyExists, "volume %q belongs to Pool group %q", requestName, poolGroup(pool))
+		return volumeapi.State{}, status.Errorf(codes.AlreadyExists, "volume %q belongs to Pool group %q", request.name, poolGroup(pool))
 	}
-	return s.Volumes.BeginCreateInPool(ctx, id, requestName, nodeName, requestedBytes, pool.Name, pool.UID)
+	// Keep the registry's exact identity checks and the original capacity hold.
+	return s.Volumes.BeginCreateInPool(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, pool.Name, pool.UID)
 }
 
 func poolSelectionError(err error) error {
@@ -232,19 +234,6 @@ func poolLimitBytes(pool volumeapi.Pool) (int64, error) {
 		return 0, fmt.Errorf("spec.capacity.limit is required")
 	}
 	return poolcapacity.LimitBytes(pool)
-}
-
-func validateCreateIntent(existing volumeapi.State, requestName, nodeName string, capacityBytes int64) error {
-	if existing.RequestName != requestName {
-		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible requestName", requestName)
-	}
-	if existing.InitialNode != nodeName {
-		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible initialNode", requestName)
-	}
-	if existing.CapacityBytes != capacityBytes {
-		return status.Errorf(codes.AlreadyExists, "volume %q already exists with incompatible capacityBytes", requestName)
-	}
-	return nil
 }
 
 func capacityProbeError(operation string, err error) error {
