@@ -50,6 +50,8 @@ func main() {
 
 	registry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
 	probeRegistry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
+	// Background GC must not spend the foreground publish/readiness API budget.
+	metadataRegistry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -90,7 +92,7 @@ func main() {
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
 	errCh := make(chan error, 6)
 	go func() {
-		collector := &metadata.Collector{NodeName: *nodeName, HostRoot: *hostRoot, Repository: registry, Retention: *metadataRetention}
+		collector := &metadata.Collector{NodeName: *nodeName, HostRoot: *hostRoot, Repository: metadataRegistry, Retention: *metadataRetention}
 		errCh <- collector.Run(ctx)
 	}()
 	if os.Getenv("POD_UID") != "" {

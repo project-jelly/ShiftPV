@@ -132,7 +132,8 @@ replay after an interrupted pass remains safe. Historical records at a
 re-registered path require the same installation and no remaining old Pool.
 API checks keep current-Pool candidates volume-locked; the Pool-wide marker lock covers
 only the final local recheck and unlink, so API latency cannot block other
-volumes' marker writes.
+volumes' marker writes. GC uses a separate API client and rate limiter from
+foreground publish and readiness work.
 
 `lock-<volumeID>` stays for the entire Pool lifetime: unlinking an active lock
 can create two independently locked inodes at one path. Only controller-approved
