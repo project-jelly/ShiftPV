@@ -297,7 +297,14 @@ func (r *Registry) BeginDelete(ctx context.Context, volumeID, uid string, copy v
 // idempotent only for the operation that already owns the fence.
 func fenceForDeletion(current State, uid, operationID string, copy volume.CopyIdentity) (State, error) {
 	if current.UID != uid || current.OwnerNode != copy.NodeName || current.CurrentCopy == nil || *current.CurrentCopy != copy ||
-		current.ActiveMove != "" || len(current.PublishedNodes) != 0 {
+		current.ActiveMove != "" {
+		return State{}, ErrStateConflict
+	}
+	if current.Phase == PhaseReady && current.DeletionOperationID == "" &&
+		len(current.PublishedNodes) == 1 && current.PublishedNodes[0] == copy.NodeName {
+		return State{}, fmt.Errorf("%w: %w", ErrStateConflict, ErrVolumePublished)
+	}
+	if len(current.PublishedNodes) != 0 {
 		return State{}, ErrStateConflict
 	}
 	switch current.Phase {

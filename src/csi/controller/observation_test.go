@@ -48,7 +48,7 @@ func TestCreateObservationSeparatesNewAdmissionFromRetry(t *testing.T) {
 	}
 	for step, count := range map[string]int{
 		"create_volume_lock_wait": 1, "create_cleanup_fence": 1,
-		"create_intent_read": 2, "create_node_lock_wait": 1, "create_pool_list": 1,
+		"create_intent_read": 1, "create_node_lock_wait": 0, "create_pool_list": 1,
 		"create_pool_lock_wait": 1, "create_capacity_ledger": 1,
 		"create_volume_list": 1, "create_move_list": 1, "create_filesystem_capacity": 1,
 		"create_intent_record": 1, "capacity_admission": 1, "create_resume": 0,
@@ -65,7 +65,7 @@ func TestCreateObservationSeparatesNewAdmissionFromRetry(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(first, second) {
 		t.Fatalf("retry response=%v error=%v", second, err)
 	}
-	if observations.count("create_resume") != 1 || observations.count("create_intent_read") != 3 ||
+	if observations.count("create_resume") != 1 || observations.count("create_intent_read") != 2 ||
 		observations.count("create_intent_record") != 1 || observations.count("create_capacity_ledger") != 1 ||
 		observations.count("create_directory") != 2 || probe.callCount() != 1 {
 		t.Fatal("retry was hidden or re-entered new capacity admission")

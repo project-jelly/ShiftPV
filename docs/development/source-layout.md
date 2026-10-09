@@ -35,7 +35,9 @@ src/
 │   ├── controller/         observe, decide and execute one Move action
 │   └── fsm/                pure Move state transition rules
 ├── node/                   mount, inventory and identity-bound filesystem effects
-│   └── executor/           resident execution; RPC and Watch share one Volume gate
+│   ├── executor/           resident execution; RPC and Watch share one Volume gate
+│   ├── metadata/           settled-record retention and live API reference checks
+│   └── ownership/          exact local identity, stable locks, effects and receipts
 ├── provisioning/           capacity retry and Controller-side execution requests
 │   └── nodeexecutor/       executor selection, binding, transport and receipt waiting
 ├── pool/                   readiness and conservative capacity accounting
@@ -64,6 +66,7 @@ test/
 | Node-local effects | per-volume lock 아래 publish/unpublish와 exact copy/promote/purge/receipt effect 실행 |
 | Controller execution client | 실행자 선택·바인딩·요청·receipt 대기; Node filesystem 실행 구현에 의존하지 않음 |
 | Resident Node executor | 승인 재검증·물리 실행·receipt 기록; RPC와 Watch는 같은 gate 사용 |
+| Node metadata collector | 완료 기록의 보존 기간과 live API 참조 확인; 파일 삭제는 `node/ownership` 사용, 데이터·owner·hold 변경 금지 |
 | Metrics | cached observation; protocol decision에 입력하지 않음 |
 | Admission | 사용자가 소유한 workload를 사전 점검하고 unsafe mutation/delete를 fail closed |
 
@@ -77,7 +80,7 @@ test/
    scanner는 lock 밖에서 marker와 mount reference를 관찰하며, generation-fenced consumer만 그 결과를
    causal proof로 사용할 수 있다.
 6. Capacity 계산은 Volume owner hold와 Move temporary hold의 합으로만 도출한다. 별도 mutable reservation source를 두지 않는다.
-7. Wall clock은 retry, timeout, metric에만 사용하고 owner 변경·삭제·hold 해제 권한에 사용하지 않는다.
+7. Wall clock은 retry, timeout, metric과 완료된 metadata의 최소 보존 기간에 사용한다. 시간 경과는 데이터 삭제·owner 변경·hold 해제 권한이 아니다.
 8. `provisioning/nodeexecutor`와 `node/executor`는 production에서 서로 import하지 않는다. 통합 테스트는 두 역할의 실제 구현을 연결한다.
 
 ## Durable ownership

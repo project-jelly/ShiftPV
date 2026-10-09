@@ -2,12 +2,13 @@ package controller
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -37,15 +38,8 @@ func TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode(t *testing.T) {
 	pools := s.CapacityPools.(*fakePoolCapacityRegistry)
 	pools.pools = []volumeapi.Pool{pools.pool,
 		{Name: "pool-b", UID: "pool-b-uid", NodeName: "worker-a", MountPath: "/other", PoolGroup: "other", CapacityLimit: "8Mi"}}
-	var reads atomic.Int32
-	secondRead := make(chan struct{})
 	observations := &observedSteps{}
-	s.ObserveStep = func(step string, elapsed time.Duration) {
-		observations.record(step, elapsed)
-		if step == "create_intent_read" && reads.Add(1) == 3 {
-			close(secondRead)
-		}
-	}
+	s.ObserveStep = observations.record
 	type result struct {
 		state volumeapi.State
 		err   error
@@ -73,17 +67,20 @@ func TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode(t *testing.T) {
 		t.Fatal("first admission did not reach the probe")
 	}
 	start("second-pool", "other")
+	// The second Pool must complete while the first Pool probe is blocked.
 	select {
-	case <-secondRead:
+	case got := <-results:
+		if got.err != nil || got.state.CurrentCopy == nil || got.state.CurrentCopy.PoolUID != "pool-b-uid" {
+			t.Fatalf("independent admission=%#v error=%v", got.state, got.err)
+		}
 	case <-ctx.Done():
-		t.Fatal("second admission did not reach the intent read")
+		t.Fatal("independent Pool was serialized behind the blocked probe")
 	}
-	// The current node lock serializes admission even for independent Pools.
-	if observations.count("create_node_lock_wait") != 1 {
-		t.Fatal("second admission bypassed node serialization")
+	if observations.count("create_node_lock_wait") != 0 {
+		t.Fatal("node-wide admission lock remains")
 	}
 	close(probe.release)
-	for range 2 {
+	for range 1 {
 		select {
 		case got := <-results:
 			if got.err != nil || got.state.CurrentCopy == nil || got.state.CapacityBytes != 8<<20 {
@@ -110,6 +107,58 @@ func TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode(t *testing.T) {
 		reserved, err := poolcapacity.ReservedBytesForPool(pools.volumes, nil, uid)
 		if err != nil || reserved != 8<<20 {
 			t.Fatalf("Pool %s reserved=%d error=%v", uid, reserved, err)
+		}
+	}
+}
+
+func TestConcurrentAdmissionToSamePoolCannotOversubscribe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, shared := range []bool{true, false} {
+		probe := independentPoolProbe{started: make(chan string, 2), release: make(chan struct{})}
+		s := capacityService(fake.NewClientset(), "8Mi", nil, probe)
+		if shared {
+			s.PoolLocks = &poolcapacity.Locker{}
+		}
+		result := make(chan error, 2)
+		start := func(name string) {
+			req := validCreateRequest("worker-a")
+			req.Name = name
+			req.CapacityRange.RequiredBytes = 8 << 20
+			parsed, err := parseCreateRequest(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() { _, err := s.beginCreateWithinPool(ctx, parsed, nil); result <- err }()
+		}
+		start("same-first")
+		select {
+		case <-probe.started:
+		case <-ctx.Done():
+			t.Fatal("probe did not start")
+		}
+		start("same-second")
+		close(probe.release)
+		success := 0
+		for range 2 {
+			select {
+			case err := <-result:
+				if err == nil {
+					success++
+				} else if status.Code(err) != codes.Unavailable {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("same-Pool admission stalled")
+			}
+		}
+		if success != 1 {
+			t.Fatalf("shared=%v successful reservations=%d", shared, success)
+		}
+		pools := s.CapacityPools.(*fakePoolCapacityRegistry)
+		reserved, err := poolcapacity.ReservedBytesForPool(pools.volumes, nil, "pool-uid")
+		if err != nil || reserved != 8<<20 {
+			t.Fatalf("reserved=%d error=%v", reserved, err)
 		}
 	}
 }

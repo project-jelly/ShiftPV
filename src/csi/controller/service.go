@@ -221,6 +221,9 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	}
 	fenced, fenceErr := s.Volumes.BeginDelete(ctx, req.GetVolumeId(), volumeState.UID, *volumeState.CurrentCopy)
 	if fenceErr != nil {
+		if errors.Is(fenceErr, volumeapi.ErrVolumePublished) {
+			return nil, status.Errorf(codes.Unavailable, "wait for volume unpublish before deletion: %v", fenceErr)
+		}
 		if errors.Is(fenceErr, volumeapi.ErrStateConflict) {
 			return nil, status.Errorf(codes.FailedPrecondition, "fence volume deletion: %v", fenceErr)
 		}

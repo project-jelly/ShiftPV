@@ -22,6 +22,7 @@ var (
 	MoveResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvmoves"}
 
 	ErrStateConflict     = errors.New("ShiftPV state precondition failed")
+	ErrVolumePublished   = errors.New("volume publication is still being released")
 	ErrPoolConfiguration = errors.New("ShiftPV Pool configuration is invalid")
 	ErrPoolNotFound      = errors.New("ShiftPV Pool is not registered")
 	ErrPoolNotReady      = errors.New("ShiftPV Pool is not ready")
