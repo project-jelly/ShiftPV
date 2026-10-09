@@ -1129,6 +1129,8 @@ func TestPoolReadyForActiveMoveRepairAtAdmitsOnlyExactCrashWindow(t *testing.T) 
 	}
 
 	tests := map[string]func(*Pool, *Move, *State){
+		"invalid backing path": func(pool *Pool, _ *Move, _ *State) { pool.MountPath = "/." },
+		"invalid mount policy": func(pool *Pool, _ *Move, _ *State) { pool.MountPolicy = "unsupported" },
 		"unrelated path": func(pool *Pool, _ *Move, _ *State) {
 			pool.Status.Inventory.Copies[0].Marker = "path:.shiftpv/incoming/foreign"
 		},

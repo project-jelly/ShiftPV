@@ -14,6 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// NodeEffectsAnnotation advertises the resident execution contract on a Node Pod.
+const NodeEffectsAnnotation = "shiftpv.io/node-effects"
+
 // NodeExecutor pins execution to one incarnation of the resident Node Pod.
 type NodeExecutor struct {
 	Namespace string `json:"namespace"`

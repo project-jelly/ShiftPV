@@ -192,6 +192,12 @@ Node effect observation tests block authority API reads independently of the
 shared gate, reject failed authority before filesystem work, and preserve the
 creation receipt on retry. An injected clock verifies local durations exclude
 nested authority checks, including failures and subsequent stages.
+`node/executor` retains four fresh creation-authority checks, with one Pool GET
+per check. Inject Pool/Pod identity, protection, path and backing changes at
+each boundary; no failed check may record a creation receipt.
+Mobility tests keep rejected Pool identities visible, isolate unapproved
+candidates, retain approved peer conflicts, and continue persisted Moves after
+discovery errors. API/decode failures must never grant placement.
 Inject invalid inventory after the serving directory exists: the approved
 creation must record the same operation's receipt while new placement stays
 blocked. Reconcile interrupted serving stages without manually restoring inventory.

@@ -32,6 +32,9 @@ func PoolReadyForActiveMoveRepairAt(pool Pool, move Move, state State, now time.
 // repairableInventoryAt returns the observation a repair may read, or nil unless
 // the Pool is Ready and reports a fresh, complete copy-observation problem.
 func repairableInventoryAt(pool Pool, now time.Time, staleAfter time.Duration) *PoolInventory {
+	if !pool.BackingConfigurationCheck().OK {
+		return nil
+	}
 	if ready, _ := pool.ReadyAt(now, staleAfter); !ready {
 		return nil
 	}

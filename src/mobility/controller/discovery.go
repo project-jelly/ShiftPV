@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -30,19 +31,21 @@ func (r *Reconciler) discoverMoves(ctx context.Context) (discoveryErr error) {
 	}
 	activeByVolume := activeMoveVolumes(moves, volumes)
 	ownerNodes := make(map[string]*corev1.Node)
+	var discoveryErrors []error
 	for volumeID, state := range volumes {
 		if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || activeByVolume[volumeID] {
 			continue
 		}
 		created, err := r.discoverVolumeMove(ctx, volumeID, state, deferred, ownerNodes)
 		if err != nil {
-			return err
+			discoveryErrors = append(discoveryErrors, fmt.Errorf("discover volume %s: %w", volumeID, err))
+			continue
 		}
 		if created {
 			activeByVolume[volumeID] = true
 		}
 	}
-	return nil
+	return errors.Join(discoveryErrors...)
 }
 
 // activeMoveVolumes names the volumes a live transaction still speaks for, so

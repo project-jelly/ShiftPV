@@ -1,4 +1,4 @@
-package nodeexecutor
+package executor
 
 import (
 	"context"
@@ -57,13 +57,29 @@ func (n *Node) poolRoot(ctx context.Context, copy volume.CopyIdentity) (string, 
 	if err != nil {
 		return "", err
 	}
+	return n.rootForPool(copy, pool)
+}
+
+func (n *Node) rootForPool(copy volume.CopyIdentity, pool volumeapi.Pool) (string, error) {
+	if copy.Validate() != nil || copy.NodeName != n.Identity.NodeName || !filepath.IsAbs(n.HostRoot) ||
+		pool.Name != copy.PoolName || pool.UID != copy.PoolUID || pool.NodeName != copy.NodeName {
+		return "", volumeapi.ErrStateConflict
+	}
 	if !slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) || !filepath.IsAbs(pool.MountPath) || filepath.Clean(pool.MountPath) == "/" {
 		return "", volumeapi.ErrStateConflict
 	}
 	return filepath.Join(n.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), "/")), nil
 }
 func (n *Node) localAuthority(ctx context.Context, copy volume.CopyIdentity, root string) error {
-	pod, err := n.Discovery.Client.CoreV1().Pods(n.Identity.Namespace).Get(ctx, n.Identity.PodName, metav1.GetOptions{})
+	pool, err := n.Volumes.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
+	if err != nil {
+		return err
+	}
+	return n.localAuthorityForPool(ctx, copy, root, pool)
+}
+
+func (n *Node) localAuthorityForPool(ctx context.Context, copy volume.CopyIdentity, root string, pool volumeapi.Pool) error {
+	pod, err := n.Pods.Get(ctx, n.Identity.PodName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -77,16 +93,15 @@ func (n *Node) localAuthority(ctx context.Context, copy volume.CopyIdentity, roo
 	if installation != copy.InstallationID {
 		return volumeapi.ErrStateConflict
 	}
-	currentRoot, err := n.poolRoot(ctx, copy)
+	currentRoot, err := n.rootForPool(copy, pool)
 	if err != nil {
 		return err
 	}
 	if root != currentRoot {
 		return volumeapi.ErrStateConflict
 	}
-	pool, err := n.Volumes.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
-	if err != nil {
-		return err
+	if n.VerifyPool != nil {
+		return n.VerifyPool(n.HostRoot, pool)
 	}
 	return readiness.VerifyHostPool(n.HostRoot, pool)
 }
@@ -131,10 +146,11 @@ func (n *Node) creationAuthority(ctx context.Context, copy volume.CopyIdentity, 
 	if current.UID != copy.VolumeUID || current.Phase != volumeapi.PhaseNodeCreating || current.CurrentCopy == nil || *current.CurrentCopy != copy || current.CreationExecutor == nil || *current.CreationExecutor != n.Identity || current.CreationOperationID != "create-"+copy.VolumeUID || current.ActiveMove != "" || len(current.PublishedNodes) != 0 || !slices.Contains(current.Finalizers, volumeapi.VolumeProtectionFinalizer) {
 		return volumeapi.ErrStateConflict
 	}
-	if _, err := n.Volumes.CreationPoolForIdentity(ctx, copy); err != nil {
+	pool, err := n.Volumes.CreationPoolForIdentity(ctx, copy)
+	if err != nil {
 		return err
 	}
-	return n.localAuthority(ctx, copy, root)
+	return n.localAuthorityForPool(ctx, copy, root, pool)
 }
 func (n *Node) reclaim(ctx context.Context, approved cleanupapi.Cleanup) error {
 	root, err := n.poolRoot(ctx, approved.Spec.Target)

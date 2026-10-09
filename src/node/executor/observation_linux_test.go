@@ -1,6 +1,6 @@
 //go:build linux
 
-package nodeexecutor
+package executor
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 )
 
 func TestNativeCreationObservationKeepsReceiptOnRetry(t *testing.T) {
-	client, node, _, _, state := fixture(t)
+	client, node, dynamic, _, state := fixture(t)
 	ctx := context.Background()
 	node.HostRoot = t.TempDir()
 	if err := os.MkdirAll(filepath.Join(node.HostRoot, "mnt", "pool"), 0700); err != nil {
@@ -29,12 +29,22 @@ func TestNativeCreationObservationKeepsReceiptOnRetry(t *testing.T) {
 	}
 	counts := map[string]int{}
 	node.ObserveStep = func(step string, _ time.Duration) { counts[step]++ }
+	dynamic.ClearActions()
 	if err := node.execute(ctx, testID); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]int{"node_effect_lock_wait": 1, "node_effect_intent_read": 1, "node_create_effect": 1, "node_create_pool_root": 1, "node_create_authority": 4, "node_create_prepare_local": 1, "node_create_receipt_local": 1, "node_create_receipt_record": 1}
 	if !reflect.DeepEqual(counts, want) {
 		t.Fatalf("steps=%v want=%v", counts, want)
+	}
+	poolGets := 0
+	for _, action := range dynamic.Actions() {
+		if action.GetVerb() == "get" && action.GetResource() == volumeapi.PoolResource {
+			poolGets++
+		}
+	}
+	if poolGets != 5 {
+		t.Fatalf("creation Pool GETs=%d; want one root lookup and four fresh authority reads", poolGets)
 	}
 	created, err := client.Volumes.Get(ctx, testID)
 	if err != nil || !volumeapi.ValidCreationReceipt(created) {

@@ -1,6 +1,6 @@
 //go:build linux
 
-package nodeexecutor
+package executor
 
 import (
 	"context"
@@ -50,7 +50,7 @@ func TestNativeEffectsRecoverAfterLostReceipt(t *testing.T) {
 		t.Fatal("missing receipt permitted readiness")
 	}
 	// Fresh process object, same Pod UID and durable intent.
-	restarted := &Node{Identity: node.Identity, Discovery: node.Discovery, Volumes: node.Volumes, Cleanups: node.Cleanups, HostRoot: node.HostRoot}
+	restarted := &Node{Identity: node.Identity, Pods: node.Pods, Volumes: node.Volumes, Cleanups: node.Cleanups, HostRoot: node.HostRoot}
 	if err := restarted.execute(ctx, testID); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestNativeEffectsRecoverAfterLostReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.bindCleanup(ctx, cleanup, node.Cleanups); err != nil {
+	if err := bindNodeCleanup(ctx, node, cleanup); err != nil {
 		t.Fatal(err)
 	}
 	var cleanupLost atomic.Bool
