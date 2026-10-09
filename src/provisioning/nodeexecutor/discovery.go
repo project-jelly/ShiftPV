@@ -11,8 +11,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const capabilityAnnotation = "shiftpv.io/node-effects"
-
 // Discovery trusts the configured DaemonSet incarnation, rather than a label
 // or a node name alone. Missing old Nodes select the helper before binding.
 type Discovery struct {
@@ -52,7 +50,7 @@ func ownedExecutor(pod corev1.Pod, ds *appsv1.DaemonSet) bool {
 	return readyExecutorPod(pod) && pod.Namespace == ds.Namespace && pod.Spec.ServiceAccountName == ds.Spec.Template.Spec.ServiceAccountName && owner != nil && owner.APIVersion == "apps/v1" && owner.Kind == "DaemonSet" && owner.Name == ds.Name && owner.UID == ds.UID
 }
 func readyExecutorPod(pod corev1.Pod) bool {
-	if pod.UID == "" || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Annotations[capabilityAnnotation] != "v1" {
+	if pod.UID == "" || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Annotations[volumeapi.NodeEffectsAnnotation] != "v1" {
 		return false
 	}
 	for _, condition := range pod.Status.Conditions {

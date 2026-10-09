@@ -99,14 +99,14 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	if err := r.discoverMoves(ctx); err != nil {
-		return err
-	}
+	// Discovery cannot authorize an existing transaction. Keep its errors, then
+	// let each persisted Move independently re-read the authority it needs.
+	discoveryErr := r.discoverMoves(ctx)
 	moves, err := r.Repository.ListMoves(ctx)
 	if err != nil {
-		return err
+		return errors.Join(discoveryErr, err)
 	}
-	var reconcileErrors []error
+	reconcileErrors := []error{discoveryErr}
 	for _, move := range moves {
 		phase := fsm.Phase(move.Status.Phase)
 		if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {

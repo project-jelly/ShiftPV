@@ -1,6 +1,6 @@
 //go:build linux
 
-package nodeexecutor
+package executor
 
 import (
 	"context"
@@ -63,7 +63,7 @@ func TestNativeCreationRecoversThroughPoolReconciliation(t *testing.T) {
 			}
 			reconciler.Inventory = scanner.Scan
 			// Recreate the executor under the same Pod UID and durable approval.
-			restarted := &Node{Identity: node.Identity, Discovery: node.Discovery, Volumes: node.Volumes, Cleanups: node.Cleanups, HostRoot: node.HostRoot}
+			restarted := &Node{Identity: node.Identity, Pods: node.Pods, Volumes: node.Volumes, Cleanups: node.Cleanups, HostRoot: node.HostRoot}
 			for attempt := 0; attempt < 3; attempt++ {
 				pool := reconcileCreationPool(t, ctx, reconciler, client, copy)
 				if attempt == 0 && (boundary == "before_placement_marker" || boundary == "before_final_rename") {

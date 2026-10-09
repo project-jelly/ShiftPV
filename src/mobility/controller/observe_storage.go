@@ -4,7 +4,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -17,8 +16,9 @@ import (
 )
 
 // poolIndex is the Pool half of one observation snapshot, indexed by Pool UID.
-// registered holds every validated ShiftPVPool; ready holds only those whose
-// inventory is currently publishable.
+// registered retains every Pool identity, including rejected registrations;
+// ready holds only usable candidates. A configuration error must not erase a
+// referenced Pool or prevent unrelated Pools from being observed.
 type poolIndex struct {
 	registered map[string]volumeapi.Pool
 	ready      map[string]volumeapi.Pool
@@ -73,9 +73,6 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 	pools := snapshot.Registered
 	index.registered = make(map[string]volumeapi.Pool, len(pools))
 	for _, pool := range pools {
-		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || filepath.Clean(pool.MountPath) == "/" {
-			return index, fmt.Errorf("ShiftPVPool %q has invalid nodeName or mountPath", pool.Name)
-		}
 		if pool.UID == "" {
 			return index, fmt.Errorf("ShiftPVPool %q has no UID", pool.Name)
 		}
@@ -87,6 +84,13 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 	readyPools := snapshot.Ready
 	index.ready = make(map[string]volumeapi.Pool, len(readyPools))
 	for _, pool := range readyPools {
+		registered, exists := index.registered[pool.UID]
+		if !exists || registered.Name != pool.Name || registered.NodeName != pool.NodeName {
+			continue
+		}
+		if !pool.BackingConfigurationCheck().OK {
+			continue
+		}
 		index.ready[pool.UID] = pool
 	}
 	return index, nil

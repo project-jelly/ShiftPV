@@ -1,12 +1,13 @@
-package nodeexecutor
+package executor
 
 import (
 	"context"
 	"fmt"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/node/executor/internal/execution"
 	"github.com/project-jelly/ShiftPV/src/node/rpc/security"
-	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor/internal/execution"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,14 +20,24 @@ import (
 	"time"
 )
 
+// PodStore is scoped to the executor namespace and exposes only self-Pod reads
+// and capability advertisement.
+type PodStore interface {
+	Get(context.Context, string, metav1.GetOptions) (*corev1.Pod, error)
+	Update(context.Context, *corev1.Pod, metav1.UpdateOptions) (*corev1.Pod, error)
+}
+
 // Node watches durable Volume intents. Relists recover work after a process
 // restart. It never selects a Pool, grants capacity, or completes a deletion.
 type Node struct {
-	Identity       volumeapi.NodeExecutor
-	Discovery      Discovery
-	Volumes        *volumeapi.Registry
-	Cleanups       *cleanupapi.Store
-	HostRoot       string
+	Identity volumeapi.NodeExecutor
+	Pods     PodStore
+	Volumes  *volumeapi.Registry
+	Cleanups *cleanupapi.Store
+	HostRoot string
+	// VerifyPool overrides live host observation for fault injection. Nil uses
+	// readiness.VerifyHostPool at every authority boundary.
+	VerifyPool     func(string, volumeapi.Pool) error
 	RPCCertificate string
 	RPCPort        string
 	ObserveStep    func(string, time.Duration)
@@ -34,7 +45,7 @@ type Node struct {
 }
 
 func (n *Node) Run(ctx context.Context) error {
-	if !n.Identity.Valid() || n.Volumes == nil || n.Cleanups == nil {
+	if !n.Identity.Valid() || n.Volumes == nil || n.Cleanups == nil || n.Pods == nil {
 		return fmt.Errorf("resident Node executor configuration is incomplete")
 	}
 	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
@@ -80,7 +91,7 @@ func (n *Node) assigned(object *unstructured.Unstructured) bool {
 }
 func (n *Node) advertise(ctx context.Context) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		pod, err := n.Discovery.Client.CoreV1().Pods(n.Identity.Namespace).Get(ctx, n.Identity.PodName, metav1.GetOptions{})
+		pod, err := n.Pods.Get(ctx, n.Identity.PodName, metav1.GetOptions{})
 		if err != nil {
 			return err
 		}
@@ -90,12 +101,12 @@ func (n *Node) advertise(ctx context.Context) error {
 		if pod.Annotations == nil {
 			pod.Annotations = map[string]string{}
 		}
-		pod.Annotations[capabilityAnnotation] = "v1"
+		pod.Annotations[volumeapi.NodeEffectsAnnotation] = "v1"
 		if n.RPCCertificate != "" {
 			pod.Annotations[security.CertificateAnnotation] = n.RPCCertificate
 			pod.Annotations[security.PortAnnotation] = n.RPCPort
 		}
-		_, err = n.Discovery.Client.CoreV1().Pods(n.Identity.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		_, err = n.Pods.Update(ctx, pod, metav1.UpdateOptions{})
 		return err
 	})
 }

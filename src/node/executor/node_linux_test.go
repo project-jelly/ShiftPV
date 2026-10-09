@@ -1,6 +1,6 @@
 //go:build linux
 
-package nodeexecutor
+package executor
 
 import (
 	"context"

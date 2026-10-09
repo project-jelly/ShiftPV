@@ -1,6 +1,6 @@
 //go:build linux
 
-package nodeexecutor
+package executor
 
 import (
 	"context"
@@ -261,7 +261,7 @@ func TestRPCRefusesWrongParentAndUnapprovedOperation(t *testing.T) {
 	if err := node.Execute(ctx, req, protocol.Operation_RECLAIM); !errors.Is(err, cleanupapi.ErrConflict) {
 		t.Fatalf("unbound cleanup=%v", err)
 	}
-	if err := client.bindCleanup(ctx, cleanup, node.Cleanups); err != nil {
+	if err := bindNodeCleanup(ctx, node, cleanup); err != nil {
 		t.Fatal(err)
 	}
 	original := req.OperationId

@@ -35,6 +35,9 @@ src/
 │   ├── controller/         observe, decide and execute one Move action
 │   └── fsm/                pure Move state transition rules
 ├── node/                   mount, inventory and identity-bound filesystem effects
+│   └── executor/           resident execution; RPC and Watch share one Volume gate
+├── provisioning/           capacity retry and Controller-side execution requests
+│   └── nodeexecutor/       executor selection, binding, transport and receipt waiting
 ├── pool/                   readiness and conservative capacity accounting
 ├── metrics/                cached observation only
 ├── volume/                 pure IDs, copy identity and path rules
@@ -59,6 +62,8 @@ test/
 | Volume loop | provision/delete lifecycle, current owner, deletion journal와 finalizer |
 | Move loop | cold move, 단일 owner CAS, rollback/source cleanup journal와 finalizer |
 | Node-local effects | per-volume lock 아래 publish/unpublish와 exact copy/promote/purge/receipt effect 실행 |
+| Controller execution client | 실행자 선택·바인딩·요청·receipt 대기; Node filesystem 실행 구현에 의존하지 않음 |
+| Resident Node executor | 승인 재검증·물리 실행·receipt 기록; RPC와 Watch는 같은 gate 사용 |
 | Metrics | cached observation; protocol decision에 입력하지 않음 |
 | Admission | 사용자가 소유한 workload를 사전 점검하고 unsafe mutation/delete를 fail closed |
 
@@ -73,6 +78,7 @@ test/
    causal proof로 사용할 수 있다.
 6. Capacity 계산은 Volume owner hold와 Move temporary hold의 합으로만 도출한다. 별도 mutable reservation source를 두지 않는다.
 7. Wall clock은 retry, timeout, metric에만 사용하고 owner 변경·삭제·hold 해제 권한에 사용하지 않는다.
+8. `provisioning/nodeexecutor`와 `node/executor`는 production에서 서로 import하지 않는다. 통합 테스트는 두 역할의 실제 구현을 연결한다.
 
 ## Durable ownership
 
@@ -82,7 +88,7 @@ test/
 | current copy, owner node, requested bytes | `ShiftPVVolume` |
 | 이동 phase, commit input, temporary holds, cleanup receipts | `ShiftPVMove` |
 | 삭제 cleanup receipts | deleting `ShiftPVVolume` |
-| 물리 effect 실행 | parent가 소유한 node-bound Job; durable truth 없음 |
+| 물리 effect 실행 | parent가 승인한 Node Pod 또는 helper Job; 완료 증거는 parent 소유 |
 
 관련 동작은 [Volume mobility](../spec/volume-mobility.md)와
 [Cleanup and GC](../spec/source-cleanup.md), 검증 기준은 [Testing](testing.md)이 소유한다.
