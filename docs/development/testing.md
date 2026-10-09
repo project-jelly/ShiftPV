@@ -70,7 +70,7 @@ git diff --check
 | Volume delete | mounted target, node down, already-absent-with-intent, unexpected absence, finalizer race |
 | Capacity | destination reserve, commit 직후 두 copy, 각 receipt 단독, fresh absence, abort cleanup |
 | Measurement | 측정 전후 Pool/mount/copy 변경, API·du 실패, read-only bind, mount 유실 |
-| Inventory | generation stale, invalid signature/identity, incomplete/truncated scan, copy reappearance |
+| Inventory | generation stale, invalid signature/identity, incomplete/truncated scan, copy reappearance, 물리 수집 전후 생성 완료, stage 이동·경로 타입 변경·parent symlink, 경로 변경 중 부재 승인 거부 |
 | Removal | unresolved Volume/Move/hold, unavailable node, API read error, generation-fenced empty inventory |
 
 각 fault case는 반복 reconcile 뒤 다음을 함께 확인한다.

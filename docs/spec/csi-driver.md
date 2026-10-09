@@ -68,6 +68,10 @@ section은 아니다. 따라서 Controller는 `scanEpoch` generation fence, vali
 identity와 `published` 관찰을 함께 요구한다. Controller가 기록한 latch, boolean이나 node 목록은 실제 mount
 evidence를 대신하지 않는다.
 
+Scan은 물리 경로를 먼저 수집한 뒤 최신 placement 기록과 대조한다. 미등록 경로는 symlink를 따라가지
+않고 다시 확인한다. 사라진 생성 stage는 대응하는 serving copy의 identity와 inode를 검증한 경우에만
+완료로 처리하며, 그 외 경로 변경은 scan을 invalid로 만들고 다음 관찰로 넘긴다. 원자적 snapshot은 아니다.
+
 ## Provision and publish
 
 Provisioning은 선택된 Pool의 exact identity와 fresh, valid, complete inventory를 확인하고 durable

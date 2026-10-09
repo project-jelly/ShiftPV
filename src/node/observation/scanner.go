@@ -54,6 +54,12 @@ func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
 }
 
 func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
+	return s.scan(ctx, pool, now, scanPhysical, physicalPathType)
+}
+
+func (s *Scanner) scan(ctx context.Context, pool volumeapi.Pool, now time.Time,
+	physical func(context.Context, string, map[string]struct{}, int) ([]volumeapi.CopyObservation, bool, error),
+	pathType func(string, string) (bool, bool, error)) volumeapi.PoolInventory {
 	result := volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now.UTC())}
 	if s.configurationInvalid(pool) {
 		result.Message = "InventoryConfigurationInvalid"
@@ -79,6 +85,11 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 		result.Message = "MountUnavailable: " + err.Error()
 		return result
 	}
+	paths, truncated, err := physical(ctx, root, nil, s.Limit)
+	if err != nil {
+		result.Message = "PhysicalInventoryFailed: " + err.Error()
+		return result
+	}
 	known := map[string]struct{}{}
 	store, err := ownership.OpenExisting(root, ownership.PoolIdentity{InstallationID: installationID, PoolUID: pool.UID})
 	if err == nil {
@@ -95,13 +106,10 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		result.Message = "PoolIdentityInvalid: " + err.Error()
 	}
-	unknown, truncated, err := scanPhysical(ctx, root, known, s.Limit-len(result.Copies))
-	if err != nil {
-		result.Message = "PhysicalInventoryFailed: " + err.Error()
+	result.Truncated = result.Truncated || truncated
+	if !s.observeUnrecorded(ctx, root, paths, known, &result, pathType) {
 		return result
 	}
-	result.Copies = append(result.Copies, unknown...)
-	result.Truncated = result.Truncated || truncated
 	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
 		result.Message = "MountUnavailable: " + err.Error()
 		return result
