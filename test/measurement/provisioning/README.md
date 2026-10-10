@@ -78,7 +78,8 @@ The [Node CREATE attribution](results/2026-10-08-node-create-attribution.md)
 separates authority, local work, receipt recording and overlapping gate waits.
 
 Same-node independent Pool admission is covered by DI tests: one blocked probe,
-node serialization and two separate Pool UID holds. Live independent-disk and
+a second independent Pool completing before the blocked probe is released,
+and same-Pool serialization with separate Pool UID holds. Live independent-disk and
 full CDI import timings remain separate qualification.
 
 Container `imageID` evidence (imported manifest digests):

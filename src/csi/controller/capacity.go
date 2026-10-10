@@ -40,17 +40,6 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, request createReque
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
 
-	unlock := s.observeLock("create_node_lock_wait", id, &s.poolLifecycles, nodeName)
-	defer unlock()
-
-	existing, err = s.readCreationIntent(ctx, id)
-	if err == nil {
-		return s.resumeExistingCreate(ctx, existing, request, parameters)
-	}
-	if !apierrors.IsNotFound(err) {
-		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
-	}
-
 	return s.placeNewCreate(ctx, id, requestName, nodeName, requestedBytes, parameters)
 }
 
@@ -137,13 +126,15 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 	return volumeapi.State{}, denied
 }
 
-// Admission and the durable creation intent share the same Pool UID lock as
-// mobility holds. Node serialization alone cannot protect independent Pools.
+// Admission and its durable intent share the Pool UID lock used by mobility
+// holds and deregistration. Registration already rejects overlapping Pools.
 func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, id, requestName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, poolFit, error) {
-	if s.PoolLocks != nil {
-		unlock := s.observeLock("create_pool_lock_wait", id, s.PoolLocks, pool.UID)
-		defer unlock()
+	locks := s.PoolLocks
+	if locks == nil {
+		locks = &s.poolLifecycles
 	}
+	unlock := s.observeLock("create_pool_lock_wait", id, locks, pool.UID)
+	defer unlock()
 	fit, err := s.poolFits(ctx, pool, id, requestName, requestedBytes, parameters)
 	if err != nil || !fit.allowed {
 		return volumeapi.State{}, fit, err

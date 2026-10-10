@@ -83,6 +83,30 @@ git diff --check
 6. restart count, warning event, bounded-cardinality metric
 7. terminal state 이후 남은 resource와 test fixture cleanup
 
+## Four review criteria
+
+테스트 파일은 컴포넌트별로 유지한다. 각 변경은 다음 네 기준에서 검토하며, DI는 관찰·시간·요청
+예산의 실패를 주입한다. 실제 판정·Registry·lock을 연결하는 회귀 테스트도 함께 유지한다.
+
+| 대상 | 안정성 | 진행성 | 동시성 | 기록 수명 |
+|---|---|---|---|---|
+| 삭제 | identity/Move 모순이면 거부 | 정상 publication은 대기 후 재개 | CAS 충돌 뒤 새 상태로 재판정 | receipt와 fresh absence 전에는 finalizer/hold 유지 |
+| Pool 배치 | capacity 초과 승인 금지 | 독립 Pool의 요청은 진행 | 같은 Pool UID만 직렬화 | durable intent retry는 같은 copy/hold 유지 |
+| Metadata GC | API 참조·불명확한 물리 증거면 보존 | fresh evidence 복구 후 수집 재개 | API 대기 중 Pool marker lock과 foreground 예산 사용 금지 | 완료·보존 기간·무참조·부재가 모두 충족된 reclaim 기록만 제거 |
+
+| 회귀 테스트 | 실제 연결 경계 |
+|---|---|
+| `volume/deletion`: `TestDeletionAdmissionSafety`, `TestDeletionAdmissionProgress` | 외부 I/O 없는 판정과 상태 전이 |
+| `kubernetes/volumeapi`: `TestBeginDeleteRechecksAdmissionAfterCASConflict` | 실제 Registry CAS + 충돌/동시 변경 주입 |
+| `csi/controller`: `TestDeleteWaitsForPublicationWithoutStartingCleanup` | CSI 응답 + 실제 Registry + cleanup effect 호출 여부 |
+| `csi/controller`: `TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode`, `TestConcurrentAdmissionToSamePoolCannotOversubscribe` | 실제 Pool Locker + capacity probe 지연 + durable hold |
+| `cmd/node`: `TestNodeBackgroundBudgetDoesNotBlockForegroundRequests` | 실제 Collector/Registry/REST clients + 차단된 GC limiter + HTTP 서버 |
+| `node/metadata`: `TestPoolCollectionEvidenceDecisions`, `TestCollectorProgressAfterFreshEvidence`, `TestCollectorRequiresLiveUnreferencedReadyPool` | 순수 eligibility + 새 관찰/참조/오류 주입 + effect 진입 여부 |
+| `node/ownership`: `TestMetadataGCRequiresClosedExpiredExactRecord`, `TestMetadataGCRechecksPhysicalAbsenceAfterAuthority`, `TestMetadataGCDoesNotHoldPoolMarkerLockDuringAPIRead`, `TestMetadataGCAfterPoolReregistration`, `TestPoolReleasePreservesLockedNamespaceAndThenRemovesLocks` | 실제 파일·receipt·flock + 보존 시간/재등장/등록 교체/중단 상태 |
+
+GC HTTP 테스트는 공유 limiter로 인한 정체를 검증한다. API 서버 장애와 실제 publish/클러스터
+지연은 별도 gate다. 중단 상태 fixture는 process kill이나 전원 차단의 내구성을 증명하지 않는다.
+
 ## Isolated Kind
 
 Target suite는 서로 다른 host directory를 mount한 최소 두 worker를 사용한다. Suite마다 고유한

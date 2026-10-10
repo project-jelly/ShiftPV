@@ -7,6 +7,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/project-jelly/ShiftPV/src/volume/deletion"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -22,6 +24,7 @@ var (
 	MoveResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvmoves"}
 
 	ErrStateConflict     = errors.New("ShiftPV state precondition failed")
+	ErrVolumePublished   = errors.New("volume publication is still being released")
 	ErrPoolConfiguration = errors.New("ShiftPV Pool configuration is invalid")
 	ErrPoolNotFound      = errors.New("ShiftPV Pool is not registered")
 	ErrPoolNotReady      = errors.New("ShiftPV Pool is not ready")
@@ -49,8 +52,8 @@ const (
 
 	PhasePending      = "Pending"
 	PhaseNodeCreating = "NodeCreating"
-	PhaseReady        = "Ready"
-	PhaseDeleting     = "Deleting"
+	PhaseReady        = deletion.PhaseReady
+	PhaseDeleting     = deletion.PhaseDeleting
 	PhaseMoving       = "Moving"
 	PhaseBlocked      = "Blocked"
 )

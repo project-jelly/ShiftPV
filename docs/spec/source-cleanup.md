@@ -119,6 +119,30 @@ Volume returns to source `Ready` with `activeMove` cleared. If postcommit source
 cleanup cannot prove authority, destination remains owner and the Move waits or
 the cleanup subjournal enters `NeedsReview`.
 
+## Node Metadata Retention
+
+The node metadata collector runs at startup and hourly. Completed reclaim
+`receipt-*.json` and matching `cleanup-*.json` are retained for at least seven
+days (`--metadata-retention`, minimum one hour). Collection requires a canonical
+completed receipt, an unchanged ready Pool and backing filesystem, fresh complete
+inventory, no Volume or Move reference, and no data/copy/placement path. API
+failure, a busy lock, malformed metadata or contradictory evidence retains the
+records. Unlink the redundant intent and sync before unlinking the receipt;
+replay after an interrupted pass remains safe. Historical records at a
+re-registered path require the same installation and no remaining old Pool.
+API checks keep current-Pool candidates volume-locked; the Pool-wide marker lock covers
+only the final local recheck and unlink, so API latency cannot block other
+volumes' marker writes. GC uses a separate API client and rate limiter from
+foreground publish and readiness work.
+
+`lock-<volumeID>` stays for the entire Pool lifetime: unlinking an active lock
+can create two independently locked inodes at one path. Only controller-approved
+empty Pool deregistration removes these locks, while holding `identity.lock`
+and every volume lock. Pool identity removal is synced before lock removal;
+`identity.lock` remains across re-registration. Copy/promotion receipts and
+unknown metadata are preserved; this collector never deletes volume data or
+releases capacity.
+
 ## Already-Absent Rule
 
 Absence is meaningful only when tied to a durable exact intent.

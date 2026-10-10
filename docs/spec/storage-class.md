@@ -53,6 +53,7 @@ parameters:
 ```
 
 한 node에서 함께 사용하는 Pool은 모두 `capacityPolicy: FixedBlock`으로 독립 용량을 검증해야 한다.
+생성 admission·예약 기록·Move 예약·등록 해제는 같은 Pool UID 잠금을 공유한다. 독립 Pool의 admission은 병렬로 진행하며, 같은 Pool은 예약 기록이 끝날 때까지 직렬화한다.
 지원하는 ext4/xfs의 fixed block backing 구간과 경로가 겹치면 배치할 수 없다.
 같은 그룹에서는 각 Pool의 한도·예약·filesystem 여유를 따로 검사해 수용 가능한 Pool
 하나를 선택한다. PVC를 여러 Pool로 나누거나 그룹 용량을 합산하지 않는다.
