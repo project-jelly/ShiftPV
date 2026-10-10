@@ -71,6 +71,9 @@ func TestDeleteWaitsForPublicationWithoutStartingCleanup(t *testing.T) {
 			if _, err := client.Resource(volumeapi.VolumeResource).Get(ctx, id, metav1.GetOptions{}); err == nil {
 				t.Fatal("settled volume remains")
 			}
+			if _, err := s.DeleteVolume(ctx, req); err != nil || effect.calls != 1 {
+				t.Fatalf("completed deletion retry repeated effects: %v calls=%d", err, effect.calls)
+			}
 		})
 	}
 }

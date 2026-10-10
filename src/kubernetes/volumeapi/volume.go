@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
+	"github.com/project-jelly/ShiftPV/src/volume/deletion"
 )
 
 type State struct {
@@ -296,28 +297,18 @@ func (r *Registry) BeginDelete(ctx context.Context, volumeID, uid string, copy v
 // fenceForDeletion admits exactly one deletion operation per live copy and is
 // idempotent only for the operation that already owns the fence.
 func fenceForDeletion(current State, uid, operationID string, copy volume.CopyIdentity) (State, error) {
-	if current.UID != uid || current.OwnerNode != copy.NodeName || current.CurrentCopy == nil || *current.CurrentCopy != copy ||
-		current.ActiveMove != "" {
-		return State{}, ErrStateConflict
-	}
-	if current.Phase == PhaseReady && current.DeletionOperationID == "" &&
-		len(current.PublishedNodes) == 1 && current.PublishedNodes[0] == copy.NodeName {
+	decision := deletion.Decide(deletion.Observation{
+		UID: current.UID, OwnerNode: current.OwnerNode, Phase: current.Phase,
+		ActiveMove: current.ActiveMove, OperationID: current.DeletionOperationID,
+		CurrentCopy: current.CurrentCopy, PublishedNodes: current.PublishedNodes,
+	}, uid, operationID, copy)
+	switch decision {
+	case deletion.WaitForUnpublish:
 		return State{}, fmt.Errorf("%w: %w", ErrStateConflict, ErrVolumePublished)
-	}
-	if len(current.PublishedNodes) != 0 {
-		return State{}, ErrStateConflict
-	}
-	switch current.Phase {
-	case PhaseReady:
-		if current.DeletionOperationID != "" {
-			return State{}, ErrStateConflict
-		}
+	case deletion.Begin:
 		current.Phase = PhaseDeleting
 		current.DeletionOperationID = operationID
-	case PhaseDeleting:
-		if current.DeletionOperationID != operationID {
-			return State{}, ErrStateConflict
-		}
+	case deletion.Resume:
 	default:
 		return State{}, ErrStateConflict
 	}

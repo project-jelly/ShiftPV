@@ -88,7 +88,7 @@ func (c *Collector) Reconcile(ctx context.Context) error {
 		if pool.NodeName != c.NodeName || pool.DeletionTimestamp != nil {
 			continue
 		}
-		if !collectible(pool, now) {
+		if decidePoolCollection(pool, now) != collectEligible {
 			continue
 		}
 		if err := c.verify(ctx, pool); err != nil {
@@ -123,7 +123,7 @@ func (c *Collector) verify(ctx context.Context, expected volumeapi.Pool) error {
 		if c.Now != nil {
 			now = c.Now()
 		}
-		if !collectible(pool, now) {
+		if decidePoolCollection(pool, now) != collectEligible {
 			return volumeapi.ErrPoolNotReady
 		}
 		if c.VerifyPool != nil {
@@ -132,15 +132,6 @@ func (c *Collector) verify(ctx context.Context, expected volumeapi.Pool) error {
 		return readiness.VerifyHostPool(c.HostRoot, pool)
 	}
 	return ownership.ErrIdentity
-}
-
-func collectible(pool volumeapi.Pool, now time.Time) bool {
-	if !pool.BackingConfigurationCheck().OK {
-		return false
-	}
-	ready, _ := pool.ReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter)
-	inv := pool.Status.Inventory
-	return ready && inv != nil && inv.Valid && !inv.Truncated && inv.Message == "" && !inv.ObservedAt.IsZero() && !inv.ObservedAt.Time.After(now) && now.Sub(inv.ObservedAt.Time) <= volumeapi.DefaultPoolReadinessStaleAfter
 }
 
 func (c *Collector) unreferenced(ctx context.Context, pool volumeapi.Pool, target volume.CopyIdentity) (bool, error) {

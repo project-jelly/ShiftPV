@@ -7,6 +7,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/project-jelly/ShiftPV/src/volume/deletion"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -50,8 +52,8 @@ const (
 
 	PhasePending      = "Pending"
 	PhaseNodeCreating = "NodeCreating"
-	PhaseReady        = "Ready"
-	PhaseDeleting     = "Deleting"
+	PhaseReady        = deletion.PhaseReady
+	PhaseDeleting     = deletion.PhaseDeleting
 	PhaseMoving       = "Moving"
 	PhaseBlocked      = "Blocked"
 )

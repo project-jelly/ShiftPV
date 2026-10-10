@@ -43,6 +43,7 @@ src/
 ├── pool/                   readiness and conservative capacity accounting
 ├── metrics/                cached observation only
 ├── volume/                 pure IDs, copy identity and path rules
+│   └── deletion/           exact-copy deletion admission: begin, resume, wait, reject
 └── webhook/                serving certificate lifecycle
 
 test/
@@ -82,6 +83,11 @@ test/
 6. Capacity 계산은 Volume owner hold와 Move temporary hold의 합으로만 도출한다. 별도 mutable reservation source를 두지 않는다.
 7. Wall clock은 retry, timeout, metric과 완료된 metadata의 최소 보존 기간에 사용한다. 시간 경과는 데이터 삭제·owner 변경·hold 해제 권한이 아니다.
 8. `provisioning/nodeexecutor`와 `node/executor`는 production에서 서로 import하지 않는다. 통합 테스트는 두 역할의 실제 구현을 연결한다.
+9. 삭제 판정은 `volume/deletion`, resourceVersion CAS는 `volumeapi`, CSI retry 응답은 `csi/controller`가 소유한다. 판정은 CAS 재시도마다 새 상태로 실행한다.
+
+Node API client 구성은 `cmd/node/clients.go`가 소유한다. Foreground·measurement·metadata는
+각각 5 QPS/10 burst, resident effects는 typed/dynamic client가 공유하는 50 QPS/100 burst를
+사용한다. 역할 간 limiter는 공유하지 않는다. 이 분리는 API 서버 장애 자체를 격리하지는 않는다.
 
 ## Durable ownership
 

@@ -16,7 +16,6 @@ import (
 	"github.com/project-jelly/ShiftPV/src/csi/identity"
 	nodecsi "github.com/project-jelly/ShiftPV/src/csi/node"
 	csiserver "github.com/project-jelly/ShiftPV/src/csi/server"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/metrics"
 	"github.com/project-jelly/ShiftPV/src/node/metadata"
 	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
@@ -48,10 +47,8 @@ func main() {
 		klog.Fatalf("node metadata retention must be at least one hour")
 	}
 
-	registry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
-	probeRegistry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
-	// Background GC must not spend the foreground publish/readiness API budget.
-	metadataRegistry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
+	clients := newNodeAPIClients(newNodeAPIConfigs(wiring.InClusterConfig(fatal)), fatal)
+	registry, probeRegistry := clients.foreground, clients.measurement
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -92,11 +89,11 @@ func main() {
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
 	errCh := make(chan error, 6)
 	go func() {
-		collector := &metadata.Collector{NodeName: *nodeName, HostRoot: *hostRoot, Repository: metadataRegistry, Retention: *metadataRetention}
+		collector := &metadata.Collector{NodeName: *nodeName, HostRoot: *hostRoot, Repository: clients.metadata, Retention: *metadataRetention}
 		errCh <- collector.Run(ctx)
 	}()
 	if os.Getenv("POD_UID") != "" {
-		startNodeEffects(ctx, *nodeName, *hostRoot, *rpcAddress, *controllerAccount, exporter.ObserveProvisioningStep, errCh)
+		startNodeEffects(ctx, clients.effects, *nodeName, *hostRoot, *rpcAddress, *controllerAccount, exporter.ObserveProvisioningStep, errCh)
 	}
 	go func() { errCh <- readinessReconciler.Run(ctx) }()
 	go func() {
