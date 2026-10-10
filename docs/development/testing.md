@@ -101,11 +101,15 @@ git diff --check
 | `csi/controller`: `TestDeleteWaitsForPublicationWithoutStartingCleanup` | CSI 응답 + 실제 Registry + cleanup effect 호출 여부 |
 | `csi/controller`: `TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode`, `TestConcurrentAdmissionToSamePoolCannotOversubscribe` | 실제 Pool Locker + capacity probe 지연 + durable hold |
 | `cmd/node`: `TestNodeBackgroundBudgetDoesNotBlockForegroundRequests` | 실제 Collector/Registry/REST clients + 차단된 GC limiter + HTTP 서버 |
-| `node/metadata`: `TestPoolCollectionEvidenceDecisions`, `TestCollectorProgressAfterFreshEvidence`, `TestCollectorRequiresLiveUnreferencedReadyPool` | 순수 eligibility + 새 관찰/참조/오류 주입 + effect 진입 여부 |
+| `node/metadata`: `TestPoolCollectionEligibility`, `TestCollectorProgressAfterFreshEvidence`, `TestCollectorRequiresLiveUnreferencedReadyPool` | 순수 eligibility + 새 관찰/참조/오류 주입 + effect 진입 여부 |
 | `node/ownership`: `TestMetadataGCRequiresClosedExpiredExactRecord`, `TestMetadataGCRechecksPhysicalAbsenceAfterAuthority`, `TestMetadataGCDoesNotHoldPoolMarkerLockDuringAPIRead`, `TestMetadataGCAfterPoolReregistration`, `TestPoolReleasePreservesLockedNamespaceAndThenRemovesLocks` | 실제 파일·receipt·flock + 보존 시간/재등장/등록 교체/중단 상태 |
 
 GC HTTP 테스트는 공유 limiter로 인한 정체를 검증한다. API 서버 장애와 실제 publish/클러스터
 지연은 별도 gate다. 중단 상태 fixture는 process kill이나 전원 차단의 내구성을 증명하지 않는다.
+
+복구 테스트의 용량 검증도 운영과 같은 `ReservedBytesForPool`을 사용한다. Owner commit 전후,
+cleanup 미완료·완료, 같은 node의 서로 다른 Pool hold와 overflow를 보존한다.
+`BenchmarkReservedBytesForPool`은 Pool ledger의 CPU·할당 비용만 측정하며 API·disk 지연을 포함하지 않는다.
 
 ## Isolated Kind
 

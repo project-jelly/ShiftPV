@@ -566,7 +566,7 @@ func TestPostcommitScannerPublicationWaitCarriesNoNilCause(t *testing.T) {
 }
 
 func TestRecoveredMoveReleasesFinalizerOnlyAfterCapacitySettlement(t *testing.T) {
-	r, repo, _ := recoveryFixture(t, "source")
+	r, repo, _, incoming, _ := recoveryTransactionFixture(t, "source", false)
 	move := repo.moves[0]
 	move.Finalizers = []string{volumeapi.MoveProtectionFinalizer}
 	move.Status.RecoveryOwner, move.Status.RecoveryPhase = "source", recoveryResuming
@@ -589,7 +589,7 @@ func TestRecoveredMoveReleasesFinalizerOnlyAfterCapacitySettlement(t *testing.T)
 		slices.Contains(got.Finalizers, volumeapi.MoveProtectionFinalizer) || !volumeapi.MoveCleanupSettled(got) {
 		t.Fatalf("recovery did not terminally settle: move=%+v volume=%+v", got, repo.volumes[move.Spec.VolumeID])
 	}
-	reserved, err := poolcapacity.ReservedBytes(repo.volumes, repo.moves, "destination")
+	reserved, err := poolcapacity.ReservedBytesForPool(repo.volumes, repo.moves, incoming.PoolUID)
 	if err != nil || reserved != 0 {
 		t.Fatalf("settled recovery retained destination capacity: reserved=%d err=%v", reserved, err)
 	}
@@ -871,7 +871,7 @@ func TestSettledTerminalMoveStillFinishesItsCleanupJournal(t *testing.T) {
 			if !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
 				t.Fatalf("self-heal touched the volume: %+v", repo.volumes[move.Spec.VolumeID])
 			}
-			reserved, err := poolcapacity.ReservedBytes(repo.volumes, repo.moves, "destination")
+			reserved, err := poolcapacity.ReservedBytesForPool(repo.volumes, repo.moves, incoming.PoolUID)
 			if err != nil || reserved != 0 {
 				t.Fatalf("self-heal re-reserved destination capacity: reserved=%d err=%v", reserved, err)
 			}

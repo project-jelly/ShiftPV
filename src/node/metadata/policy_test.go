@@ -13,30 +13,30 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestPoolCollectionEvidenceDecisions(t *testing.T) {
+func TestPoolCollectionEligibility(t *testing.T) {
 	now := time.Now().UTC()
 	for _, tc := range []struct {
 		name   string
 		change func(*volumeapi.Pool)
-		want   poolCollectionDecision
+		want   bool
 	}{
-		{"fresh", func(*volumeapi.Pool) {}, collectEligible},
-		{"invalid path", func(p *volumeapi.Pool) { p.MountPath = "relative" }, rejectPoolConfiguration},
-		{"deleting", func(p *volumeapi.Pool) { stamp := metav1.NewTime(now); p.DeletionTimestamp = &stamp }, waitForPoolEvidence},
-		{"generation changed", func(p *volumeapi.Pool) { p.Generation++ }, waitForPoolEvidence},
-		{"not ready", func(p *volumeapi.Pool) { p.Status.Conditions[0].Status = metav1.ConditionFalse }, waitForPoolEvidence},
-		{"missing inventory", func(p *volumeapi.Pool) { p.Status.Inventory = nil }, waitForPoolEvidence},
-		{"invalid inventory", func(p *volumeapi.Pool) { p.Status.Inventory.Valid = false }, waitForPoolEvidence},
-		{"truncated inventory", func(p *volumeapi.Pool) { p.Status.Inventory.Truncated = true }, waitForPoolEvidence},
-		{"failed scan", func(p *volumeapi.Pool) { p.Status.Inventory.Message = "scan failed" }, waitForPoolEvidence},
-		{"missing timestamp", func(p *volumeapi.Pool) { p.Status.Inventory.ObservedAt = metav1.Time{} }, waitForPoolEvidence},
-		{"future scan", func(p *volumeapi.Pool) { p.Status.Inventory.ObservedAt = metav1.NewTime(now.Add(time.Second)) }, waitForPoolEvidence},
-		{"stale scan", func(p *volumeapi.Pool) { p.Status.Inventory.ObservedAt = metav1.NewTime(now.Add(-time.Hour)) }, waitForPoolEvidence},
+		{"fresh", func(*volumeapi.Pool) {}, true},
+		{"invalid path", func(p *volumeapi.Pool) { p.MountPath = "relative" }, false},
+		{"deleting", func(p *volumeapi.Pool) { stamp := metav1.NewTime(now); p.DeletionTimestamp = &stamp }, false},
+		{"generation changed", func(p *volumeapi.Pool) { p.Generation++ }, false},
+		{"not ready", func(p *volumeapi.Pool) { p.Status.Conditions[0].Status = metav1.ConditionFalse }, false},
+		{"missing inventory", func(p *volumeapi.Pool) { p.Status.Inventory = nil }, false},
+		{"invalid inventory", func(p *volumeapi.Pool) { p.Status.Inventory.Valid = false }, false},
+		{"truncated inventory", func(p *volumeapi.Pool) { p.Status.Inventory.Truncated = true }, false},
+		{"failed scan", func(p *volumeapi.Pool) { p.Status.Inventory.Message = "scan failed" }, false},
+		{"missing timestamp", func(p *volumeapi.Pool) { p.Status.Inventory.ObservedAt = metav1.Time{} }, false},
+		{"future scan", func(p *volumeapi.Pool) { p.Status.Inventory.ObservedAt = metav1.NewTime(now.Add(time.Second)) }, false},
+		{"stale scan", func(p *volumeapi.Pool) { p.Status.Inventory.ObservedAt = metav1.NewTime(now.Add(-time.Hour)) }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := readyPool(now)
 			tc.change(&pool)
-			if got := decidePoolCollection(pool, now); got != tc.want {
+			if got := poolCollectionEligible(pool, now); got != tc.want {
 				t.Fatalf("decision=%v want=%v", got, tc.want)
 			}
 		})

@@ -88,7 +88,7 @@ func (c *Collector) Reconcile(ctx context.Context) error {
 		if pool.NodeName != c.NodeName || pool.DeletionTimestamp != nil {
 			continue
 		}
-		if decidePoolCollection(pool, now) != collectEligible {
+		if !poolCollectionEligible(pool, now) {
 			continue
 		}
 		if err := c.verify(ctx, pool); err != nil {
@@ -123,7 +123,7 @@ func (c *Collector) verify(ctx context.Context, expected volumeapi.Pool) error {
 		if c.Now != nil {
 			now = c.Now()
 		}
-		if decidePoolCollection(pool, now) != collectEligible {
+		if !poolCollectionEligible(pool, now) {
 			return volumeapi.ErrPoolNotReady
 		}
 		if c.VerifyPool != nil {
@@ -170,4 +170,18 @@ func (c *Collector) unreferenced(ctx context.Context, pool volumeapi.Pool, targe
 		}
 	}
 	return true, c.verify(ctx, pool)
+}
+
+// Eligibility is a snapshot decision, not permission to unlink records.
+// Collector and ownership recheck API authority and physical absence later.
+func poolCollectionEligible(pool volumeapi.Pool, now time.Time) bool {
+	if !pool.BackingConfigurationCheck().OK {
+		return false
+	}
+	ready, _ := pool.ReadyAt(now, volumeapi.DefaultPoolReadinessStaleAfter)
+	inv := pool.Status.Inventory
+	if pool.DeletionTimestamp != nil || !ready || inv == nil || !inv.Valid || inv.Truncated || inv.Message != "" || inv.ObservedAt.IsZero() || inv.ObservedAt.Time.After(now) || now.Sub(inv.ObservedAt.Time) > volumeapi.DefaultPoolReadinessStaleAfter {
+		return false
+	}
+	return true
 }

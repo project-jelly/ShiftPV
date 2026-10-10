@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/project-jelly/ShiftPV/src/node/executor/internal/execution"
 	"github.com/project-jelly/ShiftPV/src/node/rpc/security"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,7 +40,7 @@ type Node struct {
 	RPCCertificate string
 	RPCPort        string
 	ObserveStep    func(string, time.Duration)
-	gate           execution.Gate
+	gate           effectGate
 }
 
 func (n *Node) Run(ctx context.Context) error {

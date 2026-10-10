@@ -1,4 +1,4 @@
-package execution
+package executor
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 // Gate serializes API recovery and direct RPC for a Volume. Entries disappear
 // after the last waiter, and cancelled calls never wait for another operation.
-type Gate struct {
+type effectGate struct {
 	mu      sync.Mutex
 	entries map[string]*entry
 }
@@ -16,7 +16,7 @@ type entry struct {
 	users int
 }
 
-func (g *Gate) Lock(ctx context.Context, key string) (func(), error) {
+func (g *effectGate) Lock(ctx context.Context, key string) (func(), error) {
 	g.mu.Lock()
 	if g.entries == nil {
 		g.entries = map[string]*entry{}
@@ -41,7 +41,7 @@ func (g *Gate) Lock(ctx context.Context, key string) (func(), error) {
 		return nil, ctx.Err()
 	}
 }
-func (g *Gate) release(key string, e *entry) {
+func (g *effectGate) release(key string, e *entry) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e.users--
