@@ -11,6 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
@@ -185,4 +186,27 @@ func absenceRequestID(cleanup Cleanup, generation int64) string {
 	encoded := cleanup.Spec.Authority.UID + "\x00" + cleanup.Spec.OperationID + "\x00" + fmt.Sprint(generation)
 	sum := sha256.Sum256([]byte(encoded))
 	return "scan-" + hex.EncodeToString(sum[:16])
+}
+
+// WaitForAbsence waits only for the existing causal proof. A local timeout
+// leaves the journal and its capacity hold intact; caller cancellation wins.
+func (s *Store) WaitForAbsence(ctx context.Context, expected Cleanup, timeout time.Duration) (Cleanup, bool, error) {
+	if timeout <= 0 {
+		return expected, false, nil
+	}
+	current, settled := expected, false
+	err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, timeout, true, func(pollCtx context.Context) (bool, error) {
+		next, complete, err := s.ReconcileAbsence(pollCtx, current)
+		if err == nil {
+			current, settled = next, complete
+		}
+		return settled, err
+	})
+	if ctx.Err() != nil {
+		return current, false, ctx.Err()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return current, false, nil
+	}
+	return current, settled, err
 }

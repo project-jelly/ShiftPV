@@ -7,85 +7,64 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
-// ReservedBytes counts current Volume owner capacity and active Move temporary
-// holds. It intentionally over-counts retained postcommit source copies until
-// the owning Move settles cleanup evidence.
-func ReservedBytes(volumes map[string]volumeapi.State, moves []volumeapi.Move, nodeName string) (int64, error) {
-	if nodeName == "" {
-		return 0, fmt.Errorf("node name is required")
+// ReservedBytesForPool counts durable volume and Move holds for one exact Pool
+// incarnation. It uses copy Pool UIDs, since nodes may own multiple capacity
+// units and a node-wide total cannot be subtracted from one Pool's limit.
+func ReservedBytesForPool(volumes map[string]volumeapi.State, moves []volumeapi.Move, poolUID string) (int64, error) {
+	if poolUID == "" {
+		return 0, fmt.Errorf("Pool UID is required")
 	}
-	total, err := ownedBytes(volumes, nodeName)
+	total, err := ownedBytesForPool(volumes, poolUID)
 	if err != nil {
 		return 0, err
 	}
-	for _, move := range moves {
-		if total, err = addMoveHold(total, move, volumes, nodeName); err != nil {
-			return 0, err
-		}
-	}
-	return total, nil
+	return moveHeldBytesForPool(total, volumes, moves, poolUID)
 }
 
-// ownedBytes counts the capacity of every Volume this node currently owns. An
-// ownerless or zero-capacity Volume anywhere makes the whole total unusable.
-func ownedBytes(volumes map[string]volumeapi.State, nodeName string) (int64, error) {
+func ownedBytesForPool(volumes map[string]volumeapi.State, poolUID string) (int64, error) {
 	var total int64
 	for volumeID, state := range volumes {
-		if state.OwnerNode == "" {
-			return 0, fmt.Errorf("volume %q has no current owner", volumeID)
+		if state.OwnerNode == "" || state.CapacityBytes <= 0 || state.CurrentCopy == nil ||
+			state.CurrentCopy.PoolUID == "" || state.CurrentCopy.NodeName != state.OwnerNode {
+			return 0, fmt.Errorf("volume %q has incomplete capacity owner identity", volumeID)
 		}
-		if state.CapacityBytes <= 0 {
-			return 0, fmt.Errorf("volume %q has invalid capacity", volumeID)
+		if state.CurrentCopy.PoolUID == poolUID {
+			var err error
+			total, err = add(total, state.CapacityBytes)
+			if err != nil {
+				return 0, err
+			}
 		}
-		if state.OwnerNode != nodeName {
-			continue
-		}
-		next, err := add(total, state.CapacityBytes)
-		if err != nil {
-			return 0, err
-		}
-		total = next
 	}
 	return total, nil
 }
 
-// addMoveHold adds the temporary holds one unsettled Move places on this node:
-// the destination reservation taken before the owner commits, and the source
-// copy still retained after it.
-func addMoveHold(total int64, move volumeapi.Move, volumes map[string]volumeapi.State, nodeName string) (int64, error) {
-	if volumeapi.MoveCleanupSettled(move) {
-		return total, nil
-	}
-	state, exists := volumes[move.Spec.VolumeID]
-	if !exists {
-		if move.Status.CapacityApproved {
+func moveHeldBytesForPool(total int64, volumes map[string]volumeapi.State, moves []volumeapi.Move, poolUID string) (int64, error) {
+	for _, move := range moves {
+		if volumeapi.MoveCleanupSettled(move) || !move.Status.CapacityApproved {
+			continue
+		}
+		state, exists := volumes[move.Spec.VolumeID]
+		if !exists {
 			return 0, fmt.Errorf("move %q has no volume state", move.Name)
 		}
-		return total, nil
-	}
-	if state.ActiveMove != move.Name {
-		if move.Status.CapacityApproved {
-			return 0, fmt.Errorf("move %q is not the active Move for volume %q", move.Name, move.Spec.VolumeID)
+		if state.ActiveMove != move.Name || state.CurrentCopy == nil ||
+			move.Status.SourceCopy == nil || move.Status.SourceCopy.PoolUID == "" ||
+			move.Status.DestinationPoolUID == "" {
+			return 0, fmt.Errorf("move %q has incomplete capacity hold identity", move.Name)
 		}
-		return total, nil
-	}
-	if state.CapacityBytes <= 0 {
-		return 0, fmt.Errorf("move %q has invalid volume capacity", move.Name)
-	}
-	if move.Status.CapacityApproved && move.Status.DestinationNode == nodeName && state.OwnerNode != nodeName {
-		next, err := add(total, state.CapacityBytes)
-		if err != nil {
-			return 0, err
+		heldPoolUID := move.Status.DestinationPoolUID
+		if state.CurrentCopy.PoolUID == heldPoolUID {
+			// Owner CAS committed: retain the source copy's hold until cleanup.
+			heldPoolUID = move.Status.SourceCopy.PoolUID
 		}
-		total = next
-	}
-	if move.Status.CapacityApproved && move.Status.DestinationNode == state.OwnerNode &&
-		move.Spec.SourceNode == nodeName && move.Spec.SourceNode != state.OwnerNode {
-		next, err := add(total, state.CapacityBytes)
-		if err != nil {
-			return 0, err
+		if heldPoolUID == poolUID {
+			var err error
+			total, err = add(total, state.CapacityBytes)
+			if err != nil {
+				return 0, err
+			}
 		}
-		total = next
 	}
 	return total, nil
 }

@@ -7,12 +7,14 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 
+	"github.com/project-jelly/ShiftPV/src/volume"
 	"golang.org/x/sys/unix"
 )
 
-// ReleaseEmptyPool removes only the exact Pool identity marker. Copy data and
-// copy metadata are never removed here; their presence keeps the Pool intact.
+// ReleaseEmptyPool ends the exact empty Pool's identity and lock namespace.
+// Copy data and copy metadata keep the Pool intact; receipts are retained.
 func ReleaseEmptyPool(ctx context.Context, root string, identity PoolIdentity) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -26,7 +28,7 @@ func ReleaseEmptyPool(ctx context.Context, root string, identity PoolIdentity) e
 		if !empty {
 			return ErrNeedsReview
 		}
-		return nil
+		return syncReleasedIdentity(root)
 	}
 	if err != nil {
 		return err
@@ -57,10 +59,91 @@ func ReleaseEmptyPool(ctx context.Context, root string, identity PoolIdentity) e
 	if !empty {
 		return ErrNeedsReview
 	}
+	return store.releaseLockNamespace(ctx)
+}
+
+func (store *Store) releaseLockNamespace(ctx context.Context) error {
+	locks, err := store.lockVolumeFiles(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for _, file := range locks {
+			file.Close()
+		}
+	}()
 	if err := unix.Unlinkat(int(store.control.Fd()), "pool.json", 0); err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
+	// A crash must not persist removed locks while resurrecting their identity.
+	if err := store.control.Sync(); err != nil {
+		return err
+	}
+	for _, file := range locks {
+		if err := unix.Unlinkat(int(store.control.Fd()), file.Name(), 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			return err
+		}
+	}
 	return store.control.Sync()
+}
+
+func syncReleasedIdentity(root string) error {
+	rootFD, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rootFD)
+	controlFD, err := unix.Openat(rootFD, ".shiftpv", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return unix.Fsync(rootFD)
+	}
+	if err != nil {
+		return err
+	}
+	defer unix.Close(controlFD)
+	return unix.Fsync(controlFD)
+}
+
+// Only a controller-approved empty Pool may end its volume lock namespace.
+// identity.lock stays in place across Pool re-registration.
+func (s *Store) lockVolumeFiles(ctx context.Context) (files []*os.File, result error) {
+	defer func() {
+		if result != nil {
+			for _, file := range files {
+				file.Close()
+			}
+			files = nil
+		}
+	}()
+	for {
+		names, readErr := s.control.Readdirnames(128)
+		for _, name := range names {
+			if err := ctx.Err(); err != nil {
+				return files, err
+			}
+			if !strings.HasPrefix(name, "lock-") || volume.ValidateID(strings.TrimPrefix(name, "lock-")) != nil {
+				continue
+			}
+			file, err := s.openControl(name, unix.O_RDONLY, 0)
+			if err != nil {
+				return files, err
+			}
+			files = append(files, file)
+			info, err := file.Stat()
+			if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+				return files, ErrNeedsReview
+			}
+			if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+				return files, ErrBusy
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return files, nil
+		}
+		if readErr != nil {
+			return files, readErr
+		}
+	}
 }
 
 func (s *Store) managedDataEmpty() (bool, error) {

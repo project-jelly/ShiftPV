@@ -14,14 +14,9 @@ import (
 	"github.com/project-jelly/ShiftPV/src/node/rpc/security"
 	rpcserver "github.com/project-jelly/ShiftPV/src/node/rpc/server"
 	"github.com/project-jelly/ShiftPV/src/pool/measurement"
-	"k8s.io/client-go/rest"
 )
 
-func startNodeEffects(ctx context.Context, nodeName, hostRoot, address, controllerAccount string, observe func(string, time.Duration), errCh chan<- error) {
-	clients := wiring.InCluster(fatal)
-	config := rest.CopyConfig(clients.Config)
-	config.QPS, config.Burst, config.RateLimiter = 50, 100, nil
-	effectClients := wiring.ForConfig(config, "resident Node effects", fatal)
+func startNodeEffects(ctx context.Context, effectClients wiring.Clients, nodeName, hostRoot, address, controllerAccount string, observe func(string, time.Duration), errCh chan<- error) {
 	volumes := &volumeapi.Registry{Client: effectClients.Dynamic}
 	effects := &executor.Node{Identity: volumeapi.NodeExecutor{Namespace: os.Getenv("POD_NAMESPACE"), PodName: os.Getenv("POD_NAME"), PodUID: os.Getenv("POD_UID"), NodeName: nodeName}, Pods: effectClients.Typed.CoreV1().Pods(os.Getenv("POD_NAMESPACE")), Volumes: volumes, Cleanups: &cleanupapi.Store{Client: effectClients.Dynamic}, HostRoot: hostRoot}
 	effects.ObserveStep = observe

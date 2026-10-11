@@ -141,6 +141,8 @@ hold를 보존한다.
 
 ## Delete and cleanup closure
 
+정확한 Ready copy가 아직 게시 중이면 `DeleteVolume`은 `Unavailable`로 unpublish를 기다린다. 이때 삭제 fence·cleanup·예약 반환을 시작하지 않는다. copy/UID/owner 불일치, active Move, 잘못된 phase는 계속 `FailedPrecondition`으로 거부한다.
+
 Delete는 Volume을 먼저 fenced 상태로 만들고 신규 publication을 차단한다. Node가 actual unpublish를 다시
 확인하고 `publishedNodes`가 비어 있으면 exact target과 executor를 durable delete journal에 결합하고
 node-local purge를 실행한다.

@@ -49,7 +49,7 @@ CreateVolume의 세부 `step`은 다음과 같다. 같은 volume의 로그를 �
 
 | 단계 | `step` |
 |---|---|
-| 잠금 획득까지의 대기 | `create_volume_lock_wait`, `create_node_lock_wait`, `create_pool_lock_wait` |
+| 잠금 획득까지의 대기 | `create_volume_lock_wait`, `create_pool_lock_wait` |
 | cleanup fence 확인 | `create_cleanup_fence` |
 | 기존 생성 조회·재개 | `create_intent_read`, `create_resume` |
 | 신규 Pool 후보 조회 | `create_pool_list` |

@@ -6,113 +6,126 @@ import (
 	"testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
-func TestReservedBytesCountsVolumeOwnerCapacity(t *testing.T) {
+func TestReservedBytesForPoolCountsVolumeOwnerCapacity(t *testing.T) {
 	volumes := map[string]volumeapi.State{
-		"v": {OwnerNode: "a", CapacityBytes: 64},
+		"v": {OwnerNode: "a", CurrentCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityBytes: 64},
 	}
-	got, err := ReservedBytes(volumes, nil, "a")
+	got, err := ReservedBytesForPool(volumes, nil, "pool-a")
 	if err != nil || got != 64 {
 		t.Fatalf("reserved=%d err=%v", got, err)
 	}
 }
 
-func TestReservedBytesCountsActivePrecommitDestinationHold(t *testing.T) {
+func TestReservedBytesForPoolCountsActivePrecommitDestinationHold(t *testing.T) {
 	volumes := map[string]volumeapi.State{
-		"v": {OwnerNode: "a", ActiveMove: "m", CapacityBytes: 64},
+		"v": {OwnerNode: "a", ActiveMove: "m", CurrentCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityBytes: 64},
 	}
 	moves := []volumeapi.Move{{
 		Name: "m", Spec: volumeapi.MoveSpec{VolumeID: "v", SourceNode: "a"},
-		Status: volumeapi.MoveStatus{DestinationNode: "b", CapacityApproved: true},
+		Status: volumeapi.MoveStatus{DestinationNode: "b", DestinationPoolUID: "pool-b", SourceCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityApproved: true},
 	}}
-	got, err := ReservedBytes(volumes, moves, "b")
+	got, err := ReservedBytesForPool(volumes, moves, "pool-b")
 	if err != nil || got != 64 {
 		t.Fatalf("reserved=%d err=%v", got, err)
 	}
 }
 
-func TestReservedBytesCountsPostcommitRetainedSourceHold(t *testing.T) {
+func TestReservedBytesForPoolCountsPostcommitRetainedSourceHold(t *testing.T) {
 	volumes := map[string]volumeapi.State{
-		"v": {OwnerNode: "b", ActiveMove: "m", CapacityBytes: 64},
+		"v": {OwnerNode: "b", ActiveMove: "m", CurrentCopy: &volume.CopyIdentity{NodeName: "b", PoolUID: "pool-b"}, CapacityBytes: 64},
 	}
 	moves := []volumeapi.Move{{
 		Name: "m", Spec: volumeapi.MoveSpec{VolumeID: "v", SourceNode: "a"},
-		Status: volumeapi.MoveStatus{DestinationNode: "b", CapacityApproved: true},
+		Status: volumeapi.MoveStatus{DestinationNode: "b", DestinationPoolUID: "pool-b", SourceCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityApproved: true},
 	}}
-	got, err := ReservedBytes(volumes, moves, "a")
+	got, err := ReservedBytesForPool(volumes, moves, "pool-a")
 	if err != nil || got != 64 {
 		t.Fatalf("reserved=%d err=%v", got, err)
 	}
 }
 
-func TestReservedBytesSkipsCompletedMoves(t *testing.T) {
+func TestReservedBytesForPoolSkipsCompletedMoves(t *testing.T) {
 	volumes := map[string]volumeapi.State{
-		"v": {OwnerNode: "b", CapacityBytes: 64},
+		"v": {OwnerNode: "b", CurrentCopy: &volume.CopyIdentity{NodeName: "b", PoolUID: "pool-b"}, CapacityBytes: 64},
 	}
 	moves := []volumeapi.Move{{
 		Name: "m", Spec: volumeapi.MoveSpec{VolumeID: "v", SourceNode: "a"},
-		Status: volumeapi.MoveStatus{Phase: "Succeeded", CleanupPhase: "Completed", DestinationNode: "b", CapacityApproved: true},
+		Status: volumeapi.MoveStatus{Phase: "Succeeded", CleanupPhase: "Completed", DestinationNode: "b", DestinationPoolUID: "pool-b", SourceCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityApproved: true},
 	}}
-	got, err := ReservedBytes(volumes, moves, "a")
+	got, err := ReservedBytesForPool(volumes, moves, "pool-a")
 	if err != nil || got != 0 {
 		t.Fatalf("reserved=%d err=%v", got, err)
 	}
 }
 
-func TestReservedBytesRetainsSucceededMoveWithoutCleanupProof(t *testing.T) {
+func TestReservedBytesForPoolRetainsSucceededMoveWithoutCleanupProof(t *testing.T) {
 	volumes := map[string]volumeapi.State{
-		"v": {OwnerNode: "b", ActiveMove: "m", CapacityBytes: 64},
+		"v": {OwnerNode: "b", ActiveMove: "m", CurrentCopy: &volume.CopyIdentity{NodeName: "b", PoolUID: "pool-b"}, CapacityBytes: 64},
 	}
 	moves := []volumeapi.Move{{
 		Name: "m", Spec: volumeapi.MoveSpec{VolumeID: "v", SourceNode: "a"},
-		Status: volumeapi.MoveStatus{Phase: "Succeeded", DestinationNode: "b", CapacityApproved: true},
+		Status: volumeapi.MoveStatus{Phase: "Succeeded", DestinationNode: "b", DestinationPoolUID: "pool-b", SourceCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityApproved: true},
 	}}
-	got, err := ReservedBytes(volumes, moves, "a")
+	got, err := ReservedBytesForPool(volumes, moves, "pool-a")
 	if err != nil || got != 64 {
 		t.Fatalf("reserved=%d err=%v", got, err)
 	}
 }
 
-func TestReservedBytesRejectsContradictoryCapacityState(t *testing.T) {
+func TestReservedBytesForPoolRejectsContradictoryCapacityState(t *testing.T) {
 	for name, test := range map[string]struct {
 		volumes map[string]volumeapi.State
 		moves   []volumeapi.Move
 		want    string
 	}{
 		"missing owner": {
-			volumes: map[string]volumeapi.State{"v": {CapacityBytes: 64}},
-			want:    "no current owner",
+			volumes: map[string]volumeapi.State{"v": {CurrentCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityBytes: 64}},
+			want:    "incomplete capacity owner identity",
 		},
 		"missing capacity": {
-			volumes: map[string]volumeapi.State{"v": {OwnerNode: "a"}},
-			want:    "invalid capacity",
+			volumes: map[string]volumeapi.State{"v": {OwnerNode: "a", CurrentCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}}},
+			want:    "incomplete capacity owner identity",
+		},
+		"missing current copy": {
+			volumes: map[string]volumeapi.State{"v": {OwnerNode: "a", CapacityBytes: 64}},
+			want:    "incomplete capacity owner identity",
+		},
+		"missing Pool UID": {
+			volumes: map[string]volumeapi.State{"v": {OwnerNode: "a", CurrentCopy: &volume.CopyIdentity{NodeName: "a"}, CapacityBytes: 64}},
+			want:    "incomplete capacity owner identity",
+		},
+		"copy owner mismatch": {
+			volumes: map[string]volumeapi.State{"v": {OwnerNode: "a", CurrentCopy: &volume.CopyIdentity{NodeName: "b", PoolUID: "pool-a"}, CapacityBytes: 64}},
+			want:    "incomplete capacity owner identity",
 		},
 		"approved move without volume": {
 			moves: []volumeapi.Move{{
 				Name: "m", Spec: volumeapi.MoveSpec{VolumeID: "v"},
-				Status: volumeapi.MoveStatus{DestinationNode: "b", CapacityApproved: true},
+				Status: volumeapi.MoveStatus{DestinationNode: "b", DestinationPoolUID: "pool-b", SourceCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityApproved: true},
 			}},
 			want: "no volume state",
 		},
 		"approved inactive move": {
-			volumes: map[string]volumeapi.State{"v": {OwnerNode: "a", CapacityBytes: 64}},
+			volumes: map[string]volumeapi.State{"v": {OwnerNode: "a", CurrentCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityBytes: 64}},
 			moves: []volumeapi.Move{{
 				Name: "m", Spec: volumeapi.MoveSpec{VolumeID: "v"},
-				Status: volumeapi.MoveStatus{DestinationNode: "b", CapacityApproved: true},
+				Status: volumeapi.MoveStatus{DestinationNode: "b", DestinationPoolUID: "pool-b", SourceCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityApproved: true},
 			}},
-			want: "not the active Move",
+			want: "incomplete capacity hold identity",
 		},
 		"overflow": {
 			volumes: map[string]volumeapi.State{
-				"v": {OwnerNode: "a", CapacityBytes: math.MaxInt64},
-				"w": {OwnerNode: "a", CapacityBytes: 1},
+				"v": {OwnerNode: "a", CurrentCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityBytes: math.MaxInt64},
+				"w": {OwnerNode: "a", CurrentCopy: &volume.CopyIdentity{NodeName: "a", PoolUID: "pool-a"}, CapacityBytes: 1},
 			},
 			want: "overflows",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := ReservedBytes(test.volumes, test.moves, "a")
+			_, err := ReservedBytesForPool(test.volumes, test.moves, "pool-a")
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("err=%v, want %q", err, test.want)
 			}

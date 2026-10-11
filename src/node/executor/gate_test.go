@@ -1,4 +1,4 @@
-package execution
+package executor
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestSameVolumeSerializesWhileIndependentVolumeProceeds(t *testing.T) {
-	var gate Gate
+	var gate effectGate
 	unlock, err := gate.Lock(context.Background(), "volume-a")
 	if err != nil {
 		t.Fatal(err)

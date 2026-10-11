@@ -722,7 +722,7 @@ func TestBeginDeleteRejectsPublishedOrChangedIdentity(t *testing.T) {
 	setState(object, State{UID: copy.VolumeUID, Phase: PhaseReady, OwnerNode: copy.NodeName, PublishedNodes: []string{copy.NodeName}, CurrentCopy: &copy})
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{VolumeResource: "ShiftPVVolumeList"}, object)
 	registry := &Registry{Client: client}
-	if _, err := registry.BeginDelete(ctx, volumeID, copy.VolumeUID, copy); !errors.Is(err, ErrStateConflict) {
+	if _, err := registry.BeginDelete(ctx, volumeID, copy.VolumeUID, copy); !errors.Is(err, ErrStateConflict) || !errors.Is(err, ErrVolumePublished) {
 		t.Fatalf("published copy was fenced for deletion: %v", err)
 	}
 	if err := registry.ReconcilePublished(ctx, volumeID, copy.NodeName, copy, false); err != nil {
