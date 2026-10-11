@@ -88,14 +88,29 @@ func capacityFailure(reason string, err error) Check {
 
 // VerifyHostPool checks the mount and live backing with the node's host access.
 func VerifyHostPool(hostRoot string, pool volumeapi.Pool) error {
-	path, err := hostPath(hostRoot, pool.MountPath)
+	return NewProbe(hostRoot).VerifyPool(pool)
+}
+
+// VerifyPool requires current allocation approval as well as live backing.
+func (p *Probe) VerifyPool(pool volumeapi.Pool) error {
+	if err := verifyCapacityObservation(pool); err != nil {
+		return err
+	}
+	return p.VerifyBacking(pool)
+}
+
+// VerifyBacking checks the anchored filesystem and block allocation without
+// requiring a new admission observation after an unrelated scanEpoch change.
+// It does not authorize allocation or prove that a deleted copy is absent.
+func (p *Probe) VerifyBacking(pool volumeapi.Pool) error {
+	path, err := hostPath(p.HostRoot, pool.MountPath)
 	if err != nil {
 		return err
 	}
-	if err := VerifyMountedPath(path, pool); err != nil {
+	if err := p.verifyMountedPath(path, pool); err != nil {
 		return err
 	}
-	return NewProbe(hostRoot).VerifyCapacityUnit(pool)
+	return p.VerifyCapacityUnit(pool)
 }
 
 func (p *Probe) VerifyCapacityUnit(pool volumeapi.Pool) error {
@@ -152,7 +167,18 @@ type allocationObservation struct {
 	check Check
 }
 
-func verifyCapacityMountedPath(path string, pool volumeapi.Pool) error {
+func verifyCapacityObservation(pool volumeapi.Pool) error {
+	if pool.CapacityPolicy != volumeapi.PoolCapacityPolicyFixedBlock {
+		return nil
+	}
+	condition := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionCapacityIndependent)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != pool.Generation {
+		return fmt.Errorf("Pool capacity allocation lacks a current successful observation")
+	}
+	return nil
+}
+
+func (p *Probe) verifyCapacityMountedPath(path string, pool volumeapi.Pool) error {
 	if pool.CapacityPolicy == "" {
 		return nil
 	}
@@ -162,21 +188,17 @@ func verifyCapacityMountedPath(path string, pool volumeapi.Pool) error {
 	if err := pool.Status.CapacityUnit.Validate(); err != nil {
 		return err
 	}
-	condition := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionCapacityIndependent)
-	if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != pool.Generation {
-		return fmt.Errorf("Pool capacity allocation lacks a current successful observation")
-	}
 	if !filepath.IsAbs(path) || filepath.Clean(path) == "/" {
 		return fmt.Errorf("Pool root must be an absolute non-root path")
 	}
-	if err := inspectDirectory(path); err != nil {
+	if err := p.inspect(path); err != nil {
 		return err
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil || resolved != filepath.Clean(path) {
 		return fmt.Errorf("fixed capacity Pool path must have no symlink components")
 	}
-	entry, err := NewProbe("/").capacityMount(filepath.Clean(path))
+	entry, err := p.capacityMount(filepath.Clean(path))
 	if err != nil {
 		return err
 	}

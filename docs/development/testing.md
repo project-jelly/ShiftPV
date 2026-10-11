@@ -213,6 +213,14 @@ Confirm `shiftpv.io/capacity-retry` preserves selected-node, and repeat with a
 Controller restart and a different Pool group. Check that Deleting Volumes and
 unsettled Move holds remain charged. Fake API timing is not VM latency evidence.
 
+Unpublish regressions inject real backing probes and a sibling deletion's
+`scanEpoch` change before and inside the storage lock. A 20-volume burst uses
+real REST clients, preserves an unrelated published copy, and leaves the Pool
+observation stale. Run `go test ./src/cmd/node -run '^TestNodeUnpublishBurst' -v`
+for API counts, or `-run '^$' -bench '^BenchmarkNodeUnpublishBurst$' -benchtime=1x`
+to compare the former 5/10 budget with the current configuration. Separately
+stall GC and Pool observation and verify that foreground calls still progress.
+
 For Node gRPC, record `live_capacity_probe` and `ShiftPV Node RPC` logs for
 CAPACITY/CREATE/RECLAIM. Verify Pod replacement reconnects, concurrent RPC and
 Watch recovery write one immutable receipt, and lost replies retain holds.

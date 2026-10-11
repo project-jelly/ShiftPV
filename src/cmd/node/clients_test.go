@@ -50,7 +50,7 @@ func TestNodeBackgroundBudgetDoesNotBlockForegroundRequests(t *testing.T) {
 	base := &rest.Config{Host: server.URL, QPS: 1, Burst: 1, RateLimiter: flowcontrol.NewTokenBucketRateLimiter(1, 1), UserAgent: "base", Timeout: time.Minute}
 	configs := newNodeAPIConfigs(base)
 	seen := map[flowcontrol.RateLimiter]bool{base.RateLimiter: true}
-	for _, config := range []*rest.Config{configs.foreground, configs.measurement, configs.metadata, configs.effects} {
+	for _, config := range []*rest.Config{configs.foreground, configs.observation, configs.measurement, configs.metadata, configs.effects} {
 		if config.RateLimiter == nil || seen[config.RateLimiter] {
 			t.Fatal("Node roles share an inherited or unbounded API budget")
 		}
@@ -58,6 +58,8 @@ func TestNodeBackgroundBudgetDoesNotBlockForegroundRequests(t *testing.T) {
 	}
 	budget := &blockedMetadataBudget{RateLimiter: configs.metadata.RateLimiter, entered: make(chan struct{}), resume: make(chan struct{})}
 	configs.metadata.RateLimiter = budget
+	observationBudget := &blockedMetadataBudget{RateLimiter: configs.observation.RateLimiter, entered: make(chan struct{}), resume: make(chan struct{})}
+	configs.observation.RateLimiter = observationBudget
 	clients := newNodeAPIClients(configs, func(step string, err error) { t.Fatalf("%s: %v", step, err) })
 	if clients.effects.Typed.CoreV1().RESTClient().GetRateLimiter() != configs.effects.RateLimiter {
 		t.Fatal("typed effects client escaped its role budget")
@@ -72,6 +74,16 @@ func TestNodeBackgroundBudgetDoesNotBlockForegroundRequests(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("GC did not enter the injected budget")
 	}
+	observationDone := make(chan error, 1)
+	go func() {
+		_, err := clients.observation.ListPoolRegistrations(ctx)
+		observationDone <- err
+	}()
+	select {
+	case <-observationBudget.entered:
+	case <-ctx.Done():
+		t.Fatal("Pool observation did not enter the injected budget")
+	}
 	// Use real REST clients and Registry reads while the collector is stalled.
 	if _, err := clients.foreground.ListPoolRegistrations(ctx); err != nil {
 		t.Fatalf("foreground request blocked by GC: %v", err)
@@ -83,15 +95,19 @@ func TestNodeBackgroundBudgetDoesNotBlockForegroundRequests(t *testing.T) {
 		t.Fatalf("effects request blocked by GC: %v", err)
 	}
 	mu.Lock()
-	if requests["shiftpv-node-foreground"] != 1 || requests["shiftpv-node-measurement"] != 1 || requests["shiftpv-node-effects"] != 1 || requests["shiftpv-node-metadata"] != 0 {
+	if requests["shiftpv-node-foreground"] != 1 || requests["shiftpv-node-measurement"] != 1 || requests["shiftpv-node-effects"] != 1 || requests["shiftpv-node-metadata"] != 0 || requests["shiftpv-node-observation"] != 0 {
 		t.Errorf("unexpected requests before GC resumes: %v", requests)
 	}
 	mu.Unlock()
 	close(budget.resume)
+	close(observationBudget.resume)
 	if err := <-done; err != nil {
 		t.Fatalf("GC did not resume: %v", err)
 	}
-	if base.QPS != 1 || base.Burst != 1 || base.UserAgent != "base" || base.Timeout != time.Minute || configs.foreground.QPS != 5 || configs.foreground.Burst != 10 || configs.effects.QPS != 50 || configs.effects.Burst != 100 {
+	if err := <-observationDone; err != nil {
+		t.Fatalf("Pool observation did not resume: %v", err)
+	}
+	if base.QPS != 1 || base.Burst != 1 || base.UserAgent != "base" || base.Timeout != time.Minute || configs.foreground.QPS != 50 || configs.foreground.Burst != 100 || configs.observation.QPS != 5 || configs.observation.Burst != 10 || configs.effects.QPS != 50 || configs.effects.Burst != 100 {
 		t.Fatal("client construction changed the base or role limits")
 	}
 }

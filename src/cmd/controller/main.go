@@ -22,7 +22,6 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/cmd/internal/flagvalue"
@@ -201,7 +200,7 @@ func main() {
 func capacityRetryRESTConfig(config *rest.Config) *rest.Config {
 	retryConfig := rest.CopyConfig(config)
 	retryConfig.QPS, retryConfig.Burst = 5, 10
-	retryConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(retryConfig.QPS, retryConfig.Burst)
+	retryConfig.RateLimiter = wiring.NewAPIBudget(retryConfig.QPS, retryConfig.Burst)
 	retryConfig.Timeout = 0 // Reconcile is bounded separately; watches may stay open.
 	retryConfig.UserAgent = "shiftpv-capacity-retry"
 	return retryConfig
@@ -210,7 +209,7 @@ func capacityRetryRESTConfig(config *rest.Config) *rest.Config {
 // Live capacity reads have their own budget for pre/post measurement validation.
 func capacityProbeRESTConfig(config *rest.Config) *rest.Config {
 	probeConfig := admissionRESTConfig(config)
-	probeConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(probeConfig.QPS, probeConfig.Burst)
+	probeConfig.RateLimiter = wiring.NewAPIBudget(probeConfig.QPS, probeConfig.Burst)
 	probeConfig.Timeout = 0 // Probe requests have their own context deadline.
 	probeConfig.UserAgent = "shiftpv-capacity-probe"
 	return probeConfig
@@ -229,7 +228,7 @@ func admissionRESTConfig(restConfig *rest.Config) *rest.Config {
 // are injected by main; background observation retains its separate clients.
 func newCSILifecycle(cfg config, restConfig *rest.Config, fail wiring.Fail) (*controllercsi.Service, *helperpod.Runner) {
 	lifecycleConfig := admissionRESTConfig(restConfig)
-	lifecycleConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(lifecycleConfig.QPS, lifecycleConfig.Burst)
+	lifecycleConfig.RateLimiter = wiring.NewAPIBudget(lifecycleConfig.QPS, lifecycleConfig.Burst)
 	lifecycleConfig.UserAgent = "shiftpv-csi-lifecycle"
 	clients := wiring.ForConfig(lifecycleConfig, "CSI lifecycle", fail)
 	volumes := &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}

@@ -12,14 +12,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/project-jelly/ShiftPV/src/cmd/internal/wiring"
+	controllercsi "github.com/project-jelly/ShiftPV/src/csi/controller"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/flowcontrol"
 )
+
+func TestCSIDeletionRetriesLocalBudgetRejection(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "request should be rejected locally", 500)
+	}))
+	defer server.Close()
+	budget := wiring.NewAPIBudget(0.01, 1)
+	budget.TryAccept()
+	clients := wiring.ForConfig(&rest.Config{Host: server.URL, RateLimiter: budget}, "test", func(step string, err error) { t.Fatalf("%s: %v", step, err) })
+	runner := &helperpod.Runner{}
+	service := &controllercsi.Service{
+		Client: clients.Typed, Namespace: "shiftpv", Operator: runner, CleanupOperator: runner,
+		Volumes: &volumeapi.Registry{Client: clients.Dynamic}, Cleanups: &cleanupapi.Store{Client: clients.Dynamic},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := service.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: "shiftpv-0123456789abcdef0123456789abcdef"})
+	if status.Code(err) != codes.Unavailable || ctx.Err() != nil || requests.Load() != 0 {
+		t.Fatalf("local token wait did not become a retryable CSI response: err=%v context=%v requests=%d", err, ctx.Err(), requests.Load())
+	}
+}
 
 func TestCapacityRetryUsesIndependentRateBudget(t *testing.T) {
 	original := &rest.Config{QPS: 100, Burst: 100, RateLimiter: flowcontrol.NewTokenBucketRateLimiter(1, 1), Timeout: time.Minute, UserAgent: "controller"}
