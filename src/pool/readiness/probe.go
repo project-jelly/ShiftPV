@@ -198,7 +198,14 @@ func (p *Probe) inspectMount(path string, expected *volumeapi.PoolMountIdentity)
 // VerifyMountedPath checks the live mount at a node path or helper Pod bind
 // root before an opted-in Pool performs a storage operation. It is read-only.
 func VerifyMountedPath(path string, pool volumeapi.Pool) error {
-	if err := verifyCapacityMountedPath(path, pool); err != nil {
+	if err := verifyCapacityObservation(pool); err != nil {
+		return err
+	}
+	return NewProbe("/").verifyMountedPath(path, pool)
+}
+
+func (p *Probe) verifyMountedPath(path string, pool volumeapi.Pool) error {
+	if err := p.verifyCapacityMountedPath(path, pool); err != nil {
 		return err
 	}
 	if pool.MountPolicy == "" {
@@ -213,10 +220,10 @@ func VerifyMountedPath(path string, pool volumeapi.Pool) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) == "/" {
 		return fmt.Errorf("Pool root %q must be an absolute non-root path", path)
 	}
-	if err := inspectDirectory(path); err != nil {
+	if err := p.inspect(path); err != nil {
 		return fmt.Errorf("inspect Pool root: %w", err)
 	}
-	_, check := NewProbe("/").inspectMount(filepath.Clean(path), pool.Status.MountIdentity)
+	_, check := p.inspectMount(filepath.Clean(path), pool.Status.MountIdentity)
 	if !check.OK {
 		return fmt.Errorf("verify Pool mount at %q: %s: %s", path, check.Reason, check.Message)
 	}

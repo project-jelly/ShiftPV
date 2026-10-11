@@ -141,6 +141,11 @@ hold를 보존한다.
 
 ## Delete and cleanup closure
 
+`NodeUnpublishVolume`은 target 해제 후 실제 backing identity와 남은 mount reference를 잠금 안에서
+확인하여 publication 상태를 기록한다. 다른 볼륨의 삭제가 `scanEpoch`를 올려 용량 관측이 잠시
+오래되어도 이 해제는 진행한다. 새 publish의 최신 용량 관측과 삭제 완료의 fresh absence proof는
+계속 필요하다. 디스크·Pool·copy identity나 mount 관측이 불명확하면 publication 상태를 해제하지 않는다.
+
 정확한 Ready copy가 아직 게시 중이면 `DeleteVolume`은 `Unavailable`로 unpublish를 기다린다. 이때 삭제 fence·cleanup·예약 반환을 시작하지 않는다. copy/UID/owner 불일치, active Move, 잘못된 phase는 계속 `FailedPrecondition`으로 거부한다.
 
 Delete는 Volume을 먼저 fenced 상태로 만들고 신규 publication을 차단한다. Node가 actual unpublish를 다시

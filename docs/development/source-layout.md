@@ -85,9 +85,11 @@ test/
 8. `provisioning/nodeexecutor`와 `node/executor`는 production에서 서로 import하지 않는다. 통합 테스트는 두 역할의 실제 구현을 연결한다.
 9. 삭제 판정은 `volume/deletion`, resourceVersion CAS는 `volumeapi`, CSI retry 응답은 `csi/controller`가 소유한다. 판정은 CAS 재시도마다 새 상태로 실행한다.
 
-Node API client 구성은 `cmd/node/clients.go`가 소유한다. Foreground·measurement·metadata는
-각각 5 QPS/10 burst, resident effects는 typed/dynamic client가 공유하는 50 QPS/100 burst를
-사용한다. 역할 간 limiter는 공유하지 않는다. 이 분리는 API 서버 장애 자체를 격리하지는 않는다.
+Node API client 구성은 `cmd/node/clients.go`가 소유한다. CSI foreground와 resident effects는
+각각 50 QPS/100 burst, Pool observation·measurement·metadata는 각각 5 QPS/10 burst를
+사용한다. 역할 간 limiter는 공유하지 않으며 effects의 typed/dynamic client는 같은 예산을 쓴다.
+`cmd/internal/wiring`은 로컬 token 대기 거절을 재시도 가능한 timeout으로 분류한다.
+이 분리는 API 서버 장애 자체를 격리하지는 않는다.
 
 ## Durable ownership
 

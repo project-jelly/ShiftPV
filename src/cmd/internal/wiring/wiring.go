@@ -1,5 +1,5 @@
 // Package wiring holds the Kubernetes client construction and bootstrap retry
-// every ShiftPV process entrypoint repeats. It owns no failure convention:
+// every ShiftPV process entrypoint repeats. It owns no startup failure convention:
 // each binary passes its own Fail and keeps reporting startup failures exactly
 // as it did before.
 package wiring

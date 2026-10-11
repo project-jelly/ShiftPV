@@ -33,14 +33,20 @@ type PoolRegistry interface {
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 }
 
+type PoolVerifier interface {
+	VerifyPool(volumeapi.Pool) error
+	VerifyBacking(volumeapi.Pool) error
+}
+
 type Service struct {
 	csi.UnimplementedNodeServer
-	NodeName   string
-	HostRoot   string
-	Pools      PoolRegistry
-	TargetRoot string
-	Binder     Binder
-	Volumes    VolumeRegistry
+	NodeName     string
+	HostRoot     string
+	Pools        PoolRegistry
+	TargetRoot   string
+	Binder       Binder
+	Volumes      VolumeRegistry
+	PoolVerifier PoolVerifier
 
 	publicationLocksOnce sync.Once
 	publicationLocks     keymutex.KeyMutex
@@ -96,7 +102,7 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := s.publisher().Publish(ctx, publication.PublishRequest{
+	if err := s.publisher(s.poolRoot).Publish(ctx, publication.PublishRequest{
 		VolumeID:   req.GetVolumeId(),
 		TargetPath: req.GetTargetPath(),
 		Source:     source,
@@ -136,7 +142,7 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	if !reconcile {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
-	enteredLock, err := s.publisher().Unpublish(ctx, publication.UnpublishRequest{
+	enteredLock, err := s.publisher(s.unpublishPoolRoot).Unpublish(ctx, publication.UnpublishRequest{
 		VolumeID: req.GetVolumeId(),
 		Source:   target.source,
 		PoolRoot: target.poolRoot,
@@ -180,7 +186,7 @@ func (s *Service) unpublishTarget(ctx context.Context, volumeID string) (unpubli
 		return unpublishTarget{}, false, nil
 	}
 	copy := *state.CurrentCopy
-	pool, poolRoot, err := s.poolRoot(ctx, copy)
+	pool, poolRoot, err := s.unpublishPoolRoot(ctx, copy)
 	if err != nil {
 		if publication.PoolIdentityUnavailable(err) {
 			return unpublishTarget{}, false, nil
@@ -214,13 +220,13 @@ func publicationError(op string, err error, enteredLock bool) error {
 	return status.Errorf(codes.Internal, "%s identified volume: %v", op, err)
 }
 
-func (s *Service) publisher() publication.Publisher {
+func (s *Service) publisher(pools publication.PoolResolver) publication.Publisher {
 	return publication.Publisher{
 		NodeName:   s.NodeName,
 		TargetRoot: s.TargetRoot,
 		Binder:     s.Binder,
 		Volumes:    s.Volumes,
-		Pools:      s.poolRoot,
+		Pools:      pools,
 	}
 }
 
@@ -256,6 +262,16 @@ func (s *Service) lockPublication(volumeID string) func() {
 }
 
 func (s *Service) poolRoot(ctx context.Context, copy volume.CopyIdentity) (volumeapi.Pool, string, error) {
+	return s.resolvePoolRoot(ctx, copy, s.poolVerifier().VerifyPool)
+}
+
+// Unpublish reconciles existing mount references; it cannot allocate space.
+// A sibling deletion's scan fence must not delay this publication observation.
+func (s *Service) unpublishPoolRoot(ctx context.Context, copy volume.CopyIdentity) (volumeapi.Pool, string, error) {
+	return s.resolvePoolRoot(ctx, copy, s.poolVerifier().VerifyBacking)
+}
+
+func (s *Service) resolvePoolRoot(ctx context.Context, copy volume.CopyIdentity, verify func(volumeapi.Pool) error) (volumeapi.Pool, string, error) {
 	if copy.NodeName != s.NodeName {
 		return volumeapi.Pool{}, "", fmt.Errorf("copy node does not match this node: %w", volumeapi.ErrStateConflict)
 	}
@@ -272,10 +288,17 @@ func (s *Service) poolRoot(ctx context.Context, copy volume.CopyIdentity) (volum
 		return volumeapi.Pool{}, "", fmt.Errorf("host root %q must be absolute", s.HostRoot)
 	}
 	root := filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator)))
-	if err := readiness.VerifyHostPool(hostRoot, pool); err != nil {
+	if err := verify(pool); err != nil {
 		return volumeapi.Pool{}, "", err
 	}
 	return pool, root, nil
+}
+
+func (s *Service) poolVerifier() PoolVerifier {
+	if s.PoolVerifier != nil {
+		return s.PoolVerifier
+	}
+	return readiness.NewProbe(s.HostRoot)
 }
 
 func validateCapability(capability *csi.VolumeCapability) error {

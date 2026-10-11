@@ -48,7 +48,7 @@ func main() {
 	}
 
 	clients := newNodeAPIClients(newNodeAPIConfigs(wiring.InClusterConfig(fatal)), fatal)
-	registry, probeRegistry := clients.foreground, clients.measurement
+	registry, observer, probeRegistry := clients.foreground, clients.observation, clients.measurement
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -66,13 +66,14 @@ func main() {
 	if err != nil {
 		fatal("configure Pool probe", err)
 	}
-	readinessReconciler, err := poolreadiness.NewReconciler(*nodeName, registry, probe, *poolReadinessInterval)
+	nodeService.PoolVerifier = probe
+	readinessReconciler, err := poolreadiness.NewReconciler(*nodeName, observer, probe, *poolReadinessInterval)
 	if err != nil {
 		fatal("configure Pool readiness", err)
 	}
-	readinessReconciler.Wake = poolreadiness.WatchPoolChanges(ctx, registry.Client, *nodeName)
+	readinessReconciler.Wake = poolreadiness.WatchPoolChanges(ctx, observer.Client, *nodeName)
 	inventoryScanner := &nodeobservation.Scanner{
-		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: registry, Publications: binder, Limit: 256,
+		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: observer, Publications: binder, Limit: 256,
 	}
 	inventoryScanner.SnapshotPublications = func() (nodeobservation.Publications, error) {
 		return binder.PublicationSnapshot()
