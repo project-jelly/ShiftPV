@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/metrics"
 	"github.com/project-jelly/ShiftPV/src/node/metadata"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -20,6 +22,62 @@ type blockedMetadataBudget struct {
 	flowcontrol.RateLimiter
 	entered, resume chan struct{}
 	once            sync.Once
+}
+
+func TestNodeAPIObservationUsesSharedRoleBudget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "kube-system", "uid": "installation"}})
+	}))
+	defer server.Close()
+	exporter := metrics.New()
+	configs := newNodeAPIConfigs(&rest.Config{Host: server.URL}, exporter.ObserveProvisioningStep)
+	clients := newNodeAPIClients(configs, func(step string, err error) { t.Fatalf("%s: %v", step, err) })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	namespaces := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+	for _, registry := range []*volumeapi.Registry{clients.foreground, clients.observation, clients.measurement, clients.metadata} {
+		if _, err := registry.Client.Resource(namespaces).Get(ctx, "kube-system", metav1.GetOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := clients.effects.Typed.CoreV1().Namespaces().Get(ctx, "kube-system", metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clients.effects.Dynamic.Resource(namespaces).Get(ctx, "kube-system", metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if clients.effects.Typed.CoreV1().RESTClient().GetRateLimiter() != configs.effects.RateLimiter || configs.effects.QPS != 50 || configs.effects.Burst != 100 {
+		t.Fatal("API observation changed the effects budget")
+	}
+	families, err := exporter.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]uint64{}
+	for _, family := range families {
+		if family.GetName() != "shiftpv_provisioning_step_duration_seconds" {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if len(metric.Label) != 1 || metric.Label[0].GetName() != "step" {
+				t.Fatal("API observation added identity labels")
+			}
+			counts[metric.Label[0].GetValue()] = metric.GetHistogram().GetSampleCount()
+		}
+	}
+	for _, role := range []string{"foreground", "observation", "measurement", "metadata", "effects"} {
+		want := uint64(1)
+		if role == "effects" {
+			want = 2
+		}
+		for _, stage := range []string{"wait", "roundtrip"} {
+			step := "node_api_" + role + "_" + stage
+			if counts[step] != want {
+				t.Errorf("%s recorded %d requests, want %d", step, counts[step], want)
+			}
+		}
+	}
 }
 
 func (b *blockedMetadataBudget) Wait(ctx context.Context) error {
@@ -48,7 +106,7 @@ func TestNodeBackgroundBudgetDoesNotBlockForegroundRequests(t *testing.T) {
 	}))
 	defer server.Close()
 	base := &rest.Config{Host: server.URL, QPS: 1, Burst: 1, RateLimiter: flowcontrol.NewTokenBucketRateLimiter(1, 1), UserAgent: "base", Timeout: time.Minute}
-	configs := newNodeAPIConfigs(base)
+	configs := newNodeAPIConfigs(base, nil)
 	seen := map[flowcontrol.RateLimiter]bool{base.RateLimiter: true}
 	for _, config := range []*rest.Config{configs.foreground, configs.observation, configs.measurement, configs.metadata, configs.effects} {
 		if config.RateLimiter == nil || seen[config.RateLimiter] {

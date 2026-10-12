@@ -47,10 +47,17 @@ func main() {
 		klog.Fatalf("node metadata retention must be at least one hour")
 	}
 
-	clients := newNodeAPIClients(newNodeAPIConfigs(wiring.InClusterConfig(fatal)), fatal)
-	registry, observer, probeRegistry := clients.foreground, clients.observation, clients.measurement
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	var exporter *metrics.Exporter
+	var observeAPI func(string, time.Duration)
+	if *metricsAddress != "" {
+		exporter = metrics.New("filesystem")
+		exporter.Start(ctx, *metricsAddress)
+		observeAPI = exporter.ObserveProvisioningStep
+	}
+	clients := newNodeAPIClients(newNodeAPIConfigs(wiring.InClusterConfig(fatal), observeAPI), fatal)
+	registry, observer, probeRegistry := clients.foreground, clients.observation, clients.measurement
 
 	binder := shiftmount.NewBinder(*targetRoot)
 	nodeService := &nodecsi.Service{
@@ -80,10 +87,7 @@ func main() {
 	}
 	readinessReconciler.Inventory = inventoryScanner.Scan
 	readinessReconciler.Release = inventoryScanner.ReleasePool
-	var exporter *metrics.Exporter
-	if *metricsAddress != "" {
-		exporter = metrics.New("filesystem")
-		exporter.Start(ctx, *metricsAddress)
+	if exporter != nil {
 		readinessReconciler.ObserveAll = exporter.ObservePools
 	}
 

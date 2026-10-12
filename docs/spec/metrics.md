@@ -83,6 +83,14 @@ Node metrics endpoint와 level-2 로그는 다음 실행 단계를 기록한다.
 있으므로 Controller의 CREATE RPC 시간과 Node의 생성 시간을 volume 로그로 함께 비교한다.
 기존 완료 영수증을 재사용한 호출은 생성 단계를 다시 기록하지 않는다.
 
+Node metrics가 켜져 있으면 API 역할(`foreground`, `observation`, `measurement`, `metadata`,
+`effects`)별로 `node_api_<role>_wait`와 `node_api_<role>_roundtrip`도 기록한다.
+`wait`는 토큰 예산을 기다린 시간이며 거부·취소도 포함한다. `roundtrip`은 HTTP 요청 전송부터
+응답 헤더 또는 오류까지의 시간으로 body 읽기·디코딩은 포함하지 않는다. HTTP 요청을 보내지
+못한 경우에도 `wait` 횟수는 증가할 수 있다. 시험 전후 histogram의 `_sum`·`_count` 차이를
+비교하며, 병렬 요청의 대기 합계를 전체 작업의 경과 시간으로 해석하지 않는다. 백그라운드·재시도
+요청도 같은 역할의 집계에 포함된다. 기본 로그에 throttling이 없어도 짧은 대기가 누적될 수 있다.
+
 `pool`과 `node`는 등록된 Pool 집합으로 제한한다. PersistentVolume series의 `pool`은 volume handle로 찾은
 `ShiftPVVolume`의 현재 copy가 속한 Pool이며, 대응하는 Volume이 없으면 `unknown`으로 접는다. Phase, state, source, method, code와 reason은 코드에
 고정된 집합 밖의 값을 `Unknown`으로 접는다. Volume UID, Move UID, copy ID, operation/executor ID,

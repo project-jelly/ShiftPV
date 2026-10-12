@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/project-jelly/ShiftPV/src/cmd/internal/wiring"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"k8s.io/client-go/rest"
@@ -16,13 +18,13 @@ type nodeAPIClients struct {
 }
 
 // Each role owns a bounded budget, even if the base config has a limiter.
-func newNodeAPIConfigs(base *rest.Config) nodeAPIConfigs {
+func newNodeAPIConfigs(base *rest.Config, observe func(string, time.Duration)) nodeAPIConfigs {
 	role := func(name string, qps float32, burst int) *rest.Config {
 		config := rest.CopyConfig(base)
 		config.QPS, config.Burst = qps, burst
 		config.RateLimiter = wiring.NewAPIBudget(qps, burst)
 		config.UserAgent = "shiftpv-node-" + name
-		return config
+		return wiring.WithAPIObservation(config, "node_api_"+name, observe)
 	}
 	return nodeAPIConfigs{
 		foreground:  role("foreground", 50, 100),
