@@ -112,7 +112,7 @@ func runUnpublishBurst(t testing.TB, config func(*rest.Config) *rest.Config) (ti
 		_ = json.NewEncoder(w).Encode(object)
 	}))
 	defer server.Close()
-	configs := newNodeAPIConfigs(&rest.Config{Host: server.URL})
+	configs := newNodeAPIConfigs(&rest.Config{Host: server.URL}, nil)
 	configs.foreground = config(configs.foreground)
 	clients := newNodeAPIClients(configs, func(step string, err error) { t.Fatalf("%s: %v", step, err) })
 	deps := readiness.HostProbeDependencies(root)

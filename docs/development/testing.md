@@ -221,6 +221,21 @@ for API counts, or `-run '^$' -bench '^BenchmarkNodeUnpublishBurst$' -benchtime=
 to compare the former 5/10 budget with the current configuration. Separately
 stall GC and Pool observation and verify that foreground calls still progress.
 
+Node API observation tests gate token waits and HTTP responses independently,
+preserve cancellation and retryable budget errors, and verify typed/dynamic
+clients share one observed limiter. The creation budget regression uses two
+registered Pool identities and 20 volumes with real REST clients: exhausting
+the shared budget must stall requests; releasing it must settle all exact
+creation receipts in their own Pool roots. These are dependency-injected
+contracts, not cluster latency measurements.
+
+For a live throughput comparison, enable the existing Node metrics endpoint
+and capture `node_api_effects_wait` and `node_api_effects_roundtrip` histogram
+sum/count before and after the same 20-volume workload. Record API failures and
+Node restarts too. Separate accumulated token waits from HTTP response-header
+time; neither metric includes response decoding. Compare one and two Pools
+with the same total requests, then vary one bounded API budget at a time.
+
 For Node gRPC, record `live_capacity_probe` and `ShiftPV Node RPC` logs for
 CAPACITY/CREATE/RECLAIM. Verify Pod replacement reconnects, concurrent RPC and
 Watch recovery write one immutable receipt, and lost replies retain holds.
