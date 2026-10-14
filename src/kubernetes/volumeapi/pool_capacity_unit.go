@@ -49,6 +49,13 @@ func (p Pool) RegistrationApproved() bool {
 	return ready != nil && ready.Status == metav1.ConditionTrue && inventory != nil && inventory.Valid && !inventory.Truncated && inventory.Message == ""
 }
 
+// DeletingUnapprovedFixedBlock identifies cancellation candidates, not permission
+// to discard storage. A FixedBlock approval always retains a capacity anchor;
+// local metadata/data and controller references must still be checked.
+func (p Pool) DeletingUnapprovedFixedBlock() bool {
+	return p.DeletionTimestamp != nil && p.CapacityPolicy == PoolCapacityPolicyFixedBlock && !p.RegistrationApproved()
+}
+
 // PoolCapacityIndependent uses the same policy as the node, with API evidence.
 func PoolCapacityIndependent(pool Pool, pools []Pool) (bool, string) {
 	allocations := make([]registration.Allocation, 0, len(pools))

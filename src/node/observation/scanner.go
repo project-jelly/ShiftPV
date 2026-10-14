@@ -39,6 +39,9 @@ type Scanner struct {
 }
 
 func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
+	if pool.DeletingUnapprovedFixedBlock() {
+		return s.verifyUnclaimedPool(ctx, pool)
+	}
 	if s == nil || s.Installation == nil || !filepath.IsAbs(s.HostRoot) || pool.UID == "" {
 		return ownership.ErrIdentity
 	}
@@ -54,6 +57,15 @@ func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
 }
 
 func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
+	if pool.DeletingUnapprovedFixedBlock() {
+		result := volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now.UTC())}
+		if err := s.verifyUnclaimedPool(ctx, pool); err != nil {
+			result.Message = "RegistrationCancellationBlocked: " + err.Error()
+		} else {
+			result.Valid = true
+		}
+		return result
+	}
 	return s.scan(ctx, pool, now, scanPhysical, physicalPathType)
 }
 
