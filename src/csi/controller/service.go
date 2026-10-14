@@ -287,7 +287,7 @@ func kubernetesAPIError(operation string, err error) error {
 		code = codes.Canceled
 	case errors.Is(err, context.DeadlineExceeded):
 		code = codes.DeadlineExceeded
-	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
+	case apierrors.IsConflict(err), apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
 		code = codes.Unavailable
 	}
 	return status.Errorf(code, "%s: %v", operation, err)

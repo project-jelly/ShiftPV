@@ -255,6 +255,8 @@ func capacityProbeError(operation string, err error) error {
 		code = codes.Canceled
 	case errors.Is(err, context.DeadlineExceeded):
 		code = codes.DeadlineExceeded
+	case apierrors.IsConflict(err), apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
+		code = codes.Unavailable
 	case errors.As(err, &retryable) && retryable.Retryable():
 		code = codes.Unavailable
 	}
