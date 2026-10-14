@@ -61,6 +61,41 @@ func TestRejectedCandidateDoesNotStopApprovedPool(t *testing.T) {
 	}
 }
 
+func TestDeletingUnapprovedPoolDoesNotRunWriteProbeOrAnchorIdentity(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		t.Run(map[bool]string{false: "allocation rejected", true: "allocation becomes supported"}[supported], func(t *testing.T) {
+			pool := testRegistration(volumeapi.Pool{Name: "pool-a", UID: "pool-uid", NodeName: "node", Generation: 1,
+				CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, IdentityReleaseApproval: "pool-uid"})
+			deleted := metav1.NewTime(testTime.Add(-time.Second))
+			pool.DeletionTimestamp = &deleted
+			repo := &fakeRepository{pool: pool}
+			inspects := 0
+			ok := Check{Known: true, OK: true, Reason: "OK"}
+			var inspector Inspector = fakeAllocationInspector{inspects: &inspects, result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+			if !supported {
+				inspector = fakeInspector{}
+			}
+			r, err := NewReconciler("node", repo, inspector, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Now = func() time.Time { return testTime }
+			r.Inventory = func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+				return volumeapi.PoolInventory{Valid: true}
+			}
+			releases := 0
+			r.Release = func(context.Context, volumeapi.Pool) error { releases++; return nil }
+			if err := r.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			pool.Status = repo.status
+			if inspects != 0 || pool.RegistrationApproved() || pool.Status.CapacityUnit != nil || pool.Status.MountIdentity != nil || releases != 1 {
+				t.Fatalf("cancellation initialized or approved storage: inspects=%d releases=%d status=%+v", inspects, releases, pool.Status)
+			}
+		})
+	}
+}
+
 func TestApprovedPoolLimitErrorPreservesLivePeerEvidence(t *testing.T) {
 	for _, limit := range []string{"not-a-quantity", "1500m", "9223372036854775808"} {
 		t.Run(limit, func(t *testing.T) {

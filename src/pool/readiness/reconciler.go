@@ -112,8 +112,7 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
-	if (allocation.check.Reason != "" && !allocation.check.OK) ||
-		invalidRegistrationCandidate(pool) {
+	if skipRegistrationProbe(pool, allocation) {
 		result = Result{Independent: allocation.check, Accessible: skipped(), Writable: skipped(), CapacityReadable: skipped()}
 	} else {
 		candidate := pool
@@ -187,6 +186,10 @@ func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, re
 }
 
 func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool, result Result, status volumeapi.PoolStatus, now time.Time) *volumeapi.PoolInventory {
+	if pool.DeletingUnapprovedFixedBlock() && r.Inventory != nil {
+		inventory := r.Inventory(ctx, pool, now)
+		return &inventory
+	}
 	if invalidRegistrationCandidate(pool) {
 		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "ConfigurationUnavailable: " + pool.ConfigurationCheck().Reason}
 	}
@@ -200,6 +203,7 @@ func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool,
 		return status.Inventory
 	}
 	candidate := pool
+	candidate.Status.RegistrationApproved = status.RegistrationApproved
 	if candidate.Status.MountIdentity == nil {
 		candidate.Status.MountIdentity = result.MountIdentity
 	}
@@ -226,7 +230,7 @@ func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.P
 	if pool.IdentityReleaseApproval != pool.UID {
 		release.Reason = "PoolIdentityReleasePending"
 		release.Message = "Pool identity remains until the controller approves exact release"
-	} else if cleanupReady && emptyInventory(status.Inventory) {
+	} else if (cleanupReady || pool.DeletingUnapprovedFixedBlock()) && emptyInventory(status.Inventory) {
 		if r.Release == nil {
 			release.Reason = "PoolIdentityReleaseUnavailable"
 			release.Message = "node Pool identity release is not configured"
@@ -238,6 +242,10 @@ func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.P
 			release.OK = true
 			release.Reason = "PoolIdentityReleased"
 			release.Message = "exact empty Pool identity was released"
+			if pool.DeletingUnapprovedFixedBlock() {
+				release.Reason = "PoolRegistrationCanceled"
+				release.Message = "unapproved registration has no storage metadata, managed data, or published target"
+			}
 		}
 	}
 	meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionIdentityReleased, release, pool.Generation, now))

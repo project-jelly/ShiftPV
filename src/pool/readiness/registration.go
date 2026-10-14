@@ -11,6 +11,11 @@ func invalidRegistrationCandidate(pool volumeapi.Pool) bool {
 	return pool.DeletionTimestamp == nil && !pool.RegistrationApproved() && !pool.ConfigurationCheck().OK
 }
 
+// Rejected registrations and cancellation never enter the writable probe.
+func skipRegistrationProbe(pool volumeapi.Pool, allocation allocationObservation) bool {
+	return pool.DeletingUnapprovedFixedBlock() || (allocation.check.Reason != "" && !allocation.check.OK) || invalidRegistrationCandidate(pool)
+}
+
 // Reconcile serializes this node worker's observations. A candidate's approval
 // additionally requires a fresh registration snapshot and live backing read.
 // Controller placement rechecks the whole approved set, including conflicts.
