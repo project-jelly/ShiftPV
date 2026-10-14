@@ -214,7 +214,7 @@ func publicationError(op string, err error, enteredLock bool) error {
 	if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) {
 		return status.Errorf(codes.FailedPrecondition, "%s identified volume: %v", op, err)
 	}
-	if errors.Is(err, publication.ErrObservationRetry) || errors.Is(err, ownership.ErrBusy) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+	if errors.Is(err, publication.ErrObservationRetry) || errors.Is(err, ownership.ErrBusy) || apierrors.IsConflict(err) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 		return status.Errorf(codes.Unavailable, "%s identified volume: %v", op, err)
 	}
 	return status.Errorf(codes.Internal, "%s identified volume: %v", op, err)

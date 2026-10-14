@@ -663,17 +663,28 @@ func TestCreateVolumeReusesExistingVolumeIntentWithoutNewProbe(t *testing.T) {
 }
 
 func TestCreateVolumeFailsClosedOnCapacityProbeError(t *testing.T) {
-	probe := &fakePoolCapacityProbe{err: retryableDirectoryError{errors.New("statfs unavailable")}}
-	client := fake.NewClientset()
-	service := capacityService(client, "1Gi", nil, probe)
+	for name, probeErr := range map[string]error{
+		"retryable directory": retryableDirectoryError{errors.New("statfs unavailable")},
+		"API conflict":        apierrors.NewConflict(schema.GroupResource{Resource: "shiftpvpools"}, "pool", errors.New("object has been modified")),
+		"API timeout":         apierrors.NewTimeoutError("timed out", 1),
+		"API server timeout":  apierrors.NewServerTimeout(schema.GroupResource{Resource: "shiftpvpools"}, "get", 1),
+		"API throttled":       apierrors.NewTooManyRequests("slow down", 1),
+		"API unavailable":     apierrors.NewServiceUnavailable("offline"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := &fakePoolCapacityProbe{err: probeErr}
+			client := fake.NewClientset()
+			service := capacityService(client, "1Gi", nil, probe)
 
-	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
-	if status.Code(err) != codes.Unavailable {
-		t.Fatalf("code = %s, want Unavailable: %v", status.Code(err), err)
-	}
-	registry, ok := service.Volumes.(*capacityTrackingVolumeRegistry)
-	if !ok || len(registry.volumes) != 0 {
-		t.Fatalf("probe failure created volume intent: %#v", registry)
+			_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
+			if status.Code(err) != codes.Unavailable {
+				t.Fatalf("code = %s, want Unavailable: %v", status.Code(err), err)
+			}
+			registry, ok := service.Volumes.(*capacityTrackingVolumeRegistry)
+			if !ok || len(registry.volumes) != 0 {
+				t.Fatalf("probe failure created volume intent: %#v", registry)
+			}
+		})
 	}
 }
 

@@ -1010,6 +1010,7 @@ func TestKubernetesAPIErrorPreservesRetryAndContextCodes(t *testing.T) {
 		"canceled":          {err: context.Canceled, code: codes.Canceled},
 		"deadline exceeded": {err: context.DeadlineExceeded, code: codes.DeadlineExceeded},
 		"timeout":           {err: apierrors.NewTimeoutError("timed out", 1), code: codes.Unavailable},
+		"conflict":          {err: apierrors.NewConflict(schema.GroupResource{Resource: "shiftpvpools"}, "pool", errors.New("object has been modified")), code: codes.Unavailable},
 		"throttled":         {err: apierrors.NewTooManyRequests("slow down", 1), code: codes.Unavailable},
 		"unavailable":       {err: apierrors.NewServiceUnavailable("offline"), code: codes.Unavailable},
 		"other":             {err: errors.New("invalid response"), code: codes.Internal},
