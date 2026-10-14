@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"syscall"
@@ -665,6 +666,8 @@ func TestCreateVolumeReusesExistingVolumeIntentWithoutNewProbe(t *testing.T) {
 func TestCreateVolumeFailsClosedOnCapacityProbeError(t *testing.T) {
 	for name, probeErr := range map[string]error{
 		"retryable directory": retryableDirectoryError{errors.New("statfs unavailable")},
+		"Pool not ready":      volumeapi.ErrPoolNotReady,
+		"invalid inventory":   fmt.Errorf("InventoryInvalid: %w", volumeapi.ErrPoolNotReady),
 		"API conflict":        apierrors.NewConflict(schema.GroupResource{Resource: "shiftpvpools"}, "pool", errors.New("object has been modified")),
 		"API timeout":         apierrors.NewTimeoutError("timed out", 1),
 		"API server timeout":  apierrors.NewServerTimeout(schema.GroupResource{Resource: "shiftpvpools"}, "get", 1),

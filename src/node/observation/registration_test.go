@@ -276,3 +276,87 @@ func TestRejectedFixedBlockCancellationAfterTestPathRemoval(t *testing.T) {
 		})
 	}
 }
+
+func TestApprovedPoolReleaseRecoversAfterCanceledStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	host, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(host, "pool")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := ownership.Open(root, ownership.PoolIdentity{InstallationID: "installation", PoolUID: "pool-uid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deleted := metav1.NewTime(time.Now().Add(-time.Second))
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
+		"metadata": map[string]any{"name": "pool", "uid": "pool-uid", "generation": int64(1),
+			"deletionTimestamp": deleted.Format(time.RFC3339Nano), "finalizers": []any{volumeapi.PoolProtectionFinalizer}},
+		"spec":   map[string]any{"nodeName": "node", "poolGroup": "default", "mountPath": "/pool", "capacity": map[string]any{"limit": "1Gi"}},
+		"status": map[string]any{"registrationApproved": true},
+	}}
+	api := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		volumeapi.PoolResource: "ShiftPVPoolList", volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList",
+	}, object)
+	registry := &volumeapi.Registry{Client: api}
+	scanner := &Scanner{HostRoot: host, TargetRoot: "/pods", Installation: installation{id: "installation"}, Publications: publications{}, Limit: 8}
+	node, err := readiness.NewReconciler("node", registry, readiness.NewProbe(host), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Inventory, node.Release = scanner.Scan, scanner.ReleasePool
+	checker := &uninstall.Checker{Client: fake.NewClientset(), Volumes: registry, Cleanups: &cleanupapi.Store{Client: api}}
+	controller := &poolcontroller.Reconciler{Pools: registry, Safety: checker, Quiesce: activeInstallation{}, PoolLocks: &capacity.Locker{}, Interval: time.Second}
+	if err := node.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.ReconcileAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The filesystem effect succeeds, then cancellation prevents publishing its
+	// confirmation. Recovery must use durable state, never the old callback.
+	releaseCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	node.Release = func(ctx context.Context, pool volumeapi.Pool) error {
+		if err := scanner.ReleasePool(ctx, pool); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	}
+	if err := node.Reconcile(releaseCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lost confirmation=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".shiftpv", "pool.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("identity effect did not finish: %v", err)
+	}
+	if err := controller.ReconcileAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pools, err := registry.ListPoolRegistrations(ctx)
+	if err != nil || len(pools) != 1 || !slices.Contains(pools[0].Finalizers, volumeapi.PoolProtectionFinalizer) {
+		t.Fatalf("lost confirmation released protection: pools=%+v error=%v", pools, err)
+	}
+	node, err = readiness.NewReconciler("node", registry, readiness.NewProbe(host), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Inventory, node.Release = scanner.Scan, scanner.ReleasePool
+	if err := node.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.ReconcileAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pools, err = registry.ListPoolRegistrations(ctx)
+	if err != nil || len(pools) != 1 || slices.Contains(pools[0].Finalizers, volumeapi.PoolProtectionFinalizer) {
+		t.Fatalf("release replay did not converge: pools=%+v error=%v", pools, err)
+	}
+}

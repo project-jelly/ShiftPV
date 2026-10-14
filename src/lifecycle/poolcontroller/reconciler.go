@@ -33,11 +33,12 @@ type QuiesceState interface {
 }
 
 type Reconciler struct {
-	Pools     Repository
-	Safety    SafetyChecker
-	Quiesce   QuiesceState
-	PoolLocks *poolcapacity.Locker
-	Interval  time.Duration
+	Pools         Repository
+	Safety        SafetyChecker
+	Quiesce       QuiesceState
+	PoolLocks     *poolcapacity.Locker
+	Interval      time.Duration
+	ObserveDelete func(volumeapi.Pool, DeletionObservation)
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -80,31 +81,41 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 		if !slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) {
 			continue
 		}
-		unlock := r.PoolLocks.Lock(pool.UID)
-		report, checkErr := r.Safety.CheckPoolDeleteAfter(ctx, pool.Name, types.UID(pool.UID), pool.DeletionTimestamp.Time)
-		if checkErr != nil {
-			unlock()
-			result = errors.Join(result, fmt.Errorf("check deleting Pool %q: %w", pool.Name, checkErr))
-			continue
-		}
-		if !report.Safe() {
-			unlock()
-			continue
-		}
-		if pool.IdentityReleaseApproval != pool.UID {
-			result = errors.Join(result, r.Pools.ApprovePoolIdentityRelease(ctx, pool.Name, pool.UID))
-			unlock()
-			continue
-		}
-		released := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionIdentityReleased)
-		if released == nil || released.Status != metav1.ConditionTrue || released.ObservedGeneration != pool.Generation {
-			unlock()
-			continue
-		}
-		result = errors.Join(result, r.Pools.RemovePoolFinalizer(ctx, pool.Name, pool.UID))
-		unlock()
+		observation := r.reconcileDeletion(ctx, pool)
+		result = errors.Join(result, observation.Err)
+		r.observeDeletion(pool, observation)
 	}
 	return result
+}
+
+// reconcileDeletion owns the same UID fence as create/move admission. Its
+// observation is delivered only after releasing that fence.
+func (r *Reconciler) reconcileDeletion(ctx context.Context, pool volumeapi.Pool) DeletionObservation {
+	unlock := r.PoolLocks.Lock(pool.UID)
+	defer unlock()
+	report, err := r.Safety.CheckPoolDeleteAfter(ctx, pool.Name, types.UID(pool.UID), pool.DeletionTimestamp.Time)
+	if err != nil {
+		return DeletionObservation{Stage: "SafetyCheckFailed", Err: fmt.Errorf("check deleting Pool %q: %w", pool.Name, err)}
+	}
+	if !report.Safe() {
+		return DeletionObservation{Stage: "SafetyBlocked", Blockers: report.Blockers}
+	}
+	if pool.IdentityReleaseApproval != pool.UID {
+		return DeletionObservation{Stage: "ReleaseApproval", Err: r.Pools.ApprovePoolIdentityRelease(ctx, pool.Name, pool.UID)}
+	}
+	released := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	if released == nil || released.Status != metav1.ConditionTrue || released.ObservedGeneration != pool.Generation {
+		observation := DeletionObservation{Stage: "NodeReleasePending", Reason: "IdentityReleaseObservationMissing"}
+		if released != nil {
+			observation.Reason = released.Reason
+			observation.ObservedGeneration = released.ObservedGeneration
+			if released.ObservedGeneration != pool.Generation {
+				observation.Reason = "IdentityReleaseObservationStale"
+			}
+		}
+		return observation
+	}
+	return DeletionObservation{Stage: "RemoveProtection", Err: r.Pools.RemovePoolFinalizer(ctx, pool.Name, pool.UID)}
 }
 
 func (r *Reconciler) reconcileAndLog(ctx context.Context) {

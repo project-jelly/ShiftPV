@@ -20,7 +20,7 @@ func classifyError(err error) error {
 	if status.Code(err) == codes.Unavailable || status.Code(err) == codes.DeadlineExceeded {
 		return retryError{err}
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, volumeapi.ErrPoolNotReady) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, volumeapi.ErrPoolNotReady) || apierrors.IsConflict(err) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 		return retryError{err}
 	}
 	return err
