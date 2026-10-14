@@ -25,9 +25,10 @@ Node Plugin은 자기 Pool의 generation, 삭제 요청, identity release 승인
 `shiftpvpools` 권한에는 `get`, `list`, `watch`가 필요하다.
 
 각 Pool의 context를 따르는 inventory·identity release·API 작업은 기본 5초 제한을 둔다.
-한 Pool이 timeout되어도 다음 Pool을 관측하고, 만료된 관측은 status로 쓰지 않는다. 부모 context가
+한 Pool이 timeout되어도 다음 Pool을 관측하고, 만료를 확인한 뒤에는 새 status 쓰기를 시작하지 않는다. 부모 context가
 취소되면 새 Pool 작업을 시작하지 않는다. 동기식 host filesystem syscall과 전체 Pool 목록 조회는
 이 제한으로 중단하지 못한다.
+이미 보낸 API 쓰기는 timeout 전에 반영됐을 수 있으므로 재시도는 live 상태와 기존 generation fence를 확인한다.
 
 한 inventory scan 안에서는 mount table을 한 번 읽어 복사본들의 publication을 판정한다. 이 관찰은
 해당 scan에만 유효하며 다음 generation이나 다음 scan으로 재사용하지 않는다. 실제 publish/unpublish는

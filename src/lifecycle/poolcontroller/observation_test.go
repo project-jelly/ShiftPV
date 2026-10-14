@@ -50,7 +50,7 @@ func TestDeletionReportsSafetyAndNodeEvidenceWaits(t *testing.T) {
 	if err := r.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if observed.Stage != "NodeReleasePending" || observed.ObservedGeneration != 3 || len(pools.removed) != 0 {
+	if observed.Stage != "NodeReleasePending" || observed.Reason != "IdentityReleaseObservationStale" || observed.ObservedGeneration != 3 || len(pools.removed) != 0 {
 		t.Fatalf("stale node evidence accepted: %+v", observed)
 	}
 	pools.pools[0].Status.Conditions[0].ObservedGeneration = pool.Generation

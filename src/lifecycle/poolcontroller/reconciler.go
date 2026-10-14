@@ -109,6 +109,9 @@ func (r *Reconciler) reconcileDeletion(ctx context.Context, pool volumeapi.Pool)
 		if released != nil {
 			observation.Reason = released.Reason
 			observation.ObservedGeneration = released.ObservedGeneration
+			if released.ObservedGeneration != pool.Generation {
+				observation.Reason = "IdentityReleaseObservationStale"
+			}
 		}
 		return observation
 	}
