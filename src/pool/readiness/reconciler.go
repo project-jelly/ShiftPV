@@ -25,6 +25,9 @@ type Reconciler struct {
 	Pools       Repository
 	Inspector   Inspector
 	Interval    time.Duration
+	// PoolTimeout bounds context-aware inventory, release and API work for
+	// each Pool. It cannot interrupt synchronous host filesystem syscalls.
+	PoolTimeout time.Duration
 	Wake        <-chan struct{}
 	Now         func() time.Time
 	Observe     func(volumeapi.Pool, Result, error)
@@ -32,6 +35,8 @@ type Reconciler struct {
 	Inventory   func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
 	Release     func(context.Context, volumeapi.Pool) error
 }
+
+const defaultPoolTimeout = 5 * time.Second
 
 func NewReconciler(nodeName string, pools Repository, inspector Inspector, interval time.Duration) (*Reconciler, error) {
 	r := &Reconciler{NodeName: nodeName, Pools: pools, Inspector: inspector, Interval: interval}
@@ -76,6 +81,9 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	}
 	r.reconcileMu.Lock()
 	defer r.reconcileMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var observations []Observation
 	if r.ObserveAll != nil {
 		defer func() { r.ObserveAll(observations, reconcileErr) }()
@@ -90,11 +98,20 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 	isolation := r.capacityIsolation(pools)
 	observed := false
 	for _, pool := range pools {
+		if ctx.Err() != nil {
+			return errors.Join(reconcileErr, ctx.Err())
+		}
 		if pool.NodeName != r.NodeName {
 			continue
 		}
 		observed = true
-		result, err := r.reconcilePool(ctx, pool, isolation[pool.UID])
+		timeout := r.PoolTimeout
+		if timeout == 0 {
+			timeout = defaultPoolTimeout
+		}
+		poolCtx, cancel := context.WithTimeout(ctx, timeout)
+		result, err := r.reconcilePool(poolCtx, pool, isolation[pool.UID])
+		cancel()
 		observations = append(observations, Observation{Pool: pool, Result: result, Err: err})
 		reconcileErr = errors.Join(reconcileErr, err)
 	}
@@ -139,7 +156,13 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 			status, cleanupReady = r.observedStatus(ctx, pool, result, now)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	releaseErr := r.recordIdentityRelease(ctx, pool, &status, cleanupReady, now)
+	if err := ctx.Err(); err != nil {
+		return result, errors.Join(err, releaseErr)
+	}
 	return result, errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
 }
 
@@ -265,7 +288,7 @@ func (r *Reconciler) reconcileAndLog(ctx context.Context) error {
 }
 
 func (r *Reconciler) validate() error {
-	if r == nil || r.NodeName == "" || r.Pools == nil || r.Inspector == nil || r.Interval <= 0 {
+	if r == nil || r.NodeName == "" || r.Pools == nil || r.Inspector == nil || r.Interval <= 0 || r.PoolTimeout < 0 {
 		return fmt.Errorf("Pool readiness reconciler configuration is incomplete")
 	}
 	return nil
