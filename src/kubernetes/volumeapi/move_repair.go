@@ -1,6 +1,7 @@
 package volumeapi
 
 import (
+	"slices"
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -11,6 +12,9 @@ import (
 // and its placement marker. It is intentionally narrower than ordinary Pool
 // readiness and must not be used for provisioning or destination discovery.
 func PoolReadyForActiveMoveRepairAt(pool Pool, move Move, state State, now time.Time, staleAfter time.Duration) bool {
+	if !move.Status.CapacityApproved || !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+		return false
+	}
 	inventory := repairableInventoryAt(pool, now, staleAfter)
 	if inventory == nil {
 		return false
@@ -30,12 +34,9 @@ func PoolReadyForActiveMoveRepairAt(pool Pool, move Move, state State, now time.
 }
 
 // repairableInventoryAt returns the observation a repair may read, or nil unless
-// the Pool is Ready and reports a fresh, complete copy-observation problem.
+// the Pool has current backing and a fresh, complete copy-observation problem.
 func repairableInventoryAt(pool Pool, now time.Time, staleAfter time.Duration) *PoolInventory {
-	if !pool.BackingConfigurationCheck().OK {
-		return nil
-	}
-	if ready, _ := pool.ReadyAt(now, staleAfter); !ready {
+	if ready, _ := pool.CleanupReadyAt(now, staleAfter); !ready {
 		return nil
 	}
 	inventory := pool.Status.Inventory

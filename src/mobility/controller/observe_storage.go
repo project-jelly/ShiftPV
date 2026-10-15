@@ -17,11 +17,12 @@ import (
 
 // poolIndex is the Pool half of one observation snapshot, indexed by Pool UID.
 // registered retains every Pool identity, including rejected registrations;
-// ready holds only usable candidates. A configuration error must not erase a
-// referenced Pool or prevent unrelated Pools from being observed.
+// ready holds new allocation candidates; existing holds fresh backing and
+// complete inventory for already-identified copies, regardless of peer health.
 type poolIndex struct {
 	registered map[string]volumeapi.Pool
 	ready      map[string]volumeapi.Pool
+	existing   map[string]volumeapi.Pool
 }
 
 func moveSourceCopy(move volumeapi.Move, state volumeapi.State) *volume.CopyIdentity {
@@ -83,6 +84,7 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 	}
 	readyPools := snapshot.Ready
 	index.ready = make(map[string]volumeapi.Pool, len(readyPools))
+	index.existing = make(map[string]volumeapi.Pool, len(pools))
 	for _, pool := range readyPools {
 		registered, exists := index.registered[pool.UID]
 		if !exists || registered.Name != pool.Name || registered.NodeName != pool.NodeName {
@@ -92,6 +94,19 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 			continue
 		}
 		index.ready[pool.UID] = pool
+		index.existing[pool.UID] = pool
+	}
+	staleAfter := r.PoolReadinessStaleAfter
+	if staleAfter <= 0 {
+		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
+	}
+	for _, pool := range pools {
+		if _, ready := index.ready[pool.UID]; ready {
+			continue
+		}
+		if usable, _ := pool.InventoryReadyAt(r.now(), staleAfter); usable {
+			index.existing[pool.UID] = pool
+		}
 	}
 	return index, nil
 }
@@ -102,7 +117,7 @@ func (r *Reconciler) observeSource(ctx context.Context, move volumeapi.Move, poo
 	if err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("read source Node: %w", err)
 	}
-	sourcePool, sourceReady := indexedCopyPool(pools.ready, moveSourceCopy(move, state))
+	sourcePool, sourceReady := indexedCopyPool(pools.existing, moveSourceCopy(move, state))
 	sourceHealthy := err == nil && admission.NodeReady(sourceNode) && sourceReady && sourceCopyPresent(sourcePool, state.CurrentCopy)
 	result.FSM.SourceHealthy = sourceHealthy
 	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
@@ -177,7 +192,7 @@ func (r *Reconciler) observeDestination(ctx context.Context, move volumeapi.Move
 		if staleAfter <= 0 {
 			staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 		}
-		if exists && registeredPool.NodeName == result.DestinationNode && pools.capacityIndependent(registeredPool) && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
+		if exists && registeredPool.NodeName == result.DestinationNode && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
 			readyPool, ready, repaired = registeredPool, true, true
 		}
 	}
@@ -232,7 +247,11 @@ func destinationGroupMismatch(move volumeapi.Move, pools poolIndex, result *obse
 // Once approved, observation follows only the pinned destination incarnation.
 func destinationObservationPool(move volumeapi.Move, pools poolIndex, result *observation) (volumeapi.Pool, bool) {
 	if uid := move.Status.DestinationPoolUID; uid != "" {
-		pool, ready := pools.ready[uid]
+		candidates := pools.ready
+		if move.Status.CapacityApproved {
+			candidates = pools.existing
+		}
+		pool, ready := candidates[uid]
 		return pool, ready && pool.NodeName == result.DestinationNode
 	}
 	source, exists := indexedCopyPool(pools.registered, moveSourceCopy(move, result.Volume))
@@ -259,15 +278,4 @@ func sourceCopyPresent(pool volumeapi.Pool, copy *volume.CopyIdentity) bool {
 		}
 	}
 	return false
-}
-
-// A repair may bypass only its own inventory problem, never missing or
-// contradictory peer capacity evidence.
-func (p poolIndex) capacityIndependent(pool volumeapi.Pool) bool {
-	peers := make([]volumeapi.Pool, 0, len(p.registered))
-	for _, registered := range p.registered {
-		peers = append(peers, registered)
-	}
-	independent, _ := volumeapi.PoolCapacityIndependent(pool, peers)
-	return independent
 }

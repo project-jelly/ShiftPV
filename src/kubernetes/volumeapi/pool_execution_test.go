@@ -10,7 +10,7 @@ import (
 
 func executionPoolFixture(now time.Time) Pool {
 	conditions := []metav1.Condition{}
-	for _, kind := range []string{PoolConditionReady, PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable, PoolConditionCapacityIndependent} {
+	for _, kind := range []string{PoolConditionReady, PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable, PoolConditionCapacityIndependent, PoolConditionCapacityBackingVerified} {
 		conditions = append(conditions, metav1.Condition{Type: kind, Status: metav1.ConditionTrue, ObservedGeneration: 1, Reason: "OK"})
 	}
 	return Pool{Name: "pool", UID: "pool-uid", NodeName: "node", MountPath: "/pool", PoolGroup: DefaultPoolGroup,
@@ -35,10 +35,12 @@ func TestExecutionReadinessPreservesEvidenceWhileScanIsPending(t *testing.T) {
 		{"placement limit changed", func(p *Pool) { p.CapacityLimit = "invalid" }, true},
 		{"terminating", func(p *Pool) { p.DeletionTimestamp = &metav1.Time{Time: now} }, true},
 		{"missing capacity anchor", func(p *Pool) { p.Status.CapacityUnit = nil }, false},
-		{"capacity rejected", func(p *Pool) { p.Status.Conditions[4].Status = metav1.ConditionFalse }, false},
-		{"mixed capacity generation", func(p *Pool) { p.Status.Conditions[4].ObservedGeneration = 2 }, false},
-		{"failed backing", func(p *Pool) { p.Status.Conditions[0].Status = metav1.ConditionFalse }, false},
-		{"unknown backing", func(p *Pool) { p.Status.Conditions[0].Status = metav1.ConditionUnknown }, false},
+		{"peer capacity rejected", func(p *Pool) { p.Status.Conditions[4].Status = metav1.ConditionFalse }, true},
+		{"placement not ready", func(p *Pool) { p.Status.Conditions[0].Status = metav1.ConditionFalse }, true},
+		{"capacity backing rejected", func(p *Pool) { p.Status.Conditions[5].Status = metav1.ConditionFalse }, false},
+		{"mixed capacity generation", func(p *Pool) { p.Status.Conditions[5].ObservedGeneration = 2 }, false},
+		{"failed directory", func(p *Pool) { p.Status.Conditions[1].Status = metav1.ConditionFalse }, false},
+		{"unknown directory", func(p *Pool) { p.Status.Conditions[1].Status = metav1.ConditionUnknown }, false},
 		{"missing observation", func(p *Pool) { p.Status.ObservedGeneration = 0 }, false},
 		{"future generation", func(p *Pool) { p.Status.ObservedGeneration = 3 }, false},
 		{"stale observation", func(p *Pool) { p.Status.LastProbeTime = metav1.NewTime(now.Add(-time.Hour)) }, false},

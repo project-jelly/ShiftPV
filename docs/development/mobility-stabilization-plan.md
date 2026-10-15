@@ -3,7 +3,8 @@
 상태: 2026-10-15 1단계 [PR #199](https://github.com/project-jelly/ShiftPV/pull/199),
 2A 저장 계약 [PR #200](https://github.com/project-jelly/ShiftPV/pull/200) 머지.
 2B-1 용량/owner 경계 [PR #201](https://github.com/project-jelly/ShiftPV/pull/201) 머지.
-2B-2 준비 실행·취소 연결과 통합 검증 진행 중.
+2B-2 준비 실행·취소 연결과 통합 검증 [PR #202](https://github.com/project-jelly/ShiftPV/pull/202) 머지.
+3단계 자기 backing 검증과 신규 할당 조건 분리 진행 중.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.

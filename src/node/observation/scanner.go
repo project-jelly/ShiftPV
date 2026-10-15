@@ -36,6 +36,9 @@ type Scanner struct {
 	// SnapshotPublications is scoped to one scan, after its generation was read.
 	SnapshotPublications func() (Publications, error)
 	Limit                int
+	// VerifyBacking injects only host evidence; inventory and identity checks
+	// remain real. Nil verifies the anchored mount and block extents locally.
+	VerifyBacking func(string, volumeapi.Pool) error
 }
 
 func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
@@ -50,7 +53,7 @@ func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
 		return err
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
-	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
+	if err := s.verifyBacking(pool); err != nil {
 		return err
 	}
 	return ownership.ReleaseEmptyPool(ctx, root, ownership.PoolIdentity{InstallationID: installationID, PoolUID: pool.UID})
@@ -93,7 +96,7 @@ func (s *Scanner) scan(ctx context.Context, pool volumeapi.Pool, now time.Time,
 		return result
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
-	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
+	if err := s.verifyBacking(pool); err != nil {
 		result.Message = "MountUnavailable: " + err.Error()
 		return result
 	}
@@ -122,7 +125,7 @@ func (s *Scanner) scan(ctx context.Context, pool volumeapi.Pool, now time.Time,
 	if !s.observeUnrecorded(ctx, root, paths, known, &result, pathType) {
 		return result
 	}
-	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
+	if err := s.verifyBacking(pool); err != nil {
 		result.Message = "MountUnavailable: " + err.Error()
 		return result
 	}
@@ -131,6 +134,13 @@ func (s *Scanner) scan(ctx context.Context, pool volumeapi.Pool, now time.Time,
 	}
 	result.Valid = result.Message == ""
 	return result
+}
+
+func (s *Scanner) verifyBacking(pool volumeapi.Pool) error {
+	if s.VerifyBacking != nil {
+		return s.VerifyBacking(s.HostRoot, pool)
+	}
+	return readiness.NewProbe(s.HostRoot).VerifyBacking(pool)
 }
 
 func physicalKey(identity volume.CopyIdentity) string {

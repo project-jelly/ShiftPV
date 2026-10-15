@@ -34,7 +34,6 @@ type PoolRegistry interface {
 }
 
 type PoolVerifier interface {
-	VerifyPool(volumeapi.Pool) error
 	VerifyBacking(volumeapi.Pool) error
 }
 
@@ -142,7 +141,7 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	if !reconcile {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
-	enteredLock, err := s.publisher(s.unpublishPoolRoot).Unpublish(ctx, publication.UnpublishRequest{
+	enteredLock, err := s.publisher(s.poolRoot).Unpublish(ctx, publication.UnpublishRequest{
 		VolumeID: req.GetVolumeId(),
 		Source:   target.source,
 		PoolRoot: target.poolRoot,
@@ -186,7 +185,7 @@ func (s *Service) unpublishTarget(ctx context.Context, volumeID string) (unpubli
 		return unpublishTarget{}, false, nil
 	}
 	copy := *state.CurrentCopy
-	pool, poolRoot, err := s.unpublishPoolRoot(ctx, copy)
+	pool, poolRoot, err := s.poolRoot(ctx, copy)
 	if err != nil {
 		if publication.PoolIdentityUnavailable(err) {
 			return unpublishTarget{}, false, nil
@@ -261,17 +260,9 @@ func (s *Service) lockPublication(volumeID string) func() {
 	return func() { _ = s.publicationLocks.UnlockKey(volumeID) }
 }
 
+// Publication uses an existing, identified copy. New allocation eligibility and
+// unrelated scan requests do not replace its live backing and owner checks.
 func (s *Service) poolRoot(ctx context.Context, copy volume.CopyIdentity) (volumeapi.Pool, string, error) {
-	return s.resolvePoolRoot(ctx, copy, s.poolVerifier().VerifyPool)
-}
-
-// Unpublish reconciles existing mount references; it cannot allocate space.
-// A sibling deletion's scan fence must not delay this publication observation.
-func (s *Service) unpublishPoolRoot(ctx context.Context, copy volume.CopyIdentity) (volumeapi.Pool, string, error) {
-	return s.resolvePoolRoot(ctx, copy, s.poolVerifier().VerifyBacking)
-}
-
-func (s *Service) resolvePoolRoot(ctx context.Context, copy volume.CopyIdentity, verify func(volumeapi.Pool) error) (volumeapi.Pool, string, error) {
 	if copy.NodeName != s.NodeName {
 		return volumeapi.Pool{}, "", fmt.Errorf("copy node does not match this node: %w", volumeapi.ErrStateConflict)
 	}
@@ -288,7 +279,7 @@ func (s *Service) resolvePoolRoot(ctx context.Context, copy volume.CopyIdentity,
 		return volumeapi.Pool{}, "", fmt.Errorf("host root %q must be absolute", s.HostRoot)
 	}
 	root := filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator)))
-	if err := verify(pool); err != nil {
+	if err := s.poolVerifier().VerifyBacking(pool); err != nil {
 		return volumeapi.Pool{}, "", err
 	}
 	return pool, root, nil

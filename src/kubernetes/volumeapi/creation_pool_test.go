@@ -45,7 +45,7 @@ func TestCreationPoolSeparatesInventoryFromBackingReadiness(t *testing.T) {
 			_ = unstructured.SetNestedField(p.Object, now.Add(time.Hour).Format(time.RFC3339), "status", "lastProbeTime")
 		}, false},
 		{"failed backing", func(p *unstructured.Unstructured) {
-			_ = unstructured.SetNestedSlice(p.Object, []any{map[string]any{"type": PoolConditionReady, "status": "False", "observedGeneration": int64(1), "reason": "PathMissing"}}, "status", "conditions")
+			_ = unstructured.SetNestedSlice(p.Object, []any{map[string]any{"type": PoolConditionAccessible, "status": "False", "observedGeneration": int64(1), "reason": "PathMissing"}}, "status", "conditions")
 		}, false},
 		{"missing mount identity", func(p *unstructured.Unstructured) {
 			_ = unstructured.SetNestedField(p.Object, PoolMountPolicyRequireMountPoint, "spec", "mountPolicy")
@@ -57,6 +57,11 @@ func TestCreationPoolSeparatesInventoryFromBackingReadiness(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			object := pool("pool", "node")
 			object.SetUID("pool-uid")
+			conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
+			for _, kind := range []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable} {
+				conditions = append(conditions, map[string]any{"type": kind, "status": "True", "observedGeneration": int64(1)})
+			}
+			_ = unstructured.SetNestedSlice(object.Object, conditions, "status", "conditions")
 			tc.change(object)
 			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{PoolResource: "ShiftPVPoolList"}, object)
 			registry := &Registry{Client: client, Now: func() time.Time { return now }}

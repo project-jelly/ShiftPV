@@ -347,10 +347,8 @@ func rollbackRecoveryFixture(t *testing.T, copies []volumeapi.CopyObservation) (
 		repo.pools[index].Status = volumeapi.PoolStatus{
 			ObservedGeneration: 1,
 			LastProbeTime:      metav1.NewTime(observedAt),
-			Conditions: []metav1.Condition{{
-				Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1,
-			}},
-			Inventory: &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(observedAt), Valid: true, Copies: copies},
+			Conditions:         testBackingConditions(1),
+			Inventory:          &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(observedAt), Valid: true, Copies: copies},
 		}
 	}
 	r.Now = func() time.Time { return observedAt.Add(time.Second) }

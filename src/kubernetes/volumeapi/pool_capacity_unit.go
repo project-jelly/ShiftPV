@@ -67,7 +67,7 @@ func PoolCapacityIndependent(pool Pool, pools []Pool) (bool, string) {
 }
 
 func (p Pool) registrationAllocation() registration.Allocation {
-	verified, _ := p.capacityReady()
+	verified, _ := p.CapacityBackingReady()
 	return registration.Allocation{
 		UID: p.UID, NodeName: p.NodeName, MountPath: p.MountPath,
 		Policy: p.CapacityPolicy, Approved: p.RegistrationApproved(), Deleting: p.DeletionTimestamp != nil,
@@ -75,16 +75,40 @@ func (p Pool) registrationAllocation() registration.Allocation {
 	}
 }
 
-func (p Pool) capacityReady() (bool, string) {
-	return p.capacityReadyAt(p.Generation)
+// CapacityBackingReady checks this Pool's current fixed-allocation evidence.
+// It does not establish independence from peers or observation freshness.
+func (p Pool) CapacityBackingReady() (bool, string) {
+	return p.capacityBackingReadyAt(p.Generation)
 }
 
-func (p Pool) capacityReadyAt(generation int64) (bool, string) {
+func (p Pool) capacityBackingReadyAt(generation int64) (bool, string) {
 	if p.CapacityPolicy == "" {
 		return true, ""
 	}
 	if p.CapacityPolicy != PoolCapacityPolicyFixedBlock || p.Status.CapacityUnit.Validate() != nil {
 		return false, "CapacityIdentityMissing"
+	}
+	condition := meta.FindStatusCondition(p.Status.Conditions, PoolConditionCapacityBackingVerified)
+	if condition == nil {
+		// Older node images reported own backing only as part of independence.
+		// Never let that legacy condition override a newer failed observation.
+		condition = meta.FindStatusCondition(p.Status.Conditions, PoolConditionCapacityIndependent)
+	}
+	if condition == nil || condition.ObservedGeneration != generation || condition.Status != metav1.ConditionTrue {
+		if condition != nil && condition.Reason != "" {
+			return false, condition.Reason
+		}
+		return false, "CapacityProbePending"
+	}
+	return true, ""
+}
+
+func (p Pool) capacityReadyAt(generation int64) (bool, string) {
+	if ready, reason := p.capacityBackingReadyAt(generation); !ready {
+		return false, reason
+	}
+	if p.CapacityPolicy == "" {
+		return true, ""
 	}
 	condition := meta.FindStatusCondition(p.Status.Conditions, PoolConditionCapacityIndependent)
 	if condition == nil || condition.ObservedGeneration != generation || condition.Status != metav1.ConditionTrue {

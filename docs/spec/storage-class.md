@@ -84,6 +84,21 @@ mobility를 허용한 PVC의 topology는 그룹에 등록된 node 범위다. 일
 stale, invalid 또는 incomplete observation은 allocation을 승인할 수 없다. `statfs`는 같은 filesystem의
 현재 여유를 확인하는 admission 신호일 뿐 공간을 예약하거나 hard quota를 제공하지 않는다.
 
+### Existing copy operations
+
+`CapacityBackingVerified`는 현재 filesystem·block 영역이 해당 Pool의 anchor와 일치하는지,
+`CapacityIndependent`는 신규 할당을 위해 다른 승인 Pool과 용량이 분리됐는지 나타낸다.
+승인된 B의 증거가 사라지면 정상 A도 신규 할당을 보류하지만, A의 자기 검증과 inventory는 계속한다.
+A의 기존 copy 게시·승인된 실행·정리는 exact identity와 자기 backing을 검증해 진행한다.
+NodePublish는 새 공간을 할당하지 않으며, 별도 scan 요청도 기존 copy의 게시 권한을 취소하지 않는다.
+
+native 실행은 매 경계에서 live mount·block 영역을 재검증하므로 기존의 신선한 observed generation을
+사용할 수 있다. serve-source·copy·promote·verify-owner helper는 현재 generation의 own condition과
+live bind mount를 확인하며 새 시간 예산을 추가하지 않는다. 사용량 측정·cleanup Job 시작과
+destination publication·absence 증거는 현재 generation과 기존 freshness 조건을 요구한다.
+새 condition이 없는 구버전 관측만 동일 generation의
+`CapacityIndependent=True`로 호환하며, 새 False·Unknown·구세대 condition을 이전 성공으로 덮지 않는다.
+
 ### Measurement verification
 
 측정 helper는 Pool을 read-only로 마운트하고 측정 전후에 다음을 확인한다. 실패하면 결과를 폐기한다.

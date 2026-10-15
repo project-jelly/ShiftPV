@@ -158,6 +158,22 @@ func (m *memoryRepository) ReadyPoolForIdentity(ctx context.Context, name, uid, 
 	}
 	return volumeapi.Pool{}, volumeapi.ErrPoolNotReady
 }
+
+func (m *memoryRepository) InventoryPoolForIdentity(ctx context.Context, name, uid, nodeName string) (volumeapi.Pool, error) {
+	// Existing fixtures mark Ready pools explicitly; non-allocating pools must
+	// carry the actual backing and inventory proof used by the Registry.
+	if pool, err := m.ReadyPoolForIdentity(ctx, name, uid, nodeName); err == nil {
+		return pool, nil
+	}
+	pool, err := m.PoolForIdentity(ctx, name, uid, nodeName)
+	if err != nil {
+		return volumeapi.Pool{}, err
+	}
+	if ready, _ := pool.InventoryReadyAt(time.Now(), volumeapi.DefaultPoolReadinessStaleAfter); !ready {
+		return volumeapi.Pool{}, volumeapi.ErrPoolNotReady
+	}
+	return pool, nil
+}
 func (m *memoryRepository) CreateMove(_ context.Context, prefix string, spec volumeapi.MoveSpec) (volumeapi.Move, error) {
 	m.moveSequence++
 	name := fmt.Sprintf("%s%d", prefix, m.moveSequence)
@@ -751,7 +767,7 @@ func TestObserveAllowsOnlyActiveMoveToRepairDestinationCrashWindow(t *testing.T)
 	}
 	readyStatus := volumeapi.PoolStatus{
 		ObservedGeneration: 1, LastProbeTime: metav1.NewTime(now),
-		Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+		Conditions: testBackingConditions(1),
 	}
 
 	for _, test := range []struct {

@@ -146,24 +146,7 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
-	if skipRegistrationProbe(pool, allocation) {
-		result = Result{Independent: allocation.check, Accessible: skipped(), Writable: skipped(), CapacityReadable: skipped()}
-	} else {
-		candidate := pool
-		if candidate.Status.CapacityUnit == nil {
-			candidate.Status.CapacityUnit = allocation.unit
-		}
-		result = r.Inspector.Inspect(candidate)
-		if allocation.unit != nil && !volumeapi.SameCapacityUnit(allocation.unit, result.CapacityUnit) {
-			result.Independent = capacityFailure("CapacityIdentityChanged", fmt.Errorf("capacity allocation changed during node observation"))
-		}
-	}
-	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.Known && result.Mounted.Reason == "" {
-		result.Mounted = skipped()
-	}
-	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && result.Mounted.OK && result.MountIdentity == nil {
-		result.Mounted = Check{Known: true, Reason: "MountIdentityMissing", Message: "mount probe did not return an identity"}
-	}
+	result = r.inspectPool(pool, allocation)
 	status, cleanupReady := r.observedStatus(ctx, pool, result, now)
 	if !pool.RegistrationApproved() && status.RegistrationApproved {
 		if err := r.recheckRegistration(ctx, pool, &result); err != nil {
@@ -205,17 +188,18 @@ func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, re
 		meta.SetStatusCondition(&status.Conditions, condition)
 	}
 	ready := meta.FindStatusCondition(status.Conditions, volumeapi.PoolConditionReady)
-	cleanupReady := ready != nil && ready.Status == metav1.ConditionTrue
+	allocationReady := ready != nil && ready.Status == metav1.ConditionTrue
+	cleanupReady := ownObservationReady(pool, result)
 	configuration := pool.ConfigurationCheck()
 	if !configuration.OK {
 		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, configuration, pool.Generation, now))
-	} else if pool.DeletionTimestamp != nil && cleanupReady {
+	} else if pool.DeletionTimestamp != nil && allocationReady {
 		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, Check{
 			Known: true, Reason: "PoolDeregistering", Message: "Pool rejects new placement while deregistration converges",
 		}, pool.Generation, now))
 	}
 	status.Inventory = r.observedInventory(ctx, pool, result, status, now)
-	if cleanupReady && completeInventory(status.Inventory) {
+	if allocationReady && completeInventory(status.Inventory) {
 		if pool.DeletionTimestamp == nil && configuration.OK {
 			status.RegistrationApproved = true
 		}
@@ -238,8 +222,11 @@ func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool,
 	if invalidRegistrationCandidate(pool) {
 		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "ConfigurationUnavailable: " + pool.ConfigurationCheck().Reason}
 	}
-	if result.Independent.Reason != "" && !result.Independent.OK {
+	if !pool.RegistrationApproved() && result.Independent.Reason != "" && !result.Independent.OK {
 		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "CapacityUnavailable: " + result.Independent.Reason}
+	}
+	if pool.CapacityPolicy != "" && !result.Backing.OK {
+		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "BackingUnavailable: " + result.Backing.Reason}
 	}
 	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.OK {
 		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "MountUnavailable: " + result.Mounted.Reason}
@@ -262,6 +249,25 @@ func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool,
 
 func completeInventory(inventory *volumeapi.PoolInventory) bool {
 	return inventory != nil && inventory.Valid && !inventory.Truncated && inventory.Message == ""
+}
+
+func ownObservationReady(pool volumeapi.Pool, result Result) bool {
+	if !pool.BackingConfigurationCheck().OK {
+		return false
+	}
+	checks := []Check{result.Accessible, result.Writable, result.CapacityReadable}
+	if pool.MountPolicy != "" {
+		checks = append(checks, result.Mounted)
+	}
+	if pool.CapacityPolicy != "" {
+		checks = append(checks, result.Backing)
+	}
+	for _, check := range checks {
+		if !check.Known || !check.OK {
+			return false
+		}
+	}
+	return true
 }
 
 // recordIdentityRelease performs only the exact empty Pool release approved
@@ -314,11 +320,17 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 	capacity := condition(volumeapi.PoolConditionCapacityReadable, result.CapacityReadable, generation, now)
 	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and capacity-readable"}
 	checks := []Check{}
+	if result.Backing.Reason != "" {
+		checks = append(checks, result.Backing)
+	}
 	if result.Independent.Reason != "" {
 		checks = append(checks, result.Independent)
 	}
 	checks = append(checks, result.Accessible)
 	conditions := []metav1.Condition{accessible}
+	if result.Backing.Reason != "" {
+		conditions = append(conditions, condition(volumeapi.PoolConditionCapacityBackingVerified, result.Backing, generation, now))
+	}
 	if result.Independent.Reason != "" {
 		conditions = append(conditions, condition(volumeapi.PoolConditionCapacityIndependent, result.Independent, generation, now))
 	}

@@ -1096,16 +1096,13 @@ func TestPoolReadyForActiveMoveRepairAtAdmitsOnlyExactCrashWindow(t *testing.T) 
 	move := Move{
 		Name: "move-test", UID: "move-uid", Spec: MoveSpec{VolumeID: volumeID, SourceNode: source.NodeName},
 		Status: MoveStatus{
-			Phase: "Copying", DestinationNode: incoming.NodeName, DestinationPoolUID: incoming.PoolUID,
+			Phase: "Copying", CapacityApproved: true, DestinationNode: incoming.NodeName, DestinationPoolUID: incoming.PoolUID,
 			SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
 			CopyOperationID: "copy-move-uid", PromotionOperationID: "promote-move-uid",
 		},
 	}
-	readyStatus := PoolStatus{
-		ObservedGeneration: 1, LastProbeTime: metav1.NewTime(now),
-		Conditions: []metav1.Condition{{Type: PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
-	}
-	pool := Pool{Name: incoming.PoolName, UID: incoming.PoolUID, NodeName: incoming.NodeName, MountPath: "/pool", Generation: 1, Status: readyStatus}
+	pool := existingBackingPoolFixture(now)
+	pool.Name, pool.UID, pool.NodeName = incoming.PoolName, incoming.PoolUID, incoming.NodeName
 	pool.Status.Inventory = &PoolInventory{
 		ObservedAt: metav1.NewTime(now), Message: "CopyObservationProblem",
 		Copies: []CopyObservation{{Marker: "path:.shiftpv/incoming/" + incoming.CopyID, Present: true, Problem: "UnrecordedPath"}},
@@ -1129,6 +1126,15 @@ func TestPoolReadyForActiveMoveRepairAtAdmitsOnlyExactCrashWindow(t *testing.T) 
 	}
 
 	tests := map[string]func(*Pool, *Move, *State){
+		"unapproved transaction": func(_ *Pool, move *Move, _ *State) { move.Status.CapacityApproved = false },
+		"missing protection":     func(pool *Pool, _ *Move, _ *State) { pool.Finalizers = nil },
+		"failed backing": func(pool *Pool, _ *Move, _ *State) {
+			pool.Status.Conditions[5].Status = metav1.ConditionFalse
+		},
+		"failed directory": func(pool *Pool, _ *Move, _ *State) {
+			pool.Status.Conditions[1].Status = metav1.ConditionFalse
+		},
+		"outdated observation": func(pool *Pool, _ *Move, _ *State) { pool.Generation++ },
 		"invalid backing path": func(pool *Pool, _ *Move, _ *State) { pool.MountPath = "/." },
 		"invalid mount policy": func(pool *Pool, _ *Move, _ *State) { pool.MountPolicy = "unsupported" },
 		"unrelated path": func(pool *Pool, _ *Move, _ *State) {
@@ -1151,6 +1157,7 @@ func TestPoolReadyForActiveMoveRepairAtAdmitsOnlyExactCrashWindow(t *testing.T) 
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			candidatePool, candidateMove, candidateState := pool, move, state
+			candidatePool.Status.Conditions = append([]metav1.Condition(nil), pool.Status.Conditions...)
 			inventory := *pool.Status.Inventory
 			inventory.Copies = append([]CopyObservation(nil), pool.Status.Inventory.Copies...)
 			candidatePool.Status.Inventory = &inventory

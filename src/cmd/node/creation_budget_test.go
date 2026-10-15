@@ -214,6 +214,10 @@ func newCreationFixture(t *testing.T) *creationFixture {
 			"spec": map[string]any{"nodeName": f.identity.NodeName, "poolGroup": "default", "mountPath": "/" + name, "capacityPolicy": volumeapi.PoolCapacityPolicyFixedBlock, "capacity": map[string]any{"limit": "1Gi"}},
 			"status": volumeapi.PoolStatus{RegistrationApproved: true, ObservedGeneration: 1, LastProbeTime: now, CapacityUnit: unit, Inventory: &volumeapi.PoolInventory{Valid: true, ObservedAt: now}, Conditions: []metav1.Condition{
 				{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "PoolReady"},
+				{Type: volumeapi.PoolConditionAccessible, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "DirectoryAccessible"},
+				{Type: volumeapi.PoolConditionWritable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "Writable"},
+				{Type: volumeapi.PoolConditionCapacityReadable, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "CapacityReadable"},
+				{Type: volumeapi.PoolConditionCapacityBackingVerified, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "CapacityAllocationVerified"},
 				{Type: volumeapi.PoolConditionCapacityIndependent, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "CapacityAllocationVerified"}}}}
 		root := filepath.Join(f.root, name)
 		if err := os.Mkdir(root, 0700); err != nil {
