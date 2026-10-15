@@ -264,6 +264,9 @@ func (r *Reconciler) recoveryAdvance(ctx context.Context, move volumeapi.Move, p
 }
 
 func (r *Reconciler) recoveryError(ctx context.Context, move volumeapi.Move, reason string, err error) error {
+	if ctx.Err() != nil {
+		return errors.Join(err, ctx.Err())
+	}
 	if errors.Is(err, errMoveStatusPersistence) {
 		return err
 	}

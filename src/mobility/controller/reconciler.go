@@ -27,6 +27,7 @@ const (
 	placementAnnotationKey            = admission.PlacementKey
 	DefaultMoveJournalRetention       = 7 * 24 * time.Hour
 	DefaultPlacementPriorityClassName = "shiftpv-placement"
+	DefaultReconcileTimeout           = 30 * time.Second
 )
 
 type Repository interface {
@@ -75,7 +76,9 @@ type Reconciler struct {
 	CleanupOperator            interface {
 		AdvanceReclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error)
 	}
-	Interval                time.Duration
+	Interval time.Duration
+	// ReconcileTimeout bounds one Volume pass; non-positive values use DefaultReconcileTimeout.
+	ReconcileTimeout        time.Duration
 	MoveJournalRetention    time.Duration
 	PoolReadinessStaleAfter time.Duration
 	Now                     func() time.Time
@@ -109,6 +112,9 @@ func (r *Reconciler) reconcilePersistedMove(ctx context.Context, move volumeapi.
 	if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {
 		// A read-only measurement must not delay restoring source authority.
 		_, cleanupErr := r.finalizeSourceUsage(ctx, move)
+		if ctx.Err() != nil {
+			return errors.Join(cleanupErr, ctx.Err())
+		}
 		return errors.Join(r.reconcileRecovery(ctx, move), cleanupErr)
 	}
 	if phase == fsm.PhaseSucceeded || (phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered) {

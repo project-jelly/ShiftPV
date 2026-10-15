@@ -391,6 +391,9 @@ func (r *Reconciler) ensureRecoveryCleanup(ctx context.Context, move volumeapi.M
 		return false, fmt.Errorf("recovery cleanup store is not configured")
 	}
 	err := r.ensureCleanupSpec(ctx, &move, spec)
+	if ctx.Err() != nil {
+		return false, errors.Join(err, ctx.Err())
+	}
 	if errors.Is(err, errCleanupPending) {
 		return false, nil
 	}

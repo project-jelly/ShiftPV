@@ -42,6 +42,9 @@ type progressSnapshot struct {
 }
 
 func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move, previous volumeapi.MoveStatus) error {
+	if ctx.Err() != nil {
+		return errors.Join(errMoveStatusPersistence, ctx.Err())
+	}
 	if reflect.DeepEqual(previous, move.Status) {
 		return nil
 	}
@@ -68,6 +71,9 @@ func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move
 }
 
 func (r *Reconciler) recordMoveError(ctx context.Context, move *volumeapi.Move, previous volumeapi.MoveStatus, reason, operation string, cause error) error {
+	if ctx.Err() != nil {
+		return errors.Join(cause, ctx.Err())
+	}
 	if errors.Is(cause, errMoveStatusPersistence) || errors.Is(cause, errPoolBusy) || errors.Is(cause, ErrCapacityProbePending) {
 		return cause
 	}
