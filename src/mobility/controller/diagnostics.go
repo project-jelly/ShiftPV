@@ -60,7 +60,7 @@ func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move
 		*move = stored
 	} else {
 		if err := r.Repository.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
-			return err
+			return errors.Join(errMoveStatusPersistence, err)
 		}
 	}
 	r.emitMoveEvent(*move, previous)
