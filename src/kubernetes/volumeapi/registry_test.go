@@ -513,8 +513,8 @@ func TestBeginCreateRejectsExistingServingCopyBeforeIntent(t *testing.T) {
 
 	placeholder := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
-		"metadata": map[string]any{"name": volumeID, "uid": "new-volume-uid"},
-		"spec":     map[string]any{"volumeID": volumeID},
+		"metadata": map[string]any{"name": volumeID, "uid": "new-volume-uid", "finalizers": []any{VolumeProtectionFinalizer}},
+		"spec":     map[string]any{"volumeID": volumeID, "requestName": "pvc", "initialNode": "node-a", "capacityBytes": int64(64)},
 	}}
 	if _, err := client.Resource(VolumeResource).Create(ctx, placeholder, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
@@ -544,8 +544,8 @@ func TestBeginCreateRejectsReplacementVolumeBeforeStatusWrite(t *testing.T) {
 	const volumeID = "shiftpv-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	original := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
-		"metadata": map[string]any{"name": volumeID, "uid": "original-uid"},
-		"spec":     map[string]any{"volumeID": volumeID},
+		"metadata": map[string]any{"name": volumeID, "uid": "original-uid", "finalizers": []any{VolumeProtectionFinalizer}},
+		"spec":     map[string]any{"volumeID": volumeID, "requestName": "pvc", "initialNode": "node-a", "capacityBytes": int64(64)},
 	}}
 	replacement := original.DeepCopy()
 	replacement.SetUID("replacement-uid")

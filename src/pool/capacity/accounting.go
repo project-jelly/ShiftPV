@@ -24,11 +24,11 @@ func ReservedBytesForPool(volumes map[string]volumeapi.State, moves []volumeapi.
 func ownedBytesForPool(volumes map[string]volumeapi.State, poolUID string) (int64, error) {
 	var total int64
 	for volumeID, state := range volumes {
-		if state.OwnerNode == "" || state.CapacityBytes <= 0 || state.CurrentCopy == nil ||
-			state.CurrentCopy.PoolUID == "" || state.CurrentCopy.NodeName != state.OwnerNode {
-			return 0, fmt.Errorf("volume %q has incomplete capacity owner identity", volumeID)
+		ownerPool, err := ownerPoolUID(volumeID, state)
+		if err != nil {
+			return 0, err
 		}
-		if state.CurrentCopy.PoolUID == poolUID {
+		if ownerPool == poolUID {
 			var err error
 			total, err = add(total, state.CapacityBytes)
 			if err != nil {
@@ -37,6 +37,24 @@ func ownedBytesForPool(volumes map[string]volumeapi.State, poolUID string) (int6
 		}
 	}
 	return total, nil
+}
+
+func ownerPoolUID(volumeID string, state volumeapi.State) (string, error) {
+	if state.Initializing() {
+		// Legacy spec-only objects never authorized execution. Each must pass
+		// admission before acquiring a durable InitialPool reservation.
+		if state.InitialPool == nil {
+			return "", nil
+		}
+		if state.InitialPool.Name != "" && state.InitialPool.UID != "" {
+			return state.InitialPool.UID, nil
+		}
+	}
+	if state.OwnerNode == "" || state.CapacityBytes <= 0 || state.CurrentCopy == nil ||
+		state.CurrentCopy.PoolUID == "" || state.CurrentCopy.NodeName != state.OwnerNode {
+		return "", fmt.Errorf("volume %q has incomplete capacity owner identity", volumeID)
+	}
+	return state.CurrentCopy.PoolUID, nil
 }
 
 func moveHeldBytesForPool(total int64, volumes map[string]volumeapi.State, moves []volumeapi.Move, poolUID string) (int64, error) {

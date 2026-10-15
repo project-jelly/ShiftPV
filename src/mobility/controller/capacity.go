@@ -133,10 +133,15 @@ func (r *Reconciler) approveDestinationPool(ctx context.Context, move *volumeapi
 		return "DestinationFilesystemSpace", nil
 	}
 	previous := move.Status
-	move.Status.DestinationNode = pool.NodeName
-	move.Status.DestinationPoolUID = pool.UID
-	move.Status.CapacityApproved = true
-	move.Status.CapacityReason = ""
+	planned := *move
+	planned.Status.DestinationNode = pool.NodeName
+	planned.Status.DestinationPoolUID = pool.UID
+	if err := prepareMoveCopyIdentitiesForPool(&planned, pool); err != nil {
+		return "", err
+	}
+	planned.Status.CapacityApproved = true
+	planned.Status.CapacityReason = ""
+	*move = planned
 	if err := r.persistMoveStatus(ctx, move, previous); err != nil {
 		// The write may have been accepted despite a lost response. Leave the
 		// durable state for the next observation; diagnostics cannot replay this

@@ -26,6 +26,10 @@ for the source owner and the destination incoming copy. After commit, the Volume
 holds destination capacity and the Move continues holding the retained source
 until both API purge receipt and fresh absence proof exist.
 
+Destination approval records the Pool, incoming/destination copy identities,
+operation IDs and planned copy Job name in one status write. An interruption
+after approval therefore retains both the capacity hold and its recovery plan.
+
 ## Flow
 
 ```text
@@ -169,6 +173,11 @@ that fence. This applies even when neither transaction copy exists and no
 cleanup journal was created. Node/controller timestamps only bound freshness;
 they do not establish scan ordering. A lost request or unrecorded fence causes a
 new scan request, while a persisted fence survives controller restart.
+
+For legacy approval-only records with no copy or cleanup intent, recovery derives
+the expected identities only to check absence after this fence. It does not save
+them as deletion authority. Any matching artifact or contradictory evidence keeps
+the hold for review; complete fresh absence permits source recovery.
 
 ## Safety Invariants
 

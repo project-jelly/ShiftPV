@@ -38,6 +38,26 @@ func TestCRDsUseKubernetesStructuralObjectSchemas(t *testing.T) {
 	}
 }
 
+func TestVolumeInitialPoolSchemaPreservesLegacyObjects(t *testing.T) {
+	crd := readYAMLMap(t, filepath.Join(repositoryRoot(t), "charts", "shiftpv", "crds", "shiftpv.io_shiftpvvolumes.yaml"))
+	spec := requiredMap(t, singleCRDVersion(t, crd), "schema", "openAPIV3Schema", "properties", "spec")
+	for _, field := range requiredStrings(t, spec, "required") {
+		if field == "initialPool" {
+			t.Fatal("old Volumes must remain valid without initialPool")
+		}
+	}
+	initialPool := requiredMap(t, spec, "properties", "initialPool")
+	assertStringSet(t, requiredStrings(t, initialPool, "required"), []string{"name", "uid"}, "initial reservation identity")
+	rules, _, _ := unstructured.NestedSlice(spec, "x-kubernetes-validations")
+	want := "!has(oldSelf.initialPool) || (has(self.initialPool) && self.initialPool == oldSelf.initialPool)"
+	for _, value := range rules {
+		if rule, ok := value.(map[string]any); ok && rule["rule"] == want {
+			return
+		}
+	}
+	t.Fatal("initialPool must support one-time legacy binding and reject subsequent removal or change")
+}
+
 func TestParentCleanupJournalSchemasMatchRuntimeContract(t *testing.T) {
 	root := repositoryRoot(t)
 	wantPhases := []string{

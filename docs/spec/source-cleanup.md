@@ -143,6 +143,12 @@ and every volume lock. Pool identity removal is synced before lock removal;
 unknown metadata are preserved; this collector never deletes volume data or
 releases capacity.
 
+Empty Pool deregistration also removes abandoned `placements/pending-<UUIDv4>`
+marker temporary files under `identity.lock`, which all marker writers hold.
+Only regular files owned by the node process, mode `0600`, one link and at most
+8 KiB qualify. Unknown names, symlinks and other contradictions block removal.
+This does not authorize deleting copy data or completed placement markers.
+
 ## Already-Absent Rule
 
 Absence is meaningful only when tied to a durable exact intent.

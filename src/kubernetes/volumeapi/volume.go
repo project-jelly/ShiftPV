@@ -23,6 +23,9 @@ type State struct {
 	RequestName         string
 	CapacityBytes       int64
 	InitialNode         string
+	InitialPool         *PoolReference
+	HasCleanup          bool
+	Deleting            bool
 	Phase               string
 	OwnerNode           string
 	ActiveMove          string
@@ -65,7 +68,6 @@ func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, owner
 	}
 	resource := r.Client.Resource(VolumeResource)
 	object, err := resource.Get(ctx, volumeID, metav1.GetOptions{})
-	create := apierrors.IsNotFound(err)
 	if err == nil {
 		state, stateErr := stateFrom(object)
 		if stateErr != nil {
@@ -74,6 +76,10 @@ func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, owner
 		if state.Phase != "" {
 			return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes, poolName, poolUID)
 		}
+		if !state.Initializing() || state.RequestName != requestName || state.InitialNode != ownerNode || state.CapacityBytes != capacityBytes {
+			return State{}, ErrStateConflict
+		}
+		return r.initializeCreate(ctx, object, state, volumeID, poolName, poolUID)
 	} else if !apierrors.IsNotFound(err) {
 		return State{}, fmt.Errorf("read ShiftPVVolume creation intent: %w", err)
 	}
@@ -82,36 +88,18 @@ func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, owner
 	if err != nil {
 		return State{}, err
 	}
-	if create {
-		object, err = resource.Create(ctx, newVolumeObject(volumeID, requestName, ownerNode, capacityBytes), metav1.CreateOptions{})
-	}
+	object, err = resource.Create(ctx, newVolumeObject(volumeID, requestName, ownerNode, capacityBytes, pool), metav1.CreateOptions{})
 	if err != nil {
 		return State{}, fmt.Errorf("begin ShiftPVVolume creation: %w", err)
-	}
-	copy, operationID, err := initialServingCopy(object, pool, installationID, volumeID, ownerNode)
-	if err != nil {
-		return State{}, err
 	}
 	state, err := stateFrom(object)
 	if err != nil {
 		return State{}, err
 	}
-	if state.Phase == "" {
-		state, err = r.recordCreationIntent(ctx, volumeID, State{
-			UID:                 string(object.GetUID()),
-			RequestName:         requestName,
-			CapacityBytes:       capacityBytes,
-			InitialNode:         ownerNode,
-			Phase:               PhasePending,
-			OwnerNode:           ownerNode,
-			CreationOperationID: operationID,
-			CurrentCopy:         &copy,
-		})
-		if err != nil {
-			return State{}, err
-		}
+	if state.InitialPool == nil || *state.InitialPool != (PoolReference{Name: pool.Name, UID: pool.UID}) {
+		return State{}, fmt.Errorf("%w: initial Pool reservation was not stored; upgrade the Volume CRD", ErrStateConflict)
 	}
-	return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes, poolName, poolUID)
+	return r.completeInitialization(ctx, object, state, pool, installationID, volumeID)
 }
 
 // freshCreationPlacement resolves the installation and the Ready Pool that a
@@ -136,12 +124,13 @@ func (r *Registry) freshCreationPlacement(ctx context.Context, volumeID, ownerNo
 	return installationID, pool, nil
 }
 
-func newVolumeObject(volumeID, requestName, ownerNode string, capacityBytes int64) *unstructured.Unstructured {
+func newVolumeObject(volumeID, requestName, ownerNode string, capacityBytes int64, pool Pool) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVVolume",
 		"metadata":   map[string]any{"name": volumeID, "finalizers": []any{VolumeProtectionFinalizer}},
-		"spec":       map[string]any{"volumeID": volumeID, "requestName": requestName, "initialNode": ownerNode, "capacityBytes": capacityBytes},
+		"spec": map[string]any{"volumeID": volumeID, "requestName": requestName, "initialNode": ownerNode, "capacityBytes": capacityBytes,
+			"initialPool": map[string]any{"name": pool.Name, "uid": pool.UID}},
 	}}
 }
 
@@ -180,6 +169,10 @@ func (r *Registry) recordCreationIntent(ctx context.Context, volumeID string, ne
 		}
 		if current.Phase != "" {
 			return current, nil
+		}
+		if !current.Initializing() || current.InitialPool == nil || next.InitialPool == nil || *current.InitialPool != *next.InitialPool ||
+			current.RequestName != next.RequestName || current.InitialNode != next.InitialNode || current.CapacityBytes != next.CapacityBytes {
+			return State{}, ErrStateConflict
 		}
 		return next, nil
 	}); err != nil {
@@ -479,6 +472,10 @@ func (r *Registry) getVolume(ctx context.Context, volumeID string) (*unstructure
 }
 
 func stateFrom(object *unstructured.Unstructured) (State, error) {
+	initialPool, err := initialPoolFrom(object)
+	if err != nil {
+		return State{}, err
+	}
 	requestName, _, _ := unstructured.NestedString(object.Object, "spec", "requestName")
 	initialNode, _, _ := unstructured.NestedString(object.Object, "spec", "initialNode")
 	capacityBytes, _, _ := unstructured.NestedInt64(object.Object, "spec", "capacityBytes")
@@ -512,8 +509,13 @@ func stateFrom(object *unstructured.Unstructured) (State, error) {
 		}
 		currentCopy = &copy
 	}
+	cleanup, _, err := unstructured.NestedFieldNoCopy(object.Object, "status", "cleanup")
+	if err != nil {
+		return State{}, err
+	}
 	return State{
 		UID: string(object.GetUID()), Finalizers: append([]string(nil), object.GetFinalizers()...),
+		InitialPool: initialPool, HasCleanup: cleanup != nil, Deleting: object.GetDeletionTimestamp() != nil,
 		RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: initialNode,
 		Phase: phase, OwnerNode: ownerNode, ActiveMove: activeMove,
 		CreationExecutor: executor, CreationReceipt: receipt,

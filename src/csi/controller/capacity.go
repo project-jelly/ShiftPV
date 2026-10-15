@@ -40,7 +40,7 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, request createReque
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
 
-	return s.placeNewCreate(ctx, id, requestName, nodeName, requestedBytes, parameters)
+	return s.placeNewCreate(ctx, id, requestName, nodeName, requestedBytes, parameters, "")
 }
 
 func (s *Service) readCreationIntent(ctx context.Context, id string) (volumeapi.State, error) {
@@ -68,7 +68,7 @@ func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.S
 		return volumeapi.State{}, err
 	}
 	if existing.CurrentCopy == nil {
-		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "existing volume has no Pool copy identity")
+		return s.resumeInitializingCreate(ctx, existing, request, parameters)
 	}
 	copy := existing.CurrentCopy
 	pool, err := s.CapacityPools.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
@@ -89,7 +89,7 @@ func poolSelectionError(err error) error {
 	return kubernetesAPIError("read selected Pool", err)
 }
 
-func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, error) {
+func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string, initializingUID string) (volumeapi.State, error) {
 	poolsDone := s.observeStep("create_pool_list", id)
 	pools, err := s.CapacityPools.ReadyPools(ctx)
 	poolsDone()
@@ -112,7 +112,7 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 			continue
 		}
 		found = true
-		created, fit, err := s.attemptCreateInPool(ctx, pool, id, requestName, requestedBytes, parameters)
+		created, fit, err := s.attemptCreateInPool(ctx, pool, id, requestName, requestedBytes, parameters, initializingUID)
 		if err != nil {
 			if errors.Is(err, volumeapi.ErrPoolNotReady) {
 				s.waitForPoolObservation(parameters, requestName, nodeName, pool)
@@ -135,13 +135,22 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 
 // Admission and its durable intent share the Pool UID lock used by mobility
 // holds and deregistration. Registration already rejects overlapping Pools.
-func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, id, requestName string, requestedBytes int64, parameters map[string]string) (volumeapi.State, poolFit, error) {
+func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, id, requestName string, requestedBytes int64, parameters map[string]string, initializingUID string) (volumeapi.State, poolFit, error) {
 	locks := s.PoolLocks
 	if locks == nil {
 		locks = &s.poolLifecycles
 	}
 	unlock := s.observeLock("create_pool_lock_wait", id, locks, pool.UID)
 	defer unlock()
+	if initializingUID != "" {
+		current, err := s.Volumes.Get(ctx, id)
+		if err != nil {
+			return volumeapi.State{}, poolFit{}, kubernetesAPIError("read legacy initialization", err)
+		}
+		if current.UID != initializingUID || !current.Initializing() || current.InitialPool != nil {
+			return volumeapi.State{}, poolFit{}, status.Error(codes.Aborted, "legacy creation changed during capacity admission")
+		}
+	}
 	fit, err := s.poolFits(ctx, pool, id, requestName, requestedBytes, parameters)
 	if err != nil || !fit.allowed {
 		return volumeapi.State{}, fit, err

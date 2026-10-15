@@ -53,10 +53,12 @@ storageClass:
   defaultClass: true
 ```
 
-`helm upgrade`는 Chart의 `crds/` schema를 갱신하지 않는다. 새 Controller가 사용하는 status field가
+`helm upgrade`는 Chart의 `crds/` schema를 갱신하지 않는다. 새 Controller가 사용하는 spec/status field가
 기존 CRD에 없으면 API가 그 값을 제거하므로, target Chart의 CRD를 먼저 적용한 뒤 runtime을 올린다.
 특히 rollback generation fence를 도입한 버전은 `status.rollbackRequiredGeneration` schema가 필요하다.
 기록이 유지되지 않으면 Controller는 capacity hold를 보존한 채 새 스캔을 재요청한다.
+생성 초기화 복구에는 `ShiftPVVolume.spec.initialPool` schema도 필요하다. 이 값이 보존되지 않으면
+새 생성은 중단한다. 기존 Ready Volume은 필드 추가 없이 계속 사용할 수 있다.
 
 아래 `TARGET_CHART_VERSION`은 설치할 정확한 Chart version으로 지정한다. 기존 release의 values도
 함께 전달한다.

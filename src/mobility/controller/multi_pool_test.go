@@ -198,6 +198,15 @@ func TestCapacityApprovalFailureIsNotReplayedByDiagnostics(t *testing.T) {
 			if w.repository.moves[0].Status.CapacityApproved != accepted {
 				t.Fatalf("ambiguous response changed durable approval: %+v", w.repository.moves[0].Status)
 			}
+			persisted := w.repository.moves[0]
+			if accepted {
+				persisted.Status.RecoveryPhase = recoveryRetiring
+				if err := validRollbackIntent(persisted); err != nil {
+					t.Fatalf("accepted approval lost its recoverable execution plan: %v", err)
+				}
+			} else if !noDestinationEffectIntent(persisted) {
+				t.Fatal("rejected approval persisted a partial execution plan")
+			}
 		})
 	}
 }
