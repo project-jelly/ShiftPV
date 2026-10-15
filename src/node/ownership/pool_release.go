@@ -52,6 +52,9 @@ func ReleaseEmptyPool(ctx context.Context, root string, identity PoolIdentity) e
 	if err := store.checkMarker("pool.json", identity); err != nil {
 		return err
 	}
+	if err := store.removeAbandonedPlacementMarkers(ctx); err != nil {
+		return err
+	}
 	empty, err := store.managedDataEmpty()
 	if err != nil {
 		return err

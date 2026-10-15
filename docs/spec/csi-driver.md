@@ -79,6 +79,12 @@ Provisioning은 선택된 Pool의 exact identity와 fresh, valid, complete inven
 `creationExecutor`에 고정하고 `NodeCreating`으로 전환한다. Node가 exact directory와 marker를 멱등 생성하고
 placement digest를 포함한 `creationReceipt`를 기록하면 Controller가 `Ready`로 전환한다.
 
+Volume 생성과 함께 `spec.initialPool`에 Pool name/UID를 저장한다. 첫 status 쓰기가 실패해도 이 예약을
+계산하며, 재시도는 같은 Pool에서 API가 부여한 Volume UID로 copy intent를 완성한다. 구버전의 spec만
+남은 객체는 실행 증거가 전혀 없는 경우에만 원래 node·요청 크기로 용량 승인을 다시 받는다.
+이 복구는 PVC의 생성 재시도로 진행한다. 초기화 중 PVC가 취소되거나 Pool이 삭제 중이면 자동 취소로
+예약을 반환하지 않으며, 해당 객체와 Pool 보호를 유지한다.
+
 승인된 생성의 실행·복구는 동일한 Volume·copy·operation·executor와 보호된 Pool의 최신 backing을
 재검증한다. 생성 중간 경로 때문에 inventory가 invalid여도 이 작업은 복구할 수 있으며, 로컬 marker와
 inode 검증은 유지한다. 전체 inventory 검사는 새 배치 승인에 계속 적용한다.

@@ -48,7 +48,7 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-			move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
+			move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
 			repository := &memoryRepository{
 				volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CapacityBytes: 32 << 20}},
 				pools: []volumeapi.Pool{

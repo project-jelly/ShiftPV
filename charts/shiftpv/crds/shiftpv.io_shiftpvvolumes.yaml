@@ -31,6 +31,9 @@ spec:
             spec:
               type: object
               required: [volumeID, requestName, initialNode, capacityBytes]
+              x-kubernetes-validations:
+                - rule: "!has(oldSelf.initialPool) || (has(self.initialPool) && self.initialPool == oldSelf.initialPool)"
+                  message: initialPool is immutable once recorded
               properties:
                 volumeID:
                   type: string
@@ -50,6 +53,18 @@ spec:
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: initialNode is immutable
+                initialPool:
+                  type: object
+                  required: [name, uid]
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                      maxLength: 253
+                    uid:
+                      type: string
+                      minLength: 1
+                      maxLength: 253
                 capacityBytes:
                   type: integer
                   format: int64

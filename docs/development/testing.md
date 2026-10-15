@@ -38,6 +38,7 @@ Kubernetes probe는 다음 전제를 실제 API server에서 확인한다.
 - deletionTimestamp 뒤에도 finalizer가 parent와 journal을 보존한다.
 - terminating parent의 status journal을 갱신할 수 있다.
 - owner-referenced suspended Job은 parent finalizer가 있는 동안 유지되고 parent 삭제 뒤 정리된다.
+- `spec.initialPool`은 Create·status 쓰기에서 보존되고, 구버전 객체에 최초 추가만 허용하며 변경·제거는 거부한다.
 
 Filesystem probe는 target helper image의 rsync daemon에서
 `-aHAXS --numeric-ids --one-file-system --no-devices --delete --fsync`와 checksum dry-run이 hardlink,
@@ -100,6 +101,9 @@ git diff --check
 | `kubernetes/volumeapi`: `TestBeginDeleteRechecksAdmissionAfterCASConflict` | 실제 Registry CAS + 충돌/동시 변경 주입 |
 | `csi/controller`: `TestDeleteWaitsForPublicationWithoutStartingCleanup` | CSI 응답 + 실제 Registry + cleanup effect 호출 여부 |
 | `csi/controller`: `TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode`, `TestConcurrentAdmissionToSamePoolCannotOversubscribe` | 실제 Pool Locker + capacity probe 지연 + durable hold |
+| `csi/controller`: `TestCreateInitializationRecoversAPIWriteBoundaries`, `TestLegacyInitializationsReadmitWithoutBlockingEachOther` | 실제 Registry/ledger + Create·status 실패/응답 유실 + 재시작 + 다른 Pool 진행 |
+| `mobility/controller`: `approval_recovery_test.go` | 승인 직후 source 장애 + 원자적 copy 계획 + 구버전 승인·재시작·fresh absence 전 hold 유지 |
+| `node/ownership`: `pool_release_test.go` | 실제 marker lock + 중단된 임시 파일 회수 + symlink/hardlink/권한/소유자 불일치 보존 |
 | `cmd/node`: `TestNodeBackgroundBudgetDoesNotBlockForegroundRequests` | 실제 Collector/Registry/REST clients + 차단된 GC limiter + HTTP 서버 |
 | `node/metadata`: `TestPoolCollectionEligibility`, `TestCollectorProgressAfterFreshEvidence`, `TestCollectorRequiresLiveUnreferencedReadyPool` | 순수 eligibility + 새 관찰/참조/오류 주입 + effect 진입 여부 |
 | `node/ownership`: `TestMetadataGCRequiresClosedExpiredExactRecord`, `TestMetadataGCRechecksPhysicalAbsenceAfterAuthority`, `TestMetadataGCDoesNotHoldPoolMarkerLockDuringAPIRead`, `TestMetadataGCAfterPoolReregistration`, `TestPoolReleasePreservesLockedNamespaceAndThenRemovesLocks` | 실제 파일·receipt·flock + 보존 시간/재등장/등록 교체/중단 상태 |
@@ -154,6 +158,10 @@ Volume delete gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 �
 5. 삭제·이동 hold가 해당 Pool UID에 남고 기존 단일 directory Pool도 동작한다.
 
 ## Real-node qualification
+
+[Full filesystem qualification](../../test/integration/full-filesystem/README.md)은 격리된 Linux ext4에서
+block·inode를 각각 소진하고 readiness와 cleanup의 `NoSpace`, fixture 공간 반환 후 복구를 확인한다.
+전체 cleanup transaction이나 full filesystem에서의 자동 공간 확보를 증명하지 않는다.
 
 운영과 같은 filesystem 및 mount option에서 다음을 수행한다.
 

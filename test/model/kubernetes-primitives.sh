@@ -88,6 +88,60 @@ pool_generation="$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvpool so
 observed_at="2026-01-01T00:00:00Z"
 receipt_digest="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+# A legacy Volume may acquire its initial Pool once. A new Volume retains the
+# same fence from Create even though Kubernetes discards Create-time status.
+if [[ -n "$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${volume_id}" -o jsonpath='{.spec.initialPool}')" ]]; then
+  echo "legacy ShiftPVVolume unexpectedly requires initialPool" >&2
+  exit 1
+fi
+kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${volume_id}" \
+  --type=merge -p "$(printf '{"spec":{"initialPool":{"name":"source-pool","uid":"%s"}}}' "${pool_uid}")" >/dev/null
+
+initializing_volume_id="shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+kubectl --kubeconfig "${probe_kubeconfig}" create -f - >/dev/null <<YAML
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVVolume
+metadata:
+  name: ${initializing_volume_id}
+spec:
+  volumeID: ${initializing_volume_id}
+  requestName: pvc-initializing-request
+  initialNode: source-node
+  initialPool:
+    name: source-pool
+    uid: ${pool_uid}
+  capacityBytes: 1073741824
+status:
+  phase: Pending
+YAML
+if [[ -n "$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${initializing_volume_id}" -o jsonpath='{.status.phase}')" ]]; then
+  echo "Create unexpectedly retained status instead of exercising initialization" >&2
+  exit 1
+fi
+
+for protected_volume in "${volume_id}" "${initializing_volume_id}"; do
+  kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${protected_volume}" \
+    --subresource=status --type=merge -p '{"status":{"phase":"Pending"}}' >/dev/null
+  initial_pool="$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${protected_volume}" -o jsonpath='{.spec.initialPool.name}/{.spec.initialPool.uid}')"
+  if [[ "${initial_pool}" != "source-pool/${pool_uid}" ]]; then
+    echo "initialPool was pruned or changed by status update: ${initial_pool}" >&2
+    exit 1
+  fi
+  for patch in '{"spec":{"initialPool":{"name":"other-pool"}}}' \
+    '{"spec":{"initialPool":{"uid":"other-uid"}}}' '{"spec":{"initialPool":null}}'; do
+    if kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${protected_volume}" \
+      --type=merge -p "${patch}" >/dev/null 2>"${probe_dir}/initial-pool-error"; then
+      echo "immutable initialPool mutation unexpectedly succeeded: ${patch}" >&2
+      exit 1
+    fi
+    if ! grep -Fq 'initialPool is immutable once recorded' "${probe_dir}/initial-pool-error"; then
+      cat "${probe_dir}/initial-pool-error" >&2
+      echo "initialPool mutation failed without exercising its CEL immutability rule" >&2
+      exit 1
+    fi
+  done
+done
+
 kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvpool source-pool \
   --subresource=status --type=merge -p "$(printf '{\"status\":{\"observedGeneration\":%s,\"lastProbeTime\":\"%s\",\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\",\"observedGeneration\":%s,\"lastTransitionTime\":\"%s\",\"reason\":\"ScanComplete\",\"message\":\"complete\"}],\"inventory\":{\"observedAt\":\"%s\",\"valid\":true,\"truncated\":false,\"copies\":[]}}}' "${pool_generation}" "${observed_at}" "${pool_generation}" "${observed_at}" "${observed_at}")" >/dev/null
 

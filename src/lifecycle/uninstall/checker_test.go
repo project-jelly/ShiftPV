@@ -34,6 +34,28 @@ type cleanupRepository struct {
 	err   error
 }
 
+func TestPoolRemovalProtectsInitializingReservation(t *testing.T) {
+	poolA := volumeapi.Pool{Name: "pool-a", UID: "pool-a-uid", NodeName: "node-a"}
+	poolB := volumeapi.Pool{Name: "pool-b", UID: "pool-b-uid", NodeName: "node-a"}
+	state := volumeapi.State{
+		UID: "volume-uid", RequestName: "pvc", InitialNode: "node-a", CapacityBytes: 64,
+		Finalizers:  []string{volumeapi.VolumeProtectionFinalizer},
+		InitialPool: &volumeapi.PoolReference{Name: poolA.Name, UID: poolA.UID},
+	}
+	assert := func(pool volumeapi.Pool, want int) {
+		t.Helper()
+		if got := poolVolumeBlockers(map[string]volumeapi.State{"v": state}, pool); len(got) != want {
+			t.Fatalf("pool=%s blockers=%+v want=%d", pool.Name, got, want)
+		}
+	}
+	assert(poolA, 1)
+	assert(poolB, 0)
+	state.InitialPool = nil // Old unassigned intents conservatively protect their node.
+	assert(poolA, 1)
+	assert(poolB, 1)
+	assert(volumeapi.Pool{Name: "other", UID: "other-uid", NodeName: "node-b"}, 0)
+}
+
 func (r cleanupRepository) List(context.Context) ([]cleanupapi.Cleanup, error) { return r.items, r.err }
 
 func TestCheckBlocksUnsettledCleanupContract(t *testing.T) {

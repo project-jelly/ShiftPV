@@ -177,7 +177,6 @@ func (r *Reconciler) ensureCopy(ctx context.Context, move *volumeapi.Move, obser
 	move.Status.DestinationNode = observed.DestinationNode
 	move.Status.ReplacementName = observed.Replacement.Name
 	move.Status.ReplacementUID = string(observed.Replacement.UID)
-	move.Status.CopyJobName = observed.Names.CopyJob
 	if err := r.prepareMoveCopyIdentities(ctx, move); err != nil {
 		return err
 	}
@@ -264,9 +263,6 @@ func (r *Reconciler) confirmCommitConflict(ctx context.Context, move volumeapi.M
 }
 
 func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volumeapi.Move) error {
-	if move.UID == "" || move.Status.SourceCopy == nil || move.Status.SourceCopy.Validate() != nil || move.Status.DestinationNode == "" || move.Status.DestinationPoolUID == "" {
-		return fmt.Errorf("move source identity or destination is missing")
-	}
 	var pool volumeapi.Pool
 	pools, err := r.Repository.Pools(ctx)
 	if err != nil {
@@ -278,7 +274,16 @@ func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volume
 			break
 		}
 	}
-	if pool.Name == "" || pool.UID == "" {
+	return prepareMoveCopyIdentitiesForPool(move, pool)
+}
+
+// prepareMoveCopyIdentitiesForPool binds the full execution plan to the exact
+// approved Pool. The plan must be durable with the hold, before any disk work.
+func prepareMoveCopyIdentitiesForPool(move *volumeapi.Move, pool volumeapi.Pool) error {
+	if !volume.ValidIdentityToken(move.UID) || move.Status.SourceCopy == nil || move.Status.SourceCopy.Validate() != nil {
+		return fmt.Errorf("move source identity is missing")
+	}
+	if pool.Name == "" || pool.UID == "" || pool.UID != move.Status.DestinationPoolUID || pool.NodeName != move.Status.DestinationNode {
 		return fmt.Errorf("destination Pool identity changed or is missing")
 	}
 	incoming, destination := volumeapi.MoveTransactionCopies(move.UID, move.Spec.VolumeID, volumeapi.MoveDestinationAnchor{
@@ -291,7 +296,14 @@ func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volume
 	if move.Status.IncomingCopy != nil && *move.Status.IncomingCopy != incoming || move.Status.DestinationCopy != nil && *move.Status.DestinationCopy != destination {
 		return fmt.Errorf("move copy identity changed")
 	}
+	copyJob := namesFor(move.Name).CopyJob
+	if move.Status.CopyJobName != "" && move.Status.CopyJobName != copyJob ||
+		move.Status.CopyOperationID != "" && move.Status.CopyOperationID != volumeapi.MoveCopyOperationID(move.UID) ||
+		move.Status.PromotionOperationID != "" && move.Status.PromotionOperationID != volumeapi.MovePromotionOperationID(move.UID) {
+		return fmt.Errorf("move operation identity changed")
+	}
 	move.Status.IncomingCopy, move.Status.DestinationCopy = &incoming, &destination
+	move.Status.CopyJobName = copyJob
 	move.Status.CopyOperationID = volumeapi.MoveCopyOperationID(move.UID)
 	move.Status.PromotionOperationID = volumeapi.MovePromotionOperationID(move.UID)
 	return nil

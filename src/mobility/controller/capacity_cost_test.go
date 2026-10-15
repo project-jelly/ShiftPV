@@ -98,7 +98,7 @@ func TestCapacityRetryReusesPersistedSourceMeasurement(t *testing.T) {
 
 func capacityCostFixture() (*Reconciler, *memoryRepository, volumeapi.Move) {
 	id := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: id, SourceNode: "source"}}
+	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: id, SourceNode: "source"}}
 	repo := &memoryRepository{
 		volumes: map[string]volumeapi.State{id: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CapacityBytes: 32 << 20}},
 		pools:   []volumeapi.Pool{{Name: "source", UID: "source-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "128Mi"}, {Name: "destination", UID: "destination-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: "128Mi"}},

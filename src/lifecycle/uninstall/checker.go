@@ -318,7 +318,8 @@ func poolVolumeBlockers(volumes map[string]volumeapi.State, pool volumeapi.Pool)
 		if known && !usesPool {
 			continue
 		}
-		if !known && !slices.Contains(state.PublishedNodes, pool.NodeName) && state.OwnerNode != pool.NodeName {
+		if !known && !slices.Contains(state.PublishedNodes, pool.NodeName) && state.OwnerNode != pool.NodeName &&
+			!(state.Phase == "" && state.InitialNode == pool.NodeName) {
 			continue
 		}
 		reason := "owner=" + state.OwnerNode
@@ -470,6 +471,9 @@ func exactMoveCopy(copy *volume.CopyIdentity, volumeID, nodeName, role string) b
 }
 
 func currentCopyUsesPool(volumeID string, state volumeapi.State, pool volumeapi.Pool) (bool, bool) {
+	if state.Initializing() && state.InitialPool != nil {
+		return state.InitialPool.Name == pool.Name && state.InitialPool.UID == pool.UID, true
+	}
 	copy := state.CurrentCopy
 	if copy == nil || copy.Validate() != nil || copy.VolumeID != volumeID || copy.VolumeUID != state.UID || copy.NodeName != state.OwnerNode || copy.Role != volume.RoleServing {
 		return false, false
