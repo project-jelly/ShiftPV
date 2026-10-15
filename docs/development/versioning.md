@@ -64,7 +64,7 @@ storageClass:
 함께 전달한다.
 
 ```sh
-TARGET_CHART_VERSION=0.5.9
+TARGET_CHART_VERSION='<approved-chart-version>'
 CHART_WORKDIR=$(mktemp -d)
 helm pull shiftpv/shiftpv --version "${TARGET_CHART_VERSION}" --untar --untardir "${CHART_WORKDIR}"
 kubectl apply --field-manager=shiftpv-crd-upgrade -f "${CHART_WORKDIR}/shiftpv/crds/"
@@ -76,3 +76,35 @@ GitOps에서도 target CRD schema 적용이 Controller rollout보다 먼저 완�
 
 Node 0.4.13이 Pool의 `status.registrationApproved: true`를 기록하면 이 값은 제거할 수 없다.
 Node 0.4.12 이하로 되돌리면 전체 status 쓰기가 이 필드를 보존하지 않아 새 CRD에서 거부된다.
+
+## Planned mobility upgrades
+
+새 준비 protocol과 resident Node cleanup을 도입하는 업그레이드는 다음 순서를 따른다.
+실행 계약은 [volume mobility](../spec/volume-mobility.md), 정산 조건은
+[source cleanup](../spec/source-cleanup.md)이 소유한다.
+
+1. 추가 cordon과 PVC 생성·삭제 등 새 작업 유입을 멈추고, 기존 controller가 진행 중 작업을
+   정산하도록 둔다. 정산 전에 mobility를 끄면 해당 작업의 reconciliation도 멈춘다.
+2. Volume Ready·빈 `activeMove`, 정산된 hold/cleanup, 진행 중 creation/copy/promotion/cleanup/
+   usage helper 부재를 확인한다. 해결되지 않은 journal·finalizer를 삭제하지 않는다.
+3. target CRD와 Node의 Move 조회·watch·status 쓰기 RBAC를 먼저 적용한다. 운영값으로
+   렌더링한 target Node를 먼저 갱신하고 informer sync·resident capability·현재 Pool 관측을 확인한다.
+4. target placement PriorityClass와 호환되는 chart/controller/helper 조합을 적용한다.
+   새 chart는 구 controller가 모르는 flag를 전달하므로 전체 chart에 구 controller image만
+   덮어쓰는 방식은 사용하지 않는다. controller는 단일 writer와 `Recreate`를 유지한다.
+5. 배포 후 controller·Pool·capability 상태를 확인한 다음 새 유지보수 작업을 시작한다.
+
+helper image 변경은 작업 정산 후가 기본이다. 중간 controller 갱신이 필요하면 CLI 호환성을
+확인한 기존 immutable image를 `mobility.helperImage`와 `helperPod.image`에 모두 pin하고
+service-account/resource/timeout profile도 유지한다. 빈 값은 controller image를 상속한다.
+기존 source Pod와 Job은 image·command·실행 조건이 달라지면 채택을 거부한다. 읽기 전용
+usage Pod의 명시적 폐기·재측정 경로를 다른 helper에도 적용된다고 가정하지 않는다.
+
+기존 Job-bound cleanup은 Job으로, Node-bound cleanup은 호환 Node로 정산한다. timeout이나
+capability 부재는 backend를 바꿀 근거가 아니다. Job receipt 뒤에도 Job 완료, 또는 Job과 해당
+executor/owned Pods의 부재를 확인한 후 fresh absence를 소비한다.
+
+`prepared-v1` 기록이 남아 있으면 보존 중 terminal 기록까지 이해하는 controller가 필요하다.
+이를 모르는 구 controller와 공존하거나 downgrade하지 않는다. rollback 시 CRD를 축소하거나
+기록·finalizer를 삭제해 우회하지 않는다. `capacityTracking.enabled`를 사용 중이라면
+GetCapacity를 지원하지 않는 runtime으로 되돌리기 전에 별도로 해제한다.

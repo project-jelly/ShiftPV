@@ -22,6 +22,22 @@ import (
 )
 
 func TestOwnerPlacementAdmissionHoldRecoversAfterRestartWithoutMove(t *testing.T) {
+	for _, owner := range []metav1.OwnerReference{
+		{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: "rs"},
+		{APIVersion: "kubevirt.io/v1", Kind: "VirtualMachineInstance", Name: "vm-sp039", UID: "vmi-sp039-uid"},
+	} {
+		t.Run(owner.Kind, func(t *testing.T) {
+			controller := true
+			owner.Controller = &controller
+			assertOwnerPlacementAdmissionRecovery(t, owner)
+		})
+	}
+}
+
+// The VMI case checks owner-agnostic admission and gate recovery. It does not
+// install KubeVirt or exercise VM lifecycle, evacuation or data-plane migration.
+func assertOwnerPlacementAdmissionRecovery(t *testing.T, owner metav1.OwnerReference) {
+	t.Helper()
 	ctx := context.Background()
 	r, client, repository, original := ownerPlacementFixture()
 	wantState := repository.volumes[ownerPlacementVolumeID]
@@ -38,6 +54,7 @@ func TestOwnerPlacementAdmissionHoldRecoversAfterRestartWithoutMove(t *testing.T
 	}
 	requestPod := original.DeepCopy()
 	requestPod.UID = ""
+	requestPod.OwnerReferences = []metav1.OwnerReference{owner}
 	requestPod.Labels = map[string]string{"app": "keep"}
 	requestPod.Annotations = map[string]string{"example.test/note": "keep"}
 	requestPod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "example.test/hold"}}
@@ -71,7 +88,7 @@ func TestOwnerPlacementAdmissionHoldRecoversAfterRestartWithoutMove(t *testing.T
 	if _, err := client.CoreV1().Pods(held.Namespace).Create(ctx, &held, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if !hasPlacementHold(&held) || held.Labels[admission.ManagedLabel] != "true" || held.Annotations[placementAnnotationKey] != "held" {
+	if !reflect.DeepEqual(held.OwnerReferences, requestPod.OwnerReferences) || !hasPlacementHold(&held) || held.Labels[admission.ManagedLabel] != "true" || held.Annotations[placementAnnotationKey] != "held" {
 		t.Fatalf("real admission did not create the recoverable hold: %+v", held)
 	}
 	if err := r.ReconcileAll(ctx); err != nil {
@@ -80,6 +97,7 @@ func TestOwnerPlacementAdmissionHoldRecoversAfterRestartWithoutMove(t *testing.T
 	if !hasPlacementHold(ownerPlacementBoundaryPod(t, client, original)) || len(repository.moves) != 0 {
 		t.Fatal("cordoned owner must retain the hold without creating a Move")
 	}
+	assertNoEviction(t, client)
 	node.Spec.Unschedulable = false
 	if _, err := client.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
@@ -92,7 +110,7 @@ func TestOwnerPlacementAdmissionHoldRecoversAfterRestartWithoutMove(t *testing.T
 	got := ownerPlacementBoundaryPod(t, client, original)
 	want := requestPod.DeepCopy()
 	want.Spec.NodeSelector[corev1.LabelHostname] = "source"
-	if got.UID != held.UID || !reflect.DeepEqual(got.Spec, want.Spec) || got.Annotations[placementAnnotationKey] != "owner" ||
+	if got.UID != held.UID || !reflect.DeepEqual(got.OwnerReferences, requestPod.OwnerReferences) || !reflect.DeepEqual(got.Spec, want.Spec) || got.Annotations[placementAnnotationKey] != "owner" ||
 		got.Annotations["example.test/note"] != "keep" || got.Labels["app"] != "keep" {
 		t.Fatalf("recovery did not preserve the admitted Pod and unrelated constraints: %+v", got)
 	}

@@ -109,7 +109,9 @@ Pod UID·주소·인증서 변경 시 교체한다. 실행과 복구의 권한�
 
 Node 재시작은 같은 operation과 local marker/receipt로 재개한다. 실행 중인 Pod를 다른 Pod로 바꾸지 않으며,
 종료되거나 사라진 Pod만 receipt 기록 전에 재지정한다. Node에 고정된 작업은 시간 초과 후 helper로 전환하지
-않는다. 기존 helper Pod·Job, 구버전 Node와 Move copy/cleanup은 helper 경로를 유지한다.
+않는다. Move copy·verify·promote는 Job을 사용하고, 새 cleanup은 capability를 갖춘 resident Node로 실행할 수 있다.
+기존 Job-bound 또는 이미 수락된 cleanup Job은 Job 경로로 정산한다. 자세한 경계는
+[source cleanup](source-cleanup.md)을 따른다.
 불명확한 capacity, observation 또는 identity에서는 directory를 만들지 않는다.
 
 Publish는 다음 조건을 모두 만족할 때만 같은 per-volume lock 안에서 bind mount한다.
@@ -125,10 +127,13 @@ subjournal `NeedsReview`로 수렴한다.
 
 ## Planned cold move
 
+새 `prepared-v1` Move는 아래 순서로 진행한다. Protocol이 없는 기존 Move는 기존 경로로 정산한다.
+
 ```text
-Volume(source hold)
-  -> Move(destination hold)
-  -> source unpublish and observed empty publication fence
+Volume Ready + activeMove (source hold and publication retained)
+  -> Move logical preparation hold + destination placement
+  -> durable StartingDisruption -> source unpublish and observed empty publication fence
+  -> quiesced source usage + fresh destination space -> execution approval
   -> exact copy + API receipt
   -> atomic owner/currentCopy commit
   -> destination publish evidence from PublishedNodes and fresh Pool inventory

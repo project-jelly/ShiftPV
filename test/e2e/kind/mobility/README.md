@@ -1,6 +1,6 @@
 # Closed-loop Mobility E2E
 
-Status: 0.4 target suite contract.
+The suite exercises the product admission, controller, scheduler and node paths in disposable Kind clusters.
 
 ```bash
 ./test/e2e/kind/mobility/run.sh
@@ -11,7 +11,14 @@ API receipt writes, postcommit source drain, Node Pod replacement and controller
 restart. It requires the same local receipt and operation to finish with a later
 absence scan, unchanged PVC/PV/checksum, and no cleanup Job. The `g2` completion
 and `g3` cleanup-failure cases explicitly select legacy Jobs to retain backend
-compatibility coverage. This does not qualify drain-before-move behavior.
+compatibility coverage.
+
+`g1` also exercises an early targeted drain with no eligible destination: admission
+holds the replacement, and uncordon must recover that same Pod UID without a Move.
+The ordinary case waits for Move success, cleanup settlement, empty ActiveMove and
+a Ready destination before draining the now-empty source workload set. PVC/PV/Volume/Move
+identity and unique payload must remain unchanged. These are fixture-selector tests,
+not whole-node eviction or drain-first automatic migration qualification.
 
 The product Controller must create and advance the Move. Tests may inject API, process, node, network and
 filesystem failures, but must not patch a successful status or perform the product copy/purge from the host.
@@ -28,9 +35,11 @@ An unsatisfied preflight preserves the same consumer UID and data and creates no
 ## Transaction evidence
 
 ```text
-source publish fence
-  -> observed empty publication fence
-  -> destination capacity hold
+Ready source + activeMove
+  -> destination placement + durable logical hold
+  -> StartingDisruption -> source publish fence
+  -> observed empty publication -> source usage
+  -> fresh destination capacity -> execution approval
   -> partial copy + full verification
   -> destination promotion
   -> owner CAS
@@ -54,7 +63,7 @@ source publish fence
 
 ## Assertions
 
-Each case validates:
+The suites cover these assertions at the relevant boundaries:
 
 1. unchanged PVC UID, PV and CSI volume handle
 2. exactly one metadata owner and no dual writable mount
