@@ -16,7 +16,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 // Older releases could leave a receipt-bearing cleanup on a terminal Move
@@ -126,6 +129,78 @@ func TestTerminalMoveJobReceiptWaitsForExecutorSettlement(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestTerminalJobObservationDistinguishesLostPoolFromTransientRead(t *testing.T) {
+	for _, missing := range []bool{true, false} {
+		name := "transient Pool read"
+		if missing {
+			name = "Pool deleted"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			r, repo, _, move, incoming := settledTerminalMoveFixture(t, "Blocked", recoveryRecovered, recoveryCapacitySettled)
+			move.Finalizers = []string{volumeapi.MoveProtectionFinalizer}
+			repo.moves[0] = move
+			spec := rollbackCleanupSpec(move, incoming)
+			kube := r.Client.(*fake.Clientset)
+			assignJobUIDs(kube)
+			terminalVerifyingJob(t, r, kube, spec)
+			before, err := r.Cleanups.Get(ctx, spec.Authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			readFailure := errors.New("temporary Pool API read failure")
+			if missing {
+				if err := r.Cleanups.Client.Resource(volumeapi.PoolResource).Delete(ctx, spec.Target.PoolName, metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				api := r.Cleanups.Client.(*dynamicfake.FakeDynamicClient)
+				api.PrependReactor("get", "shiftpvpools", func(ktesting.Action) (bool, runtime.Object, error) {
+					return true, nil, readFailure
+				})
+			}
+			// The real observer returns no journal on either error. The terminal
+			// caller must preserve its original exact journal for classification.
+			observed, err := r.CleanupOperator.Reclaim(ctx, before, r.Cleanups)
+			if err == nil || !reflect.DeepEqual(observed, cleanupapi.Cleanup{}) || missing && !errors.Is(err, volumeapi.ErrPoolNotFound) || !missing && !errors.Is(err, readFailure) {
+				t.Fatalf("unexpected observer error/result: %+v %v", observed, err)
+			}
+			kube.ClearActions()
+			if err := r.settleTerminalCleanup(ctx, move); err == nil {
+				t.Fatal("observation error was hidden")
+			}
+			after, err := r.Cleanups.Get(ctx, spec.Authority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if missing {
+				if after.Status.Phase != cleanupapi.PhaseNeedsReview || after.Status.Reason != "CleanupPoolIdentityChanged" ||
+					after.Spec != before.Spec || !reflect.DeepEqual(after.Status.Receipt, before.Status.Receipt) ||
+					!reflect.DeepEqual(after.Status.Executor, before.Status.Executor) || after.Status.AbsenceProof != nil {
+					t.Fatalf("lost Pool did not retain the exact journal in review: %+v", after)
+				}
+				moves, err := repo.ListMoves(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := r.reconcilePersistedMove(ctx, moves[0]); err != nil {
+					t.Fatal(err)
+				}
+				if slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) {
+					t.Fatal("terminal review retained the finalizer forever")
+				}
+			} else if !reflect.DeepEqual(after, before) || !slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) {
+				t.Fatalf("transient read changed the journal or protection: %+v", after)
+			}
+			for _, action := range kube.Actions() {
+				if action.GetVerb() != "get" && action.GetVerb() != "list" {
+					t.Fatalf("failed observation mutated executor: %+v", action)
+				}
+			}
+		})
 	}
 }
 

@@ -192,10 +192,14 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return r.reviewCleanupJournal(ctx, current, "TerminalMoveCleanupIntentUnfinished",
 			fmt.Sprintf("terminal Move carries a cleanup intent still in phase %q with no purge receipt", current.Status.Phase))
 	}
-	current, err = r.observeTerminalExecutor(ctx, current)
+	observed, err := r.observeTerminalExecutor(ctx, current)
 	if err != nil {
+		if errors.Is(err, volumeapi.ErrPoolNotFound) {
+			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
+		}
 		return err
 	}
+	current = observed
 	if err := r.driveCleanupAbsence(ctx, current); err != nil {
 		if contradictedCleanup(err) {
 			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
