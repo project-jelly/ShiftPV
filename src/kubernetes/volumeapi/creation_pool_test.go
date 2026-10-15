@@ -37,7 +37,7 @@ func TestCreationPoolSeparatesInventoryFromBackingReadiness(t *testing.T) {
 		}, false},
 		{"missing protection", func(p *unstructured.Unstructured) { p.SetFinalizers(nil) }, false},
 		{"deleting Pool", func(p *unstructured.Unstructured) { stamp := metav1.NewTime(now); p.SetDeletionTimestamp(&stamp) }, false},
-		{"outdated generation", func(p *unstructured.Unstructured) { p.SetGeneration(2) }, false},
+		{"outdated generation", func(p *unstructured.Unstructured) { p.SetGeneration(2) }, true},
 		{"stale backing", func(p *unstructured.Unstructured) {
 			_ = unstructured.SetNestedField(p.Object, now.Add(-time.Hour).Format(time.RFC3339), "status", "lastProbeTime")
 		}, false},

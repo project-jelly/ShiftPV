@@ -232,7 +232,7 @@ func TestScannerPromotionAfterPhysicalCollection(t *testing.T) {
 		}
 		return paths, truncated, err
 	}, physicalPathType)
-	if result.Valid || result.Message != "PhysicalInventoryChanged" {
+	if result.Valid || result.Message != "PhysicalInventoryChanged" || result.Reason != volumeapi.InventoryPhysicalChanged {
 		t.Fatalf("changing promotion accepted: %+v", result)
 	}
 	fresh := scanner.Scan(context.Background(), pool, time.Now())
@@ -264,7 +264,7 @@ func TestScannerReclaimAfterPhysicalCollection(t *testing.T) {
 		}
 		return paths, truncated, err
 	}, physicalPathType)
-	if result.Valid || result.Message != "PhysicalInventoryChanged" {
+	if result.Valid || result.Message != "PhysicalInventoryChanged" || result.Reason != volumeapi.InventoryPhysicalChanged {
 		t.Fatalf("changing reclaim accepted: %+v", result)
 	}
 	fresh := scanner.Scan(context.Background(), pool, time.Now())

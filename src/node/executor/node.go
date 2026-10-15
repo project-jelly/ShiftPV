@@ -34,9 +34,9 @@ type Node struct {
 	Volumes  *volumeapi.Registry
 	Cleanups *cleanupapi.Store
 	HostRoot string
-	// VerifyPool overrides live host observation for fault injection. Nil uses
-	// readiness.VerifyHostPool at every authority boundary.
-	VerifyPool     func(string, volumeapi.Pool) error
+	// VerifyBacking overrides live anchored-backing verification for fault
+	// injection. Nil uses Probe.VerifyBacking at every authority boundary.
+	VerifyBacking  func(string, volumeapi.Pool) error
 	RPCCertificate string
 	RPCPort        string
 	ObserveStep    func(string, time.Duration)

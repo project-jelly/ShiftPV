@@ -37,11 +37,11 @@ func TestCreationRechecksAuthorityAtEveryBoundary(t *testing.T) {
 				poolReads := 0
 				backingLost := false
 				backingFailure := errors.New("live backing lost")
-				node.VerifyPool = func(hostRoot string, pool volumeapi.Pool) error {
+				node.VerifyBacking = func(hostRoot string, pool volumeapi.Pool) error {
 					if backingLost {
 						return backingFailure
 					}
-					return readiness.VerifyHostPool(hostRoot, pool)
+					return readiness.NewProbe(hostRoot).VerifyBacking(pool)
 				}
 				dynamic.PrependReactor("get", "shiftpvpools", func(action ktesting.Action) (bool, runtime.Object, error) {
 					poolReads++

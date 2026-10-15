@@ -213,6 +213,25 @@ Confirm `shiftpv.io/capacity-retry` preserves selected-node, and repeat with a
 Controller restart and a different Pool group. Check that Deleting Volumes and
 unsettled Move holds remain charged. Fake API timing is not VM latency evidence.
 
+`TestChangingInventoryRecoversWithoutExternalWake` runs the resident observer with
+an injected clock: a changing inventory must recover without a manual Reconcile
+or watch event, and a peer inventory must not be rescanned by the short retry.
+`TestObservationRecoveryConnectsScannerToWaitingCSIClaim` connects both Run loops,
+the real Registry, Pool status watch and CSI retry notification. Its inventory
+failure and API server are injected; it is not a live disk or sidecar latency test.
+Observation waits wake on a matching Ready Pool even when quota is full; the next
+CSI call must still perform capacity admission. UID, selected-node and bound-claim
+guards apply to both observation and capacity notifications.
+After a selected Pool's live probe fails, an unchanged Ready snapshot must not
+notify it repeatedly; require a newer successful observation or another candidate.
+
+`TestApprovedCreationProgressesWhileSiblingScanIsPending` executes real native
+creation with injected mount/sysfs evidence, retaining the exact receipt, hold
+and all four live backing checks. `TestApprovedCleanupIgnoresSiblingScanButRetainsPostEffectFence`
+adds real Linux purge and proves the old inventory cannot settle its post-effect
+absence fence. The final complete scan is simulated; physical LVM qualification
+remains separate. Helper and new-publication tests retain current-generation gates.
+
 Unpublish regressions inject real backing probes and a sibling deletion's
 `scanEpoch` change before and inside the storage lock. A 20-volume burst uses
 real REST clients, preserves an unrelated published copy, and leaves the Pool

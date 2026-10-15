@@ -20,6 +20,8 @@ import (
 type Check = registration.Check
 
 type Result struct {
+	// RetryInventory requests another observation, never permission to use it.
+	RetryInventory   bool
 	Independent      Check
 	CapacityUnit     *volumeapi.PoolCapacityUnit
 	Accessible       Check

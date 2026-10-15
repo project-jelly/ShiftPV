@@ -147,9 +147,9 @@ run_mobility_node_restarts() {
 		"${ROOT_DIR}/test/e2e/kind/mobility-node-restarts.sh"
 }
 
-run_pool_capacity() {
+wait_for_lifecycle_webhook() {
 	# Pod readiness can precede the API server's webhook endpoint refresh.
-	# Exercise the read-only admission path before starting this focused case.
+	# Exercise the read-only admission path before any focused case starts.
 	local attempt ready=0
 	for ((attempt = 0; attempt < 30; attempt++)); do
 		if kubectl delete shiftpvpool worker-b --dry-run=server >/dev/null 2>&1; then
@@ -162,6 +162,9 @@ run_pool_capacity() {
 		echo "Pool admission webhook did not become reachable" >&2
 		return 1
 	fi
+}
+
+run_pool_capacity() {
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/pool-capacity.sh"
 }
 
@@ -190,6 +193,7 @@ run_cleanup_job_retry() {
 }
 
 install_shiftpv true
+wait_for_lifecycle_webhook
 
 if [[ "${NODE_EFFECTS_ONLY:-0}" == "1" ]]; then
  CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/node-executor.sh"

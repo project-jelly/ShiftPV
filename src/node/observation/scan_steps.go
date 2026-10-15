@@ -100,7 +100,8 @@ func (s *Scanner) observeUnrecorded(ctx context.Context, root string, paths []vo
 		}
 		if !present {
 			if !completedCreationStage(key, result.Copies) {
-				result.Message = "PhysicalInventoryChanged"
+				result.Reason = volumeapi.InventoryPhysicalChanged
+				result.Message = volumeapi.InventoryPhysicalChanged
 				return false
 			}
 			continue

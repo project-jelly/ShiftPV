@@ -71,7 +71,7 @@ func (n *Node) rootForPool(copy volume.CopyIdentity, pool volumeapi.Pool) (strin
 	return filepath.Join(n.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), "/")), nil
 }
 func (n *Node) localAuthority(ctx context.Context, copy volume.CopyIdentity, root string) error {
-	pool, err := n.Volumes.PoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
+	pool, err := n.Volumes.CleanupPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return err
 	}
@@ -100,10 +100,10 @@ func (n *Node) localAuthorityForPool(ctx context.Context, copy volume.CopyIdenti
 	if root != currentRoot {
 		return volumeapi.ErrStateConflict
 	}
-	if n.VerifyPool != nil {
-		return n.VerifyPool(n.HostRoot, pool)
+	if n.VerifyBacking != nil {
+		return n.VerifyBacking(n.HostRoot, pool)
 	}
-	return readiness.VerifyHostPool(n.HostRoot, pool)
+	return readiness.NewProbe(n.HostRoot).VerifyBacking(pool)
 }
 func (n *Node) create(ctx context.Context, expected volumeapi.State) error {
 	if expected.CurrentCopy == nil {

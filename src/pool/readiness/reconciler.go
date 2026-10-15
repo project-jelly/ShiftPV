@@ -9,7 +9,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
@@ -21,10 +21,14 @@ type Repository interface {
 
 type Reconciler struct {
 	reconcileMu sync.Mutex
-	NodeName    string
-	Pools       Repository
-	Inspector   Inspector
-	Interval    time.Duration
+	// Metrics snapshots retain peers across a targeted retry. Never used as
+	// storage authority; every reconciliation still reads live registrations.
+	lastObservations map[string]Observation
+	NodeName         string
+	Pools            Repository
+	Inspector        Inspector
+	Interval         time.Duration
+	Clock            clock.WithTicker
 	// PoolTimeout bounds context-aware inventory, release and API work for
 	// each Pool. It cannot interrupt synchronous host filesystem syscalls.
 	PoolTimeout time.Duration
@@ -53,36 +57,20 @@ type Observation struct {
 	Err    error
 }
 
-func (r *Reconciler) Run(ctx context.Context) error {
-	if err := r.validate(); err != nil {
-		return err
-	}
-	if err := r.reconcileAndLog(ctx); err != nil && errors.Is(err, context.Canceled) {
-		return nil
-	}
-	ticker := time.NewTicker(r.Interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		case <-r.Wake:
-		}
-		if err := r.reconcileAndLog(ctx); err != nil && errors.Is(err, context.Canceled) {
-			return nil
-		}
-	}
+func (r *Reconciler) Reconcile(ctx context.Context) error {
+	_, err := r.reconcile(ctx, nil)
+	return err
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
+// only selects scheduled retries by Pool UID; nil performs a complete pass.
+func (r *Reconciler) reconcile(ctx context.Context, only map[string]bool) (retry map[string]bool, reconcileErr error) {
 	if err := r.validate(); err != nil {
-		return err
+		return nil, err
 	}
 	r.reconcileMu.Lock()
 	defer r.reconcileMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	var observations []Observation
 	if r.ObserveAll != nil {
@@ -93,15 +81,16 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		if r.Observe != nil {
 			r.Observe(volumeapi.Pool{}, Result{}, err)
 		}
-		return err
+		return nil, err
 	}
+	retry = make(map[string]bool)
 	isolation := r.capacityIsolation(pools)
 	observed := false
 	for _, pool := range pools {
 		if ctx.Err() != nil {
-			return errors.Join(reconcileErr, ctx.Err())
+			return retry, errors.Join(reconcileErr, ctx.Err())
 		}
-		if pool.NodeName != r.NodeName {
+		if pool.NodeName != r.NodeName || (only != nil && !only[pool.UID]) {
 			continue
 		}
 		observed = true
@@ -113,12 +102,40 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		result, err := r.reconcilePool(poolCtx, pool, isolation[pool.UID])
 		cancel()
 		observations = append(observations, Observation{Pool: pool, Result: result, Err: err})
+		retry[pool.UID] = result.RetryInventory
 		reconcileErr = errors.Join(reconcileErr, err)
 	}
 	if !observed && r.Observe != nil {
 		r.Observe(volumeapi.Pool{}, Result{}, nil)
 	}
-	return reconcileErr
+	if r.ObserveAll != nil {
+		observations = r.observationSnapshot(pools, observations)
+	}
+	return retry, reconcileErr
+}
+
+func (r *Reconciler) observationSnapshot(pools []volumeapi.Pool, changed []Observation) []Observation {
+	if r.lastObservations == nil {
+		r.lastObservations = map[string]Observation{}
+	}
+	for _, observation := range changed {
+		r.lastObservations[observation.Pool.UID] = observation
+	}
+	live := make(map[string]Observation)
+	snapshot := make([]Observation, 0, len(pools))
+	for _, pool := range pools {
+		if pool.NodeName != r.NodeName {
+			continue
+		}
+		observation, ok := r.lastObservations[pool.UID]
+		if !ok || observation.Pool.Generation != pool.Generation {
+			observation = Observation{Pool: pool}
+		}
+		live[pool.UID] = observation
+		snapshot = append(snapshot, observation)
+	}
+	r.lastObservations = live
+	return snapshot
 }
 
 func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, allocation allocationObservation) (result Result, reconcileErr error) {
@@ -159,6 +176,7 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	result.RetryInventory = needsInventoryRetry(status.Inventory)
 	releaseErr := r.recordIdentityRelease(ctx, pool, &status, cleanupReady, now)
 	if err := ctx.Err(); err != nil {
 		return result, errors.Join(err, releaseErr)
@@ -277,14 +295,6 @@ func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.P
 
 func emptyInventory(inventory *volumeapi.PoolInventory) bool {
 	return inventory != nil && inventory.Valid && !inventory.Truncated && inventory.Message == "" && len(inventory.Copies) == 0
-}
-
-func (r *Reconciler) reconcileAndLog(ctx context.Context) error {
-	err := r.Reconcile(ctx)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		klog.Errorf("reconcile ShiftPVPool readiness on node %s: %v", r.NodeName, err)
-	}
-	return err
 }
 
 func (r *Reconciler) validate() error {

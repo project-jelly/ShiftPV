@@ -76,6 +76,10 @@ func (p Pool) registrationAllocation() registration.Allocation {
 }
 
 func (p Pool) capacityReady() (bool, string) {
+	return p.capacityReadyAt(p.Generation)
+}
+
+func (p Pool) capacityReadyAt(generation int64) (bool, string) {
 	if p.CapacityPolicy == "" {
 		return true, ""
 	}
@@ -83,7 +87,7 @@ func (p Pool) capacityReady() (bool, string) {
 		return false, "CapacityIdentityMissing"
 	}
 	condition := meta.FindStatusCondition(p.Status.Conditions, PoolConditionCapacityIndependent)
-	if condition == nil || condition.ObservedGeneration != p.Generation || condition.Status != metav1.ConditionTrue {
+	if condition == nil || condition.ObservedGeneration != generation || condition.Status != metav1.ConditionTrue {
 		if condition != nil && condition.Reason != "" {
 			return false, condition.Reason
 		}
