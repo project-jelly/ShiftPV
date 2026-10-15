@@ -41,7 +41,8 @@ func (r *Reconciler) scanVolumeWork(ctx context.Context, publish func(volumeWork
 		discoveryErr = r.scanDiscovery(ctx, volumes, moves, emit, observations)
 	}
 	placementErr := r.scanOwnerPlacements(ctx, emit)
-	err := errors.Join(volumeErr, moveErr, discoveryErr, placementErr)
+	usageErr := r.scanSourceUsage(ctx, moves, emit)
+	err := errors.Join(volumeErr, moveErr, discoveryErr, placementErr, usageErr)
 	observations.scanned(err)
 	return hints, err
 }
@@ -144,4 +145,29 @@ func (r *Reconciler) moveNeedsWork(move volumeapi.Move, volumes map[string]volum
 		retention = DefaultMoveJournalRetention
 	}
 	return !r.now().Before(transitioned.Add(retention))
+}
+
+// Read-only helpers can outlive a terminal transition or controller restart.
+// Mutable labels cannot hide a leftover. Namespace-local children route through
+// the exact Move owner UID; only the worker may validate and retire its helper.
+func (r *Reconciler) scanSourceUsage(ctx context.Context, moves []volumeapi.Move, emit func(volumeWork)) error {
+	pods, err := r.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list Move-owned Pod hints: %w", err)
+	}
+	parents := make(map[moveReference]string, len(moves))
+	for _, move := range moves {
+		parents[moveReference{move.Name, move.UID}] = move.Spec.VolumeID
+	}
+	for i := range pods.Items {
+		owner := metav1.GetControllerOf(&pods.Items[i])
+		if owner == nil || owner.APIVersion != "shiftpv.io/v1alpha1" || owner.Kind != "ShiftPVMove" || owner.Name == "" || owner.UID == "" {
+			continue
+		}
+		ref := moveReference{owner.Name, string(owner.UID)}
+		if id := parents[ref]; id != "" {
+			emit(volumeWork{volumeID: id, moves: []moveReference{ref}})
+		}
+	}
+	return nil
 }

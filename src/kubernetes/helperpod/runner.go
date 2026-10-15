@@ -176,9 +176,21 @@ func (r *Runner) volumeUsageAt(ctx context.Context, pool volumeapi.Pool, volumeI
 }
 
 func (r *Runner) runMeasurement(ctx context.Context, pool volumeapi.Pool, action, volumeID string, copy *volume.CopyIdentity) (string, error) {
-	evidence, err := poolcapacity.MeasurementEvidence(pool)
+	command, err := r.measurementCommand(pool, action, volumeID, copy)
 	if err != nil {
 		return "", err
+	}
+	label := volumeID
+	if label == "" {
+		label = "pool-capacity"
+	}
+	return r.runForResultAtPath(ctx, pool.NodeName, label, pool.MountPath, command)
+}
+
+func (r *Runner) measurementCommand(pool volumeapi.Pool, action, volumeID string, copy *volume.CopyIdentity) ([]string, error) {
+	evidence, err := poolcapacity.MeasurementEvidence(pool)
+	if err != nil {
+		return nil, err
 	}
 	command := []string{"/shiftpv-volume-helper", action,
 		"--pool-name=" + pool.Name, "--pool-uid=" + pool.UID, "--node-name=" + pool.NodeName,
@@ -189,15 +201,11 @@ func (r *Runner) runMeasurement(ctx context.Context, pool volumeapi.Pool, action
 	if copy != nil {
 		encoded, err := json.Marshal(copy)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		command = append(command, "--copy-identity="+string(encoded))
 	}
-	label := volumeID
-	if label == "" {
-		label = "pool-capacity"
-	}
-	return r.runForResultAtPath(ctx, pool.NodeName, label, pool.MountPath, command)
+	return command, nil
 }
 
 func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string) (string, error) {

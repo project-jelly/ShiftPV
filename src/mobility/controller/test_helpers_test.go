@@ -25,7 +25,7 @@ import (
 // share. Anything beyond it is an explicit option so each test still reads as
 // the exact configuration it exercises.
 func newTestReconciler(client kubernetes.Interface, repository Repository, options ...func(*Reconciler)) *Reconciler {
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", PoolLocks: &poolcapacity.Locker{}, PlacementPriorityClassName: DefaultPlacementPriorityClassName}
+	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", SourceUsage: fakeMoveCapacityProbe{}, PoolLocks: &poolcapacity.Locker{}, PlacementPriorityClassName: DefaultPlacementPriorityClassName}
 	for _, option := range options {
 		option(reconciler)
 	}

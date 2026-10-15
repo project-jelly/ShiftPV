@@ -60,6 +60,7 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 			client := fake.NewSimpleClientset()
 			reconciler := newTestReconciler(client, repository, func(r *Reconciler) {
 				r.CapacityProbe = fakeMoveCapacityProbe{usage: test.usage, stats: poolcapacity.Filesystem{AvailableBytes: test.available}}
+				r.SourceUsage = r.CapacityProbe.(SourceUsage)
 				r.PoolLocks = &poolcapacity.Locker{}
 			})
 			if err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err != nil {
@@ -95,6 +96,7 @@ func TestEnsureCapacityRejectsNonPositiveSourceUsage(t *testing.T) {
 	}
 	reconciler := newTestReconciler(fake.NewSimpleClientset(), repository, func(r *Reconciler) {
 		r.CapacityProbe = fakeMoveCapacityProbe{usage: 0, stats: poolcapacity.Filesystem{AvailableBytes: 64 << 20}}
+		r.SourceUsage = r.CapacityProbe.(SourceUsage)
 		r.PoolLocks = &poolcapacity.Locker{}
 	})
 	err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"})
@@ -254,8 +256,8 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 	reconciler := &Reconciler{
 		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
-		CapacityProbe: fakeMoveCapacityProbe{usage: 1, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
-		PoolLocks:     &poolcapacity.Locker{},
+		SourceUsage: fakeMoveCapacityProbe{usage: 1}, CapacityProbe: fakeMoveCapacityProbe{usage: 1, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
+		PoolLocks: &poolcapacity.Locker{},
 	}
 	err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"})
 	if err == nil || !strings.Contains(err.Error(), "capacity limit") {
@@ -264,4 +266,12 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 	if move.Status.CapacityApproved {
 		t.Fatal("missing Pool limit approved destination capacity")
 	}
+}
+
+func (p fakeMoveCapacityProbe) AdvanceSourceUsage(ctx context.Context, _ volumeapi.Move, copy volume.CopyIdentity) (int64, bool, error) {
+	measured, err := p.VolumeUsageForCopy(ctx, copy)
+	return measured, true, err
+}
+func (p fakeMoveCapacityProbe) FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error) {
+	return true, nil
 }

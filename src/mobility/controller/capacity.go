@@ -10,7 +10,6 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
-	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 var errCapacityApprovalPersistence = errors.New("capacity approval persistence failed")
@@ -56,41 +55,6 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 	previous := move.Status
 	move.Status.DestinationNode = observed.DestinationNode
 	move.Status.CapacityReason = denial
-	return r.persistMoveStatus(ctx, move, previous)
-}
-
-func (r *Reconciler) measureSourceCopy(ctx context.Context, move *volumeapi.Move) error {
-	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
-	if err != nil {
-		return err
-	}
-	copy := state.CurrentCopy
-	if state.Phase != volumeapi.PhaseMoving || state.ActiveMove != move.Name || state.OwnerNode != move.Spec.SourceNode ||
-		copy == nil || copy.Validate() != nil || copy.Role != volume.RoleServing || copy.NodeName != move.Spec.SourceNode {
-		return fmt.Errorf("source volume has no locked serving-copy identity")
-	}
-	if move.Status.SourceCopy != nil && *move.Status.SourceCopy != *copy {
-		return fmt.Errorf("source copy identity changed before capacity admission")
-	}
-	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && len(state.PublishedNodes) != 0 {
-		return fmt.Errorf("prepared source must be unpublished before physical measurement")
-	}
-	previous := move.Status
-	if move.Status.SourceCopy == nil {
-		// The volume CAS may have succeeded before the Move status was persisted.
-		identity := *copy
-		move.Status.SourceCopy = &identity
-	}
-	if move.Status.SourceBytes <= 0 {
-		measured, err := r.CapacityProbe.VolumeUsageForCopy(ctx, *copy)
-		if err != nil {
-			return fmt.Errorf("measure source volume usage: %w", err)
-		}
-		if measured <= 0 {
-			return fmt.Errorf("source volume usage must be positive, got %d", measured)
-		}
-		move.Status.SourceBytes = measured
-	}
 	return r.persistMoveStatus(ctx, move, previous)
 }
 

@@ -60,6 +60,7 @@ func TestPreparedConversionPoolBusyRetainsHoldWithoutDiagnosticReplay(t *testing
 			return poolcapacity.Filesystem{AvailableBytes: 10 << 30}, nil
 		},
 	}
+	f.reconciler.SourceUsage = f.reconciler.CapacityProbe.(SourceUsage)
 	assertPoolBusy(t, f.reconciler.PoolLocks, move.Status.Preparation.Pool.UID, func() error {
 		return f.reconciler.reconcileMove(f.ctx, move)
 	})
@@ -92,6 +93,7 @@ func TestLegacyCapacityPoolBusyDoesNotBecomeCapacityDenial(t *testing.T) {
 	move.Status.Phase = "WaitingForCapacity"
 	repo.moves[0] = move
 	r.CapacityProbe = fakeMoveCapacityProbe{usage: 32 << 20, stats: poolcapacity.Filesystem{AvailableBytes: 128 << 20}}
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	assertPoolBusy(t, r.PoolLocks, "destination-uid", func() error {
 		previous := move.Status
 		err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"})
