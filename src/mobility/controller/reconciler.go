@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -46,6 +45,7 @@ type Repository interface {
 	RemoveMoveFinalizer(context.Context, string, string) error
 	DeleteMove(context.Context, string, string) error
 	ListMoves(context.Context) ([]volumeapi.Move, error)
+	GetMove(context.Context, string) (volumeapi.Move, error)
 	SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error
 	CompareAndSetMoveStatus(context.Context, volumeapi.Move, volumeapi.MoveStatus) (volumeapi.Move, error)
 }
@@ -81,47 +81,14 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	interval := r.Interval
-	if interval <= 0 {
-		interval = 2 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		if err := r.ReconcileAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			klog.Errorf("reconcile ShiftPV mobility: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-r.Wake:
-		case <-ticker.C:
-		}
-	}
+	return r.runVolumes(ctx)
 }
 
 func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	// Discovery cannot authorize an existing transaction. Keep its errors, then
-	// let each persisted Move independently re-read the authority it needs.
-	discoveryErr := r.discoverMoves(ctx)
-	moves, err := r.Repository.ListMoves(ctx)
-	if err != nil {
-		return errors.Join(discoveryErr, err)
-	}
-	reconcileErrors := []error{discoveryErr}
-	for _, move := range moves {
-		if err := r.reconcilePersistedMove(ctx, move); err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("move %s: %w", move.Name, err))
-		}
-	}
-	// Admission may have created a hold before discovery created any Move.
-	// Keep its recovery in this serial pass, and isolate individual Pod errors
-	// from the transactions above.
-	reconcileErrors = append(reconcileErrors, r.reconcileOwnerPlacements(ctx))
-	return errors.Join(reconcileErrors...)
+	return r.reconcileVolumePass(ctx)
 }
 
 func (r *Reconciler) reconcilePersistedMove(ctx context.Context, move volumeapi.Move) error {

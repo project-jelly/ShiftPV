@@ -5,7 +5,8 @@
 2B-1 용량/owner 경계 [PR #201](https://github.com/project-jelly/ShiftPV/pull/201) 머지.
 2B-2 준비 실행·취소 연결과 통합 검증 [PR #202](https://github.com/project-jelly/ShiftPV/pull/202) 머지.
 3단계 자기 backing 검증과 신규 할당 조건 분리 [PR #203](https://github.com/project-jelly/ShiftPV/pull/203) 머지.
-4단계 Move cleanup의 resident Node 실행 연결 진행 중.
+4단계 Move cleanup의 resident Node 실행 [PR #204](https://github.com/project-jelly/ShiftPV/pull/204) 머지.
+5A 단계 Volume별 queue와 Pool 잠금 경합 시 재시도 검증 중.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.
@@ -60,8 +61,13 @@ Volume별 처리              동일 Volume 직렬화, 다른 Volume 진행 (5�
           +-- Copy Jobs    복사·검증·promotion
 ```
 
-1단계에서는 기존 직렬 reconcile pass를 사용한다. Queue는 admission이나 외부 API 쓰기를
-직렬화하지 않으므로, 이후에도 현재 증거 재조회·CAS·NodePublish 권한 검사가 필요하다.
+Queue는 admission이나 외부 API 쓰기를 직렬화하지 않으므로, 현재 증거 재조회·CAS·
+NodePublish 권한 검사가 필요하다.
+
+5단계는 세 PR 단위로 나눈다. 5A는 Volume별 queue·제한된 worker와 Pool 잠금 경합의
+즉시 재시도로 진행을 격리한다. 5B는 source 사용량 측정과 cleanup 대기를 관측 가능한
+짧은 단계로 바꿔 worker를 반환한다. 5C는 동일 이미지·workload의 copy 측정과
+중단·재시도·metadata 검증을 통과한 성능 변경만 채택한다.
 
 ## 준비 예약의 설계 조건
 

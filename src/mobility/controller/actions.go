@@ -232,7 +232,10 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 	// Capacity readers list Volumes before Moves under the destination Pool lock.
 	// Keep the incoming owner change from falling between those reads. A source
 	// reader may conservatively retain its old Volume reservation during handoff.
-	unlock := r.PoolLocks.Lock(destinationPoolUID)
+	unlock, acquired := r.PoolLocks.TryLock(destinationPoolUID)
+	if !acquired {
+		return errPoolBusy
+	}
 	defer unlock()
 	err = r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseMoving, move.Name, move.Spec.SourceNode, next)
 	if err != nil && !errors.Is(err, volumeapi.ErrStateConflict) {

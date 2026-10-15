@@ -16,7 +16,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
-func TestDiscoveryReadsEachOwnerOncePerPass(t *testing.T) {
+func TestDiscoveryListsOwnersOnceWithoutIdleVolumeGETs(t *testing.T) {
 	for _, n := range []int{10, 100, 1000} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			repo := &memoryRepository{volumes: map[string]volumeapi.State{}}
@@ -28,15 +28,18 @@ func TestDiscoveryReadsEachOwnerOncePerPass(t *testing.T) {
 			if err := r.ReconcileAll(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			gets := 0
+			gets, lists := 0, 0
 			for _, a := range client.Actions() {
 				if a.GetVerb() == "get" && a.GetResource().Resource == "nodes" {
 					gets++
 				}
+				if a.GetVerb() == "list" && a.GetResource().Resource == "nodes" {
+					lists++
+				}
 			}
-			t.Logf("Ready volumes=%d, distinct owners=1, Node GETs per full reconcile=%d", n, gets)
-			if gets != 1 {
-				t.Fatalf("unexpected Node GET count: %d", gets)
+			t.Logf("Ready volumes=%d, Node LISTs=%d, idle Node GETs=%d", n, lists, gets)
+			if gets != 0 || lists != 1 {
+				t.Fatalf("unexpected Node requests: GET=%d LIST=%d", gets, lists)
 			}
 		})
 	}

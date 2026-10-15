@@ -231,7 +231,10 @@ func (r *Reconciler) grantPreparation(ctx context.Context, move *volumeapi.Move,
 	if r.PoolLocks == nil || placement.UID == "" || pool.UID == "" || pool.NodeName != placement.Spec.NodeName {
 		return false, fmt.Errorf("preparation requires a capacity locker and exact placement Pod UID")
 	}
-	unlock := r.PoolLocks.Lock(pool.UID)
+	unlock, acquired := r.PoolLocks.TryLock(pool.UID)
+	if !acquired {
+		return false, errPoolBusy
+	}
 	defer unlock()
 	currentPool, err := r.Repository.ReadyPoolForIdentity(ctx, pool.Name, pool.UID, pool.NodeName)
 	if err != nil {

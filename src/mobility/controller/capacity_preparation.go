@@ -19,7 +19,10 @@ func (r *Reconciler) convertPreparation(ctx context.Context, move *volumeapi.Mov
 		return err
 	}
 	hold := move.Status.Preparation
-	unlock := r.PoolLocks.Lock(hold.Pool.UID)
+	unlock, acquired := r.PoolLocks.TryLock(hold.Pool.UID)
+	if !acquired {
+		return errPoolBusy
+	}
 	defer unlock()
 	pool, err := r.Repository.ReadyPoolForIdentity(ctx, hold.Pool.Name, hold.Pool.UID, hold.NodeName)
 	if err != nil {
