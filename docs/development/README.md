@@ -6,6 +6,7 @@
 |---|---|
 | [source-layout.md](source-layout.md) | source tree와 package 책임 경계 |
 | [testing.md](testing.md) | 설계 preflight부터 운영 승인까지의 evidence gate |
+| [mobility-stabilization-plan.md](mobility-stabilization-plan.md) | 2026-10 다중 노드 시험의 후속 개선 순서와 완료 조건 |
 | [image-security.md](image-security.md) | PR 검사, release gate, 이미지 보안 정책과 근거 |
 | [versioning.md](versioning.md) | 독립 component와 Chart version, release 순서 |
 

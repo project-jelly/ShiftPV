@@ -30,6 +30,53 @@ assert_preflight_preserves_consumer() {
 	echo "preflight ${scenario} passed: same Pod UID=${uid}, Ready volume=${volume}, no move, data writable"
 }
 
+assert_held_owner_recovers_without_move() {
+	local old_pod=$1 old_uid=$2 volume=$3 checksum=$4 owner=$5
+	local pod="" uid="" gate="" deadline authority binding
+	authority=$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.metadata.uid}{"|"}{.spec}{"|"}{.status.ownerNode}{"|"}{.status.currentCopy}')
+	binding=$(kubectl -n shiftpv-mobility-blocked get pvc/source-only -o jsonpath='{.metadata.uid}{"|"}{.spec.volumeName}')
+	kubectl -n shiftpv-mobility-blocked delete "pod/${old_pod}" --wait=true --timeout=90s
+	deadline=$((SECONDS + 90))
+	while ((SECONDS < deadline)); do
+		test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.phase}')" = Ready
+		test -z "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.activeMove}')"
+		test -z "$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${volume}')].metadata.name}")"
+		pod=$(kubectl -n shiftpv-mobility-blocked get pod -l app=shiftpv-mobility-source-only -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+		if [[ -n "${pod}" ]]; then
+			gate=$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath="{.spec.schedulingGates[?(@.name=='shiftpv.io/placement-hold')].name}")
+			if [[ "${gate}" == shiftpv.io/placement-hold ]]; then
+				uid=$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.metadata.uid}')
+				break
+			fi
+		fi
+		sleep 1
+	done
+	if [[ -z "${uid}" || "${uid}" == "${old_uid}" ]]; then
+		echo "replacement Pod was not held before owner recovery: volume=${volume}" >&2
+		return 1
+	fi
+	test -z "$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.spec.nodeName}')"
+	test "$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.metadata.annotations.shiftpv\.io/placement}')" = held
+	test "$(kubectl get "node/${owner}" -o jsonpath='{.spec.unschedulable}')" = true
+
+	# No Move owns this gate. The product controller must recover the same Pod
+	# after uncordon; the test never removes the gate or recreates this Pod.
+	kubectl uncordon "${owner}"
+	kubectl -n shiftpv-mobility-blocked wait "pod/${pod}" --for=condition=Ready --timeout=180s
+	test "$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.metadata.uid}')" = "${uid}"
+	test "$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.status.phase}')" = Running
+	test "$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${owner}"
+	test -z "$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath="{.spec.schedulingGates[?(@.name=='shiftpv.io/placement-hold')].name}")"
+	test "$(kubectl -n shiftpv-mobility-blocked get "pod/${pod}" -o jsonpath='{.metadata.annotations.shiftpv\.io/placement}')" = owner
+	test "$(pod_sha256 shiftpv-mobility-blocked "${pod}" /data/payload)" = "${checksum}"
+	test "$(kubectl -n shiftpv-mobility-blocked get pvc/source-only -o jsonpath='{.metadata.uid}{"|"}{.spec.volumeName}')" = "${binding}"
+	test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.metadata.uid}{"|"}{.spec}{"|"}{.status.ownerNode}{"|"}{.status.currentCopy}')" = "${authority}"
+	test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.phase}')" = Ready
+	test -z "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.activeMove}')"
+	test -z "$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${volume}')].metadata.name}")"
+	echo "owner placement recovery passed: same held Pod UID=${uid}, owner=${owner}, volume=${volume}, no move, checksum=${checksum}"
+}
+
 assert_obsolete_pending_move_cancelled() {
 	local volume=$1 source=$2 move deadline
 	move="obsolete-${volume#shiftpv-}"
@@ -93,6 +140,7 @@ test_preflight() {
 			kubectl -n shiftpv-system delete "pod/${controller_pod}" --wait=true --timeout=120s
 			kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=180s
 			assert_preflight_preserves_consumer selector-restart "${pod}" "${uid}" "${volume}" "${checksum}"
+			assert_held_owner_recovers_without_move "${pod}" "${uid}" "${volume}" "${checksum}" "${CLUSTER_NAME}-worker"
 		fi
 		# PDB removal must allow the same previously deferred volume to move.
 		if [[ "${scenario}" == pdb ]]; then

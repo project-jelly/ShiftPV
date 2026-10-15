@@ -32,7 +32,7 @@ src/
 ├── lifecycle/              admission, Pool lifecycle and uninstall guards
 ├── mobility/
 │   ├── admission/          workload mutation boundary
-│   ├── controller/         observe, decide and execute one Move action
+│   ├── controller/         owner placement recovery and Move observe/decide/execute
 │   └── fsm/                pure Move state transition rules
 ├── node/                   mount, inventory and identity-bound filesystem effects
 │   ├── executor/           resident execution; RPC and Watch share one Volume gate

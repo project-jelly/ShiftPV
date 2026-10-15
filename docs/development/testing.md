@@ -39,6 +39,7 @@ Kubernetes probe는 다음 전제를 실제 API server에서 확인한다.
 - terminating parent의 status journal을 갱신할 수 있다.
 - owner-referenced suspended Job은 parent finalizer가 있는 동안 유지되고 parent 삭제 뒤 정리된다.
 - `spec.initialPool`은 Create·status 쓰기에서 보존되고, 구버전 객체에 최초 추가만 허용하며 변경·제거는 거부한다.
+- gated Pod의 한 번의 Update에서 owner selector 추가와 ShiftPV gate 제거가 가능하며, 같은 UID와 사용자 gate·selector·affinity가 보존된다. API 제약 검증이며 controller 전체 E2E는 아니다.
 
 Filesystem probe는 target helper image의 rsync daemon에서
 `-aHAXS --numeric-ids --one-file-system --no-devices --delete --fsync`와 checksum dry-run이 hardlink,
@@ -109,6 +110,8 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | `csi/controller`: `TestCreateInitializationRecoversAPIWriteBoundaries`, `TestLegacyInitializationsReadmitWithoutBlockingEachOther` | 실제 Registry/ledger + Create·status 실패/응답 유실 + 재시작 + 다른 Pool 진행 |
 | `csi/controller`: `placement_progress_test.go`, `TestMissingPoolUsesPlacementAuthority` | 등록 부재·일시 NotReady·소비자 배치 권한을 구분하고 원래 생성 intent·예약을 보존 |
 | `mobility/controller`: `approval_recovery_test.go` | 승인 직후 source 장애 + 원자적 copy 계획 + 구버전 승인·재시작·fresh absence 전 hold 유지 |
+| `mobility/controller`: `owner_placement_test.go`, `owner_placement_boundary_test.go` | 실제 admission patch → Move 생성 전 uncordon·controller 재시작 → 같은 Pod gate 회수, 충돌 뒤 UID/binding/owner 재검증, 사용자 제약 보존과 Pod별 오류 격리 |
+| `e2e/kind/mobility/preflight.sh` (g1) | source-only workload의 replacement가 gated 상태일 때 uncordon → 같은 Pod UID Ready·checksum 보존·Move 미생성까지 실제 webhook/controller/scheduler/kubelet로 검증 |
 | `node/ownership`: `pool_release_test.go` | 실제 marker lock + 중단된 임시 파일 회수 + symlink/hardlink/권한/소유자 불일치 보존 |
 | `cmd/node`: `TestNodeBackgroundBudgetDoesNotBlockForegroundRequests` | 실제 Collector/Registry/REST clients + 차단된 GC limiter + HTTP 서버 |
 | `node/metadata`: `TestPoolCollectionEligibility`, `TestCollectorProgressAfterFreshEvidence`, `TestCollectorRequiresLiveUnreferencedReadyPool` | 순수 eligibility + 새 관찰/참조/오류 주입 + effect 진입 여부 |

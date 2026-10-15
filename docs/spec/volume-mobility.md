@@ -56,6 +56,25 @@ identity, and at least one destination Pool whose inventory is fresh and
 complete. Scheduler fit and disruption policy are inputs to the Move journal;
 they are not source cleanup authority.
 
+### Held Pods without a Move
+
+Admission can add `shiftpv.io/placement-hold` before a Move exists. The same
+controller loop revisits managed, unassigned held Pods. If the current owner is
+Ready and uncordoned, the Volume is Ready with no active Move or cleanup, and no
+unsettled Move owns the work, it verifies the exact PV/PVC binding and current
+serving copy. One Pod update adds the owner hostname selector and removes only
+the ShiftPV gate. Other gates, selectors and affinity remain intact; a conflicting
+hostname selector is not overwritten. Unbound companion claims are left to the
+scheduler and their provisioner.
+
+Adding a selector while gated follows Kubernetes'
+[Pod Scheduling Readiness](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-scheduling-readiness/#mutable-pod-scheduling-directives) rules.
+
+Pod update conflicts trigger fresh binding, Volume, Move and Node reads. An
+identity change aborts that attempt. Existing held Pods need no new annotation or
+recreation. These reads and the Pod update are not a multi-object transaction;
+NodePublish still enforces the current phase and owner before mounting.
+
 ## Reconcile Loop
 
 Each reconcile cycle observes current metadata and node evidence, chooses one
