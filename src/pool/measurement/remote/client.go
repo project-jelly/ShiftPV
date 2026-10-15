@@ -37,11 +37,19 @@ type Client struct {
 	Fallback    Probe
 	Timeout     time.Duration
 	ObserveStep func(string, time.Duration)
-	locks       capacity.Locker
+	// NonBlocking retries instead of waiting for another probe of the same Pool.
+	NonBlocking bool
+	// FallbackOnUnavailable also permits API fallback after Unavailable or
+	// Unimplemented. Read deadline fallback is enabled independently of this flag.
+	FallbackOnUnavailable bool
+	locks                 capacity.Locker
 }
 
 func (c *Client) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (capacity.Filesystem, error) {
-	unlock := c.locks.Lock(expected.UID)
+	unlock, err := c.lockPool(ctx, expected.UID)
+	if err != nil {
+		return capacity.Filesystem{}, err
+	}
 	defer unlock()
 	started := time.Now()
 	defer func() {
@@ -60,14 +68,14 @@ func (c *Client) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (ca
 		return capacity.Filesystem{}, err
 	}
 	if executor == nil {
-		return c.Fallback.StatFSForPool(ctx, expected)
+		return c.fallback(ctx, expected)
 	}
 	target, supported, err := c.Discovery.Endpoint(ctx, *executor)
 	if err != nil {
 		return capacity.Filesystem{}, err
 	}
 	if !supported {
-		return c.Fallback.StatFSForPool(ctx, expected)
+		return c.fallback(ctx, expected)
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -76,8 +84,8 @@ func (c *Client) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (ca
 	req := &protocol.CapacityRequest{ExecutorUid: executor.PodUID, NodeName: expected.NodeName, PoolName: expected.Name, PoolUid: expected.UID, Evidence: evidence, Nonce: hex.EncodeToString(nonce[:])}
 	answer, err := c.read(ctx, target, req)
 	if err != nil {
-		if status.Code(err) == codes.DeadlineExceeded && ctx.Err() == nil {
-			return c.Fallback.StatFSForPool(ctx, expected)
+		if c.fallbackAllowed(err) {
+			return c.fallback(ctx, expected)
 		}
 		return capacity.Filesystem{}, err
 	}
@@ -93,6 +101,33 @@ func (c *Client) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (ca
 	}
 	return stats, nil
 }
+
+func (c *Client) lockPool(ctx context.Context, poolUID string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !c.NonBlocking {
+		return c.locks.Lock(poolUID), nil
+	}
+	unlock, acquired := c.locks.TryLock(poolUID)
+	if !acquired {
+		return nil, retryError{fmt.Errorf("capacity probe already in progress for Pool %q", poolUID)}
+	}
+	return unlock, nil
+}
+
+func (c *Client) fallbackAllowed(err error) bool {
+	code := status.Code(err)
+	return code == codes.DeadlineExceeded || c.FallbackOnUnavailable && (code == codes.Unavailable || code == codes.Unimplemented)
+}
+
+func (c *Client) fallback(ctx context.Context, expected volumeapi.Pool) (capacity.Filesystem, error) {
+	if err := ctx.Err(); err != nil {
+		return capacity.Filesystem{}, err
+	}
+	return c.Fallback.StatFSForPool(ctx, expected)
+}
+
 func (c *Client) verify(ctx context.Context, expected volumeapi.Pool) (string, error) {
 	current, err := c.Pools.ReadyPoolForIdentity(ctx, expected.Name, expected.UID, expected.NodeName)
 	if err != nil {

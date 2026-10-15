@@ -135,7 +135,7 @@ func (r *Reconciler) volumeWorker(ctx context.Context, d *volumeDispatcher, obse
 			result, err := r.advanceVolume(ctx, d.snapshot(id))
 			observations.record(id, result)
 			switch {
-			case errors.Is(err, errPoolBusy):
+			case errors.Is(err, errPoolBusy), errors.Is(err, ErrCapacityProbePending):
 				d.queue.Forget(id)
 				d.queue.AddAfter(id, r.reconcileInterval())
 			case err != nil:
@@ -173,7 +173,7 @@ func (r *Reconciler) reconcileVolumePass(ctx context.Context) error {
 func (r *Reconciler) advanceVolume(ctx context.Context, work volumeWork) (discoveryResult, error) {
 	var result discoveryResult
 	var failures []error
-	busy := false
+	var pending error
 	if work.discover {
 		created, observed, err := r.discoverVolume(ctx, work.volumeID)
 		result = observed
@@ -187,8 +187,8 @@ func (r *Reconciler) advanceVolume(ctx context.Context, work volumeWork) (discov
 	}
 	for _, ref := range work.moves {
 		err := r.advanceMoveReference(ctx, work.volumeID, ref)
-		if errors.Is(err, errPoolBusy) {
-			busy = true
+		if errors.Is(err, errPoolBusy) || errors.Is(err, ErrCapacityProbePending) {
+			pending = err
 		} else if err != nil {
 			failures = append(failures, fmt.Errorf("move %s: %w", ref.name, err))
 		}
@@ -202,10 +202,7 @@ func (r *Reconciler) advanceVolume(ctx context.Context, work volumeWork) (discov
 	if err := errors.Join(failures...); err != nil {
 		return result, err
 	}
-	if busy {
-		return result, errPoolBusy
-	}
-	return result, nil
+	return result, pending
 }
 
 func (r *Reconciler) advanceMoveReference(ctx context.Context, volumeID string, ref moveReference) error {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -142,7 +143,7 @@ func (r *Reconciler) preparationWait(ctx context.Context, move *volumeapi.Move, 
 }
 
 func (r *Reconciler) prepareDestination(ctx context.Context, move *volumeapi.Move, observed observation, pools poolIndex) error {
-	candidates, err := r.preparationCandidates(ctx, *move, observed, pools)
+	candidates, unavailable, err := r.preparationCandidates(ctx, *move, observed, pools)
 	if err != nil {
 		return err
 	}
@@ -150,7 +151,7 @@ func (r *Reconciler) prepareDestination(ctx context.Context, move *volumeapi.Mov
 		if err := r.deletePlacement(ctx, *move); err != nil {
 			return err
 		}
-		return r.preparationWait(ctx, move, "DestinationReservationLimit")
+		return r.preparationWait(ctx, move, preparationCapacityReason(unavailable))
 	}
 	placement, reason, err := r.ensurePreparedPlacement(ctx, *move, observed, candidates)
 	if err != nil {
@@ -166,8 +167,13 @@ func (r *Reconciler) prepareDestination(ctx context.Context, move *volumeapi.Mov
 	if err != nil {
 		return err
 	}
+	unavailable = false // Diagnose the fresh grant snapshot, not the advisory filter.
 	for _, pool := range poolsOnNode {
 		granted, err := r.grantPreparation(ctx, move, pool, placement)
+		if errors.Is(err, ErrCapacityProbePending) {
+			unavailable = true
+			continue
+		}
 		if err != nil || granted {
 			return err
 		}
@@ -177,25 +183,26 @@ func (r *Reconciler) prepareDestination(ctx context.Context, move *volumeapi.Mov
 	if err := r.deletePlacement(ctx, *move); err != nil {
 		return err
 	}
-	return r.preparationWait(ctx, move, "DestinationReservationLimit")
+	return r.preparationWait(ctx, move, preparationCapacityReason(unavailable))
 }
 
 // This filter is advisory. A node must have one Pool that fits the whole
 // Volume; fragments in different Pools cannot back a single PVC.
-func (r *Reconciler) preparationCandidates(ctx context.Context, move volumeapi.Move, observed observation, pools poolIndex) ([]string, error) {
+func (r *Reconciler) preparationCandidates(ctx context.Context, move volumeapi.Move, observed observation, pools poolIndex) ([]string, bool, error) {
 	volumes, err := r.Repository.ListVolumes(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	moves, err := r.Repository.ListMoves(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	source, exists := indexedCopyPool(pools.registered, move.Status.SourceCopy)
 	if !exists || observed.Volume.CapacityBytes <= 0 {
-		return nil, fmt.Errorf("prepared source Pool or capacity is missing")
+		return nil, false, fmt.Errorf("prepared source Pool or capacity is missing")
 	}
 	var candidates []string
+	unavailable := false
 	for _, node := range observed.CandidateNodes {
 		for _, pool := range pools.ready {
 			if pool.NodeName != node || pool.PoolGroup != source.PoolGroup ||
@@ -204,15 +211,19 @@ func (r *Reconciler) preparationCandidates(ctx context.Context, move volumeapi.M
 			}
 			fits, err := preparationPoolFits(pool, observed.Volume.CapacityBytes, volumes, moves)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if fits {
+				if !pool.Status.CapacityProbeSupported {
+					unavailable = true
+					continue
+				}
 				candidates = append(candidates, node)
 				break
 			}
 		}
 	}
-	return candidates, nil
+	return candidates, unavailable, nil
 }
 
 func preparationPoolFits(pool volumeapi.Pool, requested int64, volumes map[string]volumeapi.State, moves []volumeapi.Move) (bool, error) {
@@ -267,6 +278,9 @@ func (r *Reconciler) grantPreparation(ctx context.Context, move *volumeapi.Move,
 	fits, err := preparationPoolFits(currentPool, state.CapacityBytes, volumes, moves)
 	if err != nil || !fits {
 		return false, err
+	}
+	if !currentPool.Status.CapacityProbeSupported {
+		return false, ErrCapacityProbePending
 	}
 	previous := move.Status
 	move.Status.Preparation = &volumeapi.MovePreparation{
@@ -355,9 +369,7 @@ func (r *Reconciler) startPreparedDisruption(ctx context.Context, move *volumeap
 		return r.requestPreparationCancellation(ctx, move, reason)
 	}
 	if observed.Volume.Phase == volumeapi.PhaseReady {
-		next := observed.Volume
-		next.Phase = volumeapi.PhaseMoving
-		if err := r.Repository.CompareAndSetSourceState(ctx, move.Spec.VolumeID, observed.Volume, next); err != nil {
+		if err := r.startPreparedSource(ctx, *move, observed.Volume); err != nil {
 			return err
 		}
 	}

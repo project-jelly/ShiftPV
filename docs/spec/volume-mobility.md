@@ -147,8 +147,20 @@ Routine Pool scan generations do not restart an unchanged source measurement.
 The helper rechecks current inventory and live backing after reading, waiting only
 for stale successful observations while retaining the measured bytes. Changed
 configuration, copy or publication and explicit failed evidence discard the result.
-Destination statfs and API calls can still occupy a worker; their bounded execution
-is the next step.
+Destination statfs uses a separate resident RPC/API probe with one four-second
+budget covering discovery, reads and response validation. It has no helper-Pod
+fallback; private lock contention returns immediately. Temporary unavailability
+preserves the current phase, placement and hold for a fresh retry. CSI keeps its
+existing helper fallback. Other per-Volume API work is not yet time-bounded.
+
+New preparation candidates must advertise resident capacity probing. Immediately
+before changing a Ready source to Moving, a fresh nonce probe verifies that the
+held destination responds, under the shared Pool UID lock. Its free-space result
+is discarded; execution approval measures again after source quiescence. A retry
+already in Moving does not repeat this preflight, and existing execution approval
+is not revoked by a missing capability flag. Upgrade Nodes before enabling this
+controller path; an older or unavailable destination waits without releasing its
+hold. The budget bounds controller I/O waits, not a Node kernel statfs syscall.
 
 ## Copy Contract
 

@@ -68,7 +68,7 @@ func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move
 }
 
 func (r *Reconciler) recordMoveError(ctx context.Context, move *volumeapi.Move, previous volumeapi.MoveStatus, reason, operation string, cause error) error {
-	if errors.Is(cause, errMoveStatusPersistence) || errors.Is(cause, errPoolBusy) {
+	if errors.Is(cause, errMoveStatusPersistence) || errors.Is(cause, errPoolBusy) || errors.Is(cause, ErrCapacityProbePending) {
 		return cause
 	}
 	move.Status.Reason = reason

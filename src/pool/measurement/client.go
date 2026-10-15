@@ -29,11 +29,16 @@ type Client struct {
 	Fallback    filesystemProbe
 	Timeout     time.Duration
 	ObserveStep func(string, time.Duration)
+	// NonBlocking retries instead of waiting for another probe of the same Pool.
+	NonBlocking bool
 	locks       capacity.Locker
 }
 
 func (c *Client) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (capacity.Filesystem, error) {
-	unlock := c.locks.Lock(expected.UID)
+	unlock, err := c.lockPool(ctx, expected.UID)
+	if err != nil {
+		return capacity.Filesystem{}, err
+	}
 	defer unlock()
 	started := time.Now()
 	defer func() {
@@ -52,7 +57,7 @@ func (c *Client) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (ca
 		return capacity.Filesystem{}, err
 	}
 	if !pool.Status.CapacityProbeSupported {
-		return c.Fallback.StatFSForPool(ctx, pool)
+		return c.fallback(ctx, pool, fmt.Errorf("Node does not support the Pool capacity probe"))
 	}
 	r, encoded, err := newRequest(evidence)
 	if err != nil {
@@ -65,9 +70,33 @@ func (c *Client) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (ca
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		// A stopped/older Node cannot answer. The existing helper still reads
 		// live space and verifies exact identity before any approval.
-		return c.Fallback.StatFSForPool(ctx, pool)
+		return c.fallback(ctx, pool, err)
 	}
 	return stats, err
+}
+
+func (c *Client) lockPool(ctx context.Context, poolUID string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !c.NonBlocking {
+		return c.locks.Lock(poolUID), nil
+	}
+	unlock, acquired := c.locks.TryLock(poolUID)
+	if !acquired {
+		return nil, retryableError{fmt.Errorf("capacity probe already in progress for Pool %q", poolUID)}
+	}
+	return unlock, nil
+}
+
+func (c *Client) fallback(ctx context.Context, pool volumeapi.Pool, cause error) (capacity.Filesystem, error) {
+	if err := ctx.Err(); err != nil {
+		return capacity.Filesystem{}, err
+	}
+	if c.Fallback == nil {
+		return capacity.Filesystem{}, retryableError{cause}
+	}
+	return c.Fallback.StatFSForPool(ctx, pool)
 }
 
 func (c *Client) await(ctx context.Context, expected volumeapi.Pool, r request) (capacity.Filesystem, error) {
@@ -125,3 +154,4 @@ func matchingEvidence(expected, current volumeapi.Pool) (string, error) {
 type retryableError struct{ error }
 
 func (retryableError) Retryable() bool { return true }
+func (e retryableError) Unwrap() error { return e.error }
