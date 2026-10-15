@@ -140,7 +140,7 @@ func TestDiscoveryIsolatesOwnerReadFailure(t *testing.T) {
 	otherID := "shiftpv-1123456789abcdef0123456789abcdef"
 	otherBadID := "shiftpv-2123456789abcdef0123456789abcdef"
 	repo := &memoryRepository{volumes: map[string]volumeapi.State{id: {Phase: volumeapi.PhaseReady, OwnerNode: "failing"}, otherBadID: {Phase: volumeapi.PhaseReady, OwnerNode: "failing"}, otherID: {Phase: volumeapi.PhaseReady, OwnerNode: "healthy"}}}
-	client := fake.NewClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "healthy"}})
+	client := fake.NewClientset(readyNode("healthy", true), readyNode("failing", true))
 	sentinel := errors.New("owner read unavailable")
 	client.PrependReactor("get", "nodes", func(action ktesting.Action) (bool, runtime.Object, error) {
 		if action.(ktesting.GetAction).GetName() == "failing" {
@@ -164,7 +164,7 @@ func TestDiscoveryIsolatesOwnerReadFailure(t *testing.T) {
 			}
 		}
 	}
-	if healthyReads != 1 || failedReads != 2 || len(repo.moves) != 0 {
+	if healthyReads == 0 || failedReads != 2 || len(repo.moves) != 0 {
 		t.Fatalf("discovery skipped a volume or granted work without preflight: healthy=%d failed=%d moves=%v", healthyReads, failedReads, repo.moves)
 	}
 }

@@ -123,6 +123,21 @@ results, and purge receipts. Repeated reconciliation is valid only when every
 failure exit either retries automatically, waits for a recoverable node, or
 preserves data in `Blocked` or a cleanup subjournal `NeedsReview`.
 
+Events and periodic relists route discovery, Move advancement, and held-Pod
+recovery to a queue keyed by Volume ID. Two workers process different Volumes;
+one Volume has at most one worker. Routing hints are advisory: the worker reads
+the current object and verifies its UID and Volume binding before acting.
+Startup relists persisted work, so queue contents are not durable authority.
+Bulk API lists remain a shared discovery boundary: their delay can postpone new
+queue entries while already queued work continues.
+
+When another operation holds the destination Pool UID lock, mobility yields and
+retries without cancelling placement or releasing a hold. Capacity measurement,
+fresh ledger admission, and owner commit still use that shared lock. Admission
+and external writers remain outside the Volume queue and require the existing
+CAS and publication fences. Source usage measurement and cleanup can still wait
+inside a worker; two long-running operations can currently occupy both workers.
+
 ## Copy Contract
 
 Copy uses an exact, identity-bound source and destination path. The source opens

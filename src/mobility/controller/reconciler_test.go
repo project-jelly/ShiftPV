@@ -270,6 +270,18 @@ func (m *memoryRepository) DeleteMove(_ context.Context, name, uid string) error
 	}
 	return nil
 }
+func (m *memoryRepository) GetMove(ctx context.Context, name string) (volumeapi.Move, error) {
+	moves, err := m.ListMoves(ctx)
+	if err != nil {
+		return volumeapi.Move{}, err
+	}
+	for _, move := range moves {
+		if move.Name == name {
+			return move, nil
+		}
+	}
+	return volumeapi.Move{}, apierrors.NewNotFound(volumeapi.MoveResource.GroupResource(), name)
+}
 func (m *memoryRepository) ListMoves(ctx context.Context) ([]volumeapi.Move, error) {
 	if m.journalParents == nil {
 		return m.moves, nil

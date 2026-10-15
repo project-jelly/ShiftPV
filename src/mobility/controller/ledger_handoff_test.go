@@ -126,33 +126,32 @@ func testLedgerHandoffAdmission(t *testing.T, sourceAdmission bool) {
 	}()
 	<-started
 
-	// Destination ingress must wait. Source outflow must finish while the
-	// reader is paused; the old owner snapshot is a conservative upper bound.
-	var earlyErr error
-	completedEarly := false
+	// Destination ingress must return busy without committing. Source outflow
+	// may finish while the reader is paused: its old owner snapshot still
+	// provides a conservative upper bound for the later Move observation.
+	var handoffErr error
+	select {
+	case handoffErr = <-finished:
+	case <-ctx.Done():
+		close(paused.resume)
+		t.Fatal("owner handoff blocked while capacity admission held its Pool fence")
+	}
 	if sourceAdmission {
-		select {
-		case earlyErr = <-finished:
-			completedEarly = true
-		case <-ctx.Done():
+		if handoffErr != nil {
 			close(paused.resume)
-			t.Fatal("source reader unnecessarily blocked owner outflow and settlement")
+			t.Fatalf("source reader prevented independent owner outflow: %v", handoffErr)
 		}
-		if earlyErr == nil {
-			f.assertReserved(t, f.sourcePool.UID, 0)
-		}
+		f.assertReserved(t, f.sourcePool.UID, 0)
+	} else if !errors.Is(handoffErr, errPoolBusy) {
+		close(paused.resume)
+		t.Fatalf("destination ingress must remain fenced and return busy: %v", handoffErr)
 	} else {
-		// All race boundaries use channels. This deadline only verifies that
-		// a contending writer cannot finish while admission owns its fence.
-		blocked := time.NewTimer(time.Second)
-		select {
-		case earlyErr = <-finished:
-			completedEarly = true
-		case <-blocked.C:
-		case <-ctx.Done():
-			earlyErr, completedEarly = ctx.Err(), true
+		state, err := f.registry.Get(ctx, f.move.Spec.VolumeID)
+		if err != nil || !reflect.DeepEqual(state, f.observed.Volume) {
+			close(paused.resume)
+			t.Fatalf("busy handoff mutated source authority: state=%+v err=%v", state, err)
 		}
-		blocked.Stop()
+		f.assertReserved(t, f.destinationPool.UID, handoffCapacity)
 	}
 	close(paused.resume)
 
@@ -162,18 +161,24 @@ func testLedgerHandoffAdmission(t *testing.T, sourceAdmission bool) {
 	case <-ctx.Done():
 		t.Fatal("admission did not finish after releasing the snapshot barrier")
 	}
-	if !completedEarly {
-		select {
-		case earlyErr = <-finished:
-		case <-ctx.Done():
-			t.Fatal("owner handoff did not resume after admission released the Pool lock")
+	if !sourceAdmission {
+		// Busy work is retried from a fresh observation after the reader exits;
+		// no mutex waiter resumes with a stale snapshot.
+		var err error
+		f.move, err = f.registry.GetMove(ctx, f.move.Name)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if earlyErr != nil {
-		t.Fatalf("owner handoff/settlement failed: %v", earlyErr)
-	}
-	if completedEarly && !sourceAdmission {
-		t.Error("owner handoff and terminal settlement completed inside a capacity reader's Pool fence")
+		f.observed.Volume, err = f.registry.Get(ctx, f.move.Spec.VolumeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.reconciler.commitOwner(ctx, &f.move, f.observed); err != nil {
+			t.Fatalf("fresh owner handoff retry after fence release: %v", err)
+		}
+		if err := f.completeMove(ctx); err != nil {
+			t.Fatalf("handoff settlement after fence release: %v", err)
+		}
 	}
 	// The destination-only fence relies on this order. Reversing the lists
 	// can miss a new destination approval followed by a source owner outflow.

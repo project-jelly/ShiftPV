@@ -18,8 +18,8 @@ import (
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
-// A webhook can hold a Pod before any Move exists. Revisit those Pods in the
-// same serial pass as discovery and Move execution, including after a restart.
+// Synchronous owner-placement pass for contract callers. Run routes these Pods
+// through scanOwnerPlacements and the same Volume lane as discovery and Moves.
 func (r *Reconciler) reconcileOwnerPlacements(ctx context.Context) error {
 	pods, err := r.Client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: admission.ManagedLabel + "=true"})
 	if err != nil {
@@ -56,6 +56,10 @@ type ownerPlacementIdentity struct {
 }
 
 func (r *Reconciler) reconcileOwnerPlacement(ctx context.Context, observed *corev1.Pod) error {
+	return r.reconcileOwnerPlacementInVolume(ctx, "", observed)
+}
+
+func (r *Reconciler) reconcileOwnerPlacementInVolume(ctx context.Context, volumeID string, observed *corev1.Pod) error {
 	var expected *ownerPlacementIdentity
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		pod, err := r.Client.CoreV1().Pods(observed.Namespace).Get(ctx, observed.Name, metav1.GetOptions{})
@@ -75,6 +79,9 @@ func (r *Reconciler) reconcileOwnerPlacement(ctx context.Context, observed *core
 		if err != nil || identity == nil {
 			return err
 		}
+		if volumeID != "" && identity.copy.VolumeID != volumeID {
+			return nil // The next scan must route the current binding to its own lane.
+		}
 		if expected == nil {
 			expected = identity
 		} else if *expected != *identity {
@@ -85,8 +92,7 @@ func (r *Reconciler) reconcileOwnerPlacement(ctx context.Context, observed *core
 			return fmt.Errorf("observe Moves before owner placement: %w", err)
 		}
 		for _, move := range moves {
-			journalUnsettled := move.Status.CleanupPhase != "" && move.Status.CleanupPhase != cleanupapi.PhaseCompleted
-			if move.Spec.VolumeID == identity.copy.VolumeID && (!supportedMoveProtocol(move) || journalUnsettled || !volumeapi.MoveCleanupSettled(move)) {
+			if moveBlocksOwnerPlacement(move, identity.copy.VolumeID) {
 				return nil
 			}
 		}
@@ -102,6 +108,11 @@ func (r *Reconciler) reconcileOwnerPlacement(ctx context.Context, observed *core
 		}
 		return r.releaseOwnerPlacement(ctx, pod, fresh.copy.NodeName)
 	})
+}
+
+func moveBlocksOwnerPlacement(move volumeapi.Move, volumeID string) bool {
+	journalUnsettled := move.Status.CleanupPhase != "" && move.Status.CleanupPhase != cleanupapi.PhaseCompleted
+	return move.Spec.VolumeID == volumeID && (!supportedMoveProtocol(move) || journalUnsettled || !volumeapi.MoveCleanupSettled(move))
 }
 
 // Pin and release together: a successful Update never exposes an unpinned Pod.

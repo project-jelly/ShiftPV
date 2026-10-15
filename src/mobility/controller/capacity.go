@@ -14,6 +14,7 @@ import (
 )
 
 var errCapacityApprovalPersistence = errors.New("capacity approval persistence failed")
+var errPoolBusy = errors.New("Pool capacity lock is busy")
 
 func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	if observed.DestinationNode == "" || r.CapacityProbe == nil || r.PoolLocks == nil {
@@ -128,7 +129,10 @@ func (r *Reconciler) destinationPools(ctx context.Context, move volumeapi.Move, 
 }
 
 func (r *Reconciler) approveDestinationPool(ctx context.Context, move *volumeapi.Move, pool volumeapi.Pool) (string, error) {
-	unlock := r.PoolLocks.Lock(pool.UID)
+	unlock, acquired := r.PoolLocks.TryLock(pool.UID)
+	if !acquired {
+		return "", errPoolBusy
+	}
 	defer unlock()
 	requested, logicalReserved, physicalPending, limit, err := r.destinationCapacityForPool(ctx, *move, pool)
 	if err != nil {

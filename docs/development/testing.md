@@ -119,6 +119,9 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | `mobility/controller`: `native_cleanup_test.go`, `cleanup_job_reentry_test.go`; `kubernetes/helperpod`: `cleanup_backend_test.go` | Node receipt 이후 fresh absence 전 hold 유지; Node/Job 동시 선택에서 한 backend만 실행; controller 재진입도 Job 완료 또는 Job·Pod 부재 확인 전 scan/hold 해제를 막음 |
 | `e2e/kind/mobility/native-cleanup.sh` (node-cleanup) | 실제 API receipt 거절·commit 이후 drain·Node/controller 교체 뒤 같은 operation과 local receipt 재사용, fresh absence 후 완료·PVC/PV/checksum 보존 |
 | `mobility/controller`: `owner_placement_test.go`, `owner_placement_boundary_test.go` | 실제 admission patch → Move 생성 전 uncordon·controller 재시작 → 같은 Pod gate 회수, 충돌 뒤 UID/binding/owner 재검증, 사용자 제약 보존과 Pod별 오류 격리 |
+| `mobility/controller`: `dispatcher_boundary_test.go`, `dispatch_scan_test.go`, `discovery_observations_test.go` | 실제 Registry/RV CAS + A의 API 대기 중 B 진행·동일 Volume 직렬화·재시작 relist; stale UID/잘못된 lane 거절·terminal GC·통계 합산 |
+| `pool/capacity`: `locker_test.go`; `mobility/controller`: `pool_busy_test.go`, `ledger_handoff_test.go` | 공유 Lock/TryLock 상호배제, busy 중 placement/hold 보존, fresh retry·owner CAS·용량 원장 경계 |
+| `node/executor`: `watch_progress_linux_test.go` | 실제 Node watch·파일 효과 + A cleanup 대기 중 독립 Pool B 생성, A 재개 뒤 exact receipt 정산 |
 | `e2e/kind/mobility/preflight.sh` (g1) | source-only workload의 replacement가 gated 상태일 때 uncordon → 같은 Pod UID Ready·checksum 보존·Move 미생성까지 실제 webhook/controller/scheduler/kubelet로 검증 |
 | `node/ownership`: `pool_release_test.go` | 실제 marker lock + 중단된 임시 파일 회수 + symlink/hardlink/권한/소유자 불일치 보존 |
 | `cmd/node`: `TestNodeBackgroundBudgetDoesNotBlockForegroundRequests` | 실제 Collector/Registry/REST clients + 차단된 GC limiter + HTTP 서버 |
