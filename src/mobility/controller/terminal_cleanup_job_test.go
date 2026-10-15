@@ -26,108 +26,111 @@ import (
 // after releasing ActiveMove. Repair may observe its old Job; it cannot start
 // an executor or release protection while that executor is still present.
 func TestTerminalMoveJobReceiptWaitsForExecutorSettlement(t *testing.T) {
-	for _, phase := range []string{"Succeeded", "Blocked"} {
-		for _, settlement := range []string{"Job complete", "Job absent but Pod remains"} {
-			t.Run(phase+"/"+settlement, func(t *testing.T) {
-				ctx := context.Background()
-				r, repo, _, move, incoming := settledTerminalMoveFixture(t, phase, recoveryRecovered, recoveryCapacitySettled)
-				if phase == "Succeeded" {
-					move.Status.RecoveryPhase, move.Status.CapacityReason = "", ""
-					repo.moves[0] = move
-				}
-				spec := rollbackCleanupSpec(move, incoming)
-				if phase == "Succeeded" {
-					var err error
-					spec, err = moveCleanupSpec(move)
-					if err != nil {
-						t.Fatal(err)
+	for _, cleanupPhase := range []string{cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence} {
+		for _, phase := range []string{"Succeeded", "Blocked"} {
+			for _, settlement := range []string{"Job complete", "Job absent but Pod remains"} {
+				t.Run(cleanupPhase+"/"+phase+"/"+settlement, func(t *testing.T) {
+					ctx := context.Background()
+					r, repo, _, move, incoming := settledTerminalMoveFixture(t, phase, recoveryRecovered, recoveryCapacitySettled)
+					if phase == "Succeeded" {
+						move.Status.RecoveryPhase, move.Status.CapacityReason = "", ""
+						repo.moves[0] = move
 					}
-				}
-				kube := r.Client.(*fake.Clientset)
-				assignJobUIDs(kube)
-				job := terminalVerifyingJob(t, r, kube, spec)
-				state := repo.volumes[move.Spec.VolumeID]
-				if state.ActiveMove != "" {
-					t.Fatal("fixture has not released ActiveMove")
-				}
-				stripMoveProtection(t, repo, move)
-				reconcile := func() error {
-					moves, err := repo.ListMoves(ctx)
-					if err != nil {
-						return err
-					}
-					restarted := newTestReconciler(kube, repo, withCleanupsFrom(r))
-					return restarted.reconcilePersistedMove(ctx, moves[0])
-				}
-				// The first pass only restores the old journal's protection.
-				if err := reconcile(); err != nil {
-					t.Fatal(err)
-				}
-				kube.ClearActions()
-				assertHeld := func() {
-					t.Helper()
-					if err := reconcile(); !errors.Is(err, context.DeadlineExceeded) {
-						t.Fatalf("terminal repair bypassed live executor: %v", err)
-					}
-					current, err := r.Cleanups.Get(ctx, spec.Authority)
-					if err != nil || current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.AbsenceProof != nil {
-						t.Fatalf("terminal repair opened absence: %+v %v", current, err)
-					}
-					pool, err := r.Cleanups.Client.Resource(volumeapi.PoolResource).Get(ctx, spec.Target.PoolName, metav1.GetOptions{})
-					if err != nil {
-						t.Fatal(err)
-					}
-					epoch, _, _ := unstructured.NestedInt64(pool.Object, "spec", "scanEpoch")
-					if epoch != 0 || !slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) || repo.moves[0].Status.CapacityApproved || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
-						t.Fatalf("terminal wait changed authority, capacity or protection: epoch=%d move=%+v", epoch, repo.moves[0])
-					}
-					for _, action := range kube.Actions() {
-						if action.GetVerb() != "get" && action.GetVerb() != "list" {
-							t.Fatalf("terminal wait started/mutated executor: %+v", action)
+					spec := rollbackCleanupSpec(move, incoming)
+					if phase == "Succeeded" {
+						var err error
+						spec, err = moveCleanupSpec(move)
+						if err != nil {
+							t.Fatal(err)
 						}
 					}
-				}
-				assertHeld()
-				if settlement == "Job complete" {
-					job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
-					if _, err := kube.BatchV1().Jobs("system").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
-						t.Fatal(err)
+					kube := r.Client.(*fake.Clientset)
+					assignJobUIDs(kube)
+					job := terminalVerifyingJob(t, r, kube, spec)
+					before := seedCleanupObservationPhase(t, r, spec, cleanupPhase)
+					state := repo.volumes[move.Spec.VolumeID]
+					if state.ActiveMove != "" {
+						t.Fatal("fixture has not released ActiveMove")
 					}
-				} else {
-					pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "terminal-cleanup-pod", Namespace: "system", UID: "cleanup-pod-uid", Labels: job.Spec.Template.Labels,
-						OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID}}}}
-					if _, err := kube.CoreV1().Pods("system").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-						t.Fatal(err)
+					stripMoveProtection(t, repo, move)
+					reconcile := func() error {
+						moves, err := repo.ListMoves(ctx)
+						if err != nil {
+							return err
+						}
+						restarted := newTestReconciler(kube, repo, withCleanupsFrom(r))
+						return restarted.reconcilePersistedMove(ctx, moves[0])
 					}
-					if err := kube.BatchV1().Jobs("system").Delete(ctx, job.Name, metav1.DeleteOptions{}); err != nil {
+					// The first pass only restores the old journal's protection.
+					if err := reconcile(); err != nil {
 						t.Fatal(err)
 					}
 					kube.ClearActions()
+					assertHeld := func() {
+						t.Helper()
+						if err := reconcile(); err != nil {
+							t.Fatalf("terminal repair did not return normal pending: %v", err)
+						}
+						current, err := r.Cleanups.Get(ctx, spec.Authority)
+						if err != nil || !reflect.DeepEqual(current.Status, before.Status) {
+							t.Fatalf("terminal pending changed receipt/fence: before=%+v after=%+v err=%v", before.Status, current.Status, err)
+						}
+						pool, err := r.Cleanups.Client.Resource(volumeapi.PoolResource).Get(ctx, spec.Target.PoolName, metav1.GetOptions{})
+						if err != nil {
+							t.Fatal(err)
+						}
+						epoch, _, _ := unstructured.NestedInt64(pool.Object, "spec", "scanEpoch")
+						if epoch != cleanupObservationEpoch(cleanupPhase) || !slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) || repo.moves[0].Status.CapacityApproved || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
+							t.Fatalf("terminal wait changed authority, capacity or protection: epoch=%d move=%+v", epoch, repo.moves[0])
+						}
+						for _, action := range kube.Actions() {
+							if action.GetVerb() != "get" && action.GetVerb() != "list" {
+								t.Fatalf("terminal wait started/mutated executor: %+v", action)
+							}
+						}
+					}
 					assertHeld()
-					if err := kube.CoreV1().Pods("system").Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+					if settlement == "Job complete" {
+						job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+						if _, err := kube.BatchV1().Jobs("system").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "terminal-cleanup-pod", Namespace: "system", UID: "cleanup-pod-uid", Labels: job.Spec.Template.Labels,
+							OwnerReferences: []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID}}}}
+						if _, err := kube.CoreV1().Pods("system").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+							t.Fatal(err)
+						}
+						if err := kube.BatchV1().Jobs("system").Delete(ctx, job.Name, metav1.DeleteOptions{}); err != nil {
+							t.Fatal(err)
+						}
+						kube.ClearActions()
+						assertHeld()
+						if err := kube.CoreV1().Pods("system").Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					kube.ClearActions()
+					if err := reconcile(); err != nil {
 						t.Fatal(err)
 					}
-				}
-				kube.ClearActions()
-				if err := reconcile(); err != nil {
-					t.Fatal(err)
-				}
-				current, err := r.Cleanups.Get(ctx, spec.Authority)
-				if err != nil || current.Status.Phase != cleanupapi.PhaseCompleted || current.Status.AbsenceProof == nil {
-					t.Fatalf("terminal cleanup did not settle: %+v %v", current, err)
-				}
-				if err := reconcile(); err != nil {
-					t.Fatal(err)
-				}
-				if slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) || repo.moves[0].Status.CapacityApproved || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
-					t.Fatal("terminal settlement changed released authority or retained protection")
-				}
-				for _, action := range kube.Actions() {
-					if action.GetVerb() != "get" && action.GetVerb() != "list" {
-						t.Fatalf("terminal observation started/mutated executor: %+v", action)
+					current, err := r.Cleanups.Get(ctx, spec.Authority)
+					if err != nil || current.Status.Phase != cleanupapi.PhaseCompleted || current.Status.AbsenceProof == nil {
+						t.Fatalf("terminal cleanup did not settle: %+v %v", current, err)
 					}
-				}
-			})
+					if err := reconcile(); err != nil {
+						t.Fatal(err)
+					}
+					if slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) || repo.moves[0].Status.CapacityApproved || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
+						t.Fatal("terminal settlement changed released authority or retained protection")
+					}
+					for _, action := range kube.Actions() {
+						if action.GetVerb() != "get" && action.GetVerb() != "list" {
+							t.Fatalf("terminal observation started/mutated executor: %+v", action)
+						}
+					}
+				})
+			}
 		}
 	}
 }
@@ -162,12 +165,14 @@ func TestTerminalJobObservationDistinguishesLostPoolFromTransientRead(t *testing
 					return true, nil, readFailure
 				})
 			}
-			// The real observer returns no journal on either error. The terminal
-			// caller must preserve its original exact journal for classification.
-			observed, err := r.CleanupOperator.Reclaim(ctx, before, r.Cleanups)
-			if err == nil || !reflect.DeepEqual(observed, cleanupapi.Cleanup{}) || missing && !errors.Is(err, volumeapi.ErrPoolNotFound) || !missing && !errors.Is(err, readFailure) {
+			// The real observer preserves its current journal on either error.
+			observed, _, err := r.CleanupOperator.AdvanceReclaim(ctx, before, r.Cleanups)
+			if err == nil || !reflect.DeepEqual(observed, before) || missing && !errors.Is(err, volumeapi.ErrPoolNotFound) || !missing && !errors.Is(err, readFailure) {
 				t.Fatalf("unexpected observer error/result: %+v %v", observed, err)
 			}
+			// An observer is still allowed to return zero with an error. Ensure
+			// classification uses the caller's original exact journal in that case.
+			r.CleanupOperator = zeroCleanupOnError{r.CleanupOperator.AdvanceReclaim}
 			kube.ClearActions()
 			if err := r.settleTerminalCleanup(ctx, move); err == nil {
 				t.Fatal("observation error was hidden")
@@ -204,19 +209,35 @@ func TestTerminalJobObservationDistinguishesLostPoolFromTransientRead(t *testing
 	}
 }
 
+type zeroCleanupOnError struct {
+	observe func(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error)
+}
+
+func (o zeroCleanupOnError) AdvanceReclaim(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+	current, ready, err := o.observe(ctx, expected, store)
+	if err != nil {
+		return cleanupapi.Cleanup{}, false, err
+	}
+	return current, ready, nil
+}
+
 func terminalVerifyingJob(t *testing.T, r *Reconciler, kube *fake.Clientset, spec cleanupapi.Spec) *batchv1.Job {
+	return verifyingCleanupJob(t, r, kube, spec, 10*time.Millisecond)
+}
+
+func verifyingCleanupJob(t *testing.T, r *Reconciler, kube *fake.Clientset, spec cleanupapi.Spec, timeout time.Duration) *batchv1.Job {
 	t.Helper()
 	ctx := context.Background()
 	prepareLegacyCleanupPool(t, r.Cleanups, spec.Target.PoolName)
 	registry := &volumeapi.Registry{Client: r.Cleanups.Client}
-	helper := &helperpod.Runner{Client: kube, Namespace: "system", Pools: registry, Image: "helper", Timeout: 10 * time.Millisecond}
+	helper := &helperpod.Runner{Client: kube, Namespace: "system", Pools: registry, Image: "helper", Timeout: timeout}
 	r.CleanupOperator = &nodeexecutor.Client{Volumes: registry, Fallback: helper, Timeout: helper.Timeout}
 	current, err := r.Cleanups.Ensure(ctx, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := helper.Reclaim(ctx, current, r.Cleanups); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("live helper setup: %v", err)
+	if _, ready, err := helper.AdvanceReclaim(ctx, current, r.Cleanups); err != nil || ready {
+		t.Fatalf("live helper setup: ready=%t err=%v", ready, err)
 	}
 	current, err = r.Cleanups.Get(ctx, spec.Authority)
 	if err != nil {

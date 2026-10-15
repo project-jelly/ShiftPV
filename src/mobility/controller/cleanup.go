@@ -12,6 +12,8 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
+var errCleanupPending = errors.New("cleanup executor settlement is pending")
+
 func (r *Reconciler) cleanupState(ctx context.Context, move volumeapi.Move) (complete, failed bool, err error) {
 	spec, err := moveCleanupSpec(move)
 	if err != nil {
@@ -63,13 +65,16 @@ func (r *Reconciler) ensureCleanupSpec(ctx context.Context, move *volumeapi.Move
 	if request.Status.Phase == cleanupapi.PhaseCompleted {
 		return nil
 	}
-	// A Job can persist its receipt before exiting. Re-entry must still
-	// observe its termination (or Job and Pod absence) before opening a scan.
-	jobVerifying := request.Status.Phase == cleanupapi.PhaseVerifying && request.Status.Executor != nil && request.Status.Executor.Kind == ""
-	if jobVerifying || request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
-		request, err = r.CleanupOperator.Reclaim(ctx, request, r.Cleanups)
+	// Historical releases could already open an absence fence before a Job
+	// exited. Observe that executor before either opening or consuming a fence.
+	if cleanupJobNeedsSettlement(request) || request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
+		var ready bool
+		request, ready, err = r.CleanupOperator.AdvanceReclaim(ctx, request, r.Cleanups)
 		if err != nil {
 			return err
+		}
+		if !ready {
+			return errCleanupPending
 		}
 	}
 	if request.Status.Phase == cleanupapi.PhaseCompleted {
@@ -192,12 +197,15 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return r.reviewCleanupJournal(ctx, current, "TerminalMoveCleanupIntentUnfinished",
 			fmt.Sprintf("terminal Move carries a cleanup intent still in phase %q with no purge receipt", current.Status.Phase))
 	}
-	observed, err := r.observeTerminalExecutor(ctx, current)
+	observed, ready, err := r.observeTerminalExecutor(ctx, current)
 	if err != nil {
 		if errors.Is(err, volumeapi.ErrPoolNotFound) {
 			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
 		}
 		return err
+	}
+	if !ready {
+		return nil
 	}
 	current = observed
 	if err := r.driveCleanupAbsence(ctx, current); err != nil {
@@ -209,17 +217,22 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 	return nil
 }
 
-func (r *Reconciler) observeTerminalExecutor(ctx context.Context, current cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
-	if current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor == nil || current.Status.Executor.Kind != "" {
-		return current, nil
+func cleanupJobNeedsSettlement(current cleanupapi.Cleanup) bool {
+	return (current.Status.Phase == cleanupapi.PhaseVerifying || current.Status.Phase == cleanupapi.PhaseConfirmingAbsence) &&
+		current.Status.Executor != nil && current.Status.Executor.Kind == ""
+}
+
+func (r *Reconciler) observeTerminalExecutor(ctx context.Context, current cleanupapi.Cleanup) (cleanupapi.Cleanup, bool, error) {
+	if !cleanupJobNeedsSettlement(current) {
+		return current, true, nil
 	}
 	if r.CleanupOperator == nil {
-		return current, fmt.Errorf("cleanup executor settlement observer is not configured")
+		return current, false, fmt.Errorf("cleanup executor settlement observer is not configured")
 	}
-	// Verifying cannot return to Pending/Running, and its receipt and executor
-	// are immutable in Store. Reclaim therefore only observes the bound Job's
-	// termination; it needs neither ActiveMove nor new execution authority.
-	return r.CleanupOperator.Reclaim(ctx, current, r.Cleanups)
+	// Receipt phases cannot return to Pending/Running; receipt and executor
+	// are immutable in Store. Advance only observes the bound Job's termination
+	// here and needs neither ActiveMove nor new execution authority.
+	return r.CleanupOperator.AdvanceReclaim(ctx, current, r.Cleanups)
 }
 
 // driveCleanupAbsence finishes a receipt-bearing journal through its Pool

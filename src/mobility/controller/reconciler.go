@@ -66,7 +66,7 @@ type Reconciler struct {
 	ServiceAccountName         string
 	Cleanups                   *cleanupapi.Store
 	CleanupOperator            interface {
-		Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error)
+		AdvanceReclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error)
 	}
 	Interval                time.Duration
 	MoveJournalRetention    time.Duration

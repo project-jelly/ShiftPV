@@ -58,6 +58,11 @@ func (e *localProgressEffects) CreateCopy(ctx context.Context, copy volume.CopyI
 func (*localProgressEffects) FinalizeCreate(context.Context, volume.CopyIdentity) error { return nil }
 
 func (e *localProgressEffects) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, journal helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+	// This in-process executor has already settled when it returns a receipt.
+	// Re-entry observes that result; it must not start another destructive run.
+	if cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
+		return cleanup, nil
+	}
 	if _, err := e.volumes.CleanupPoolForIdentity(ctx, cleanup.Spec.Target.PoolName, cleanup.Spec.Target.PoolUID, cleanup.Spec.Target.NodeName); err != nil {
 		return cleanupapi.Cleanup{}, err
 	}
