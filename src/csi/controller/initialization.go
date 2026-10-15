@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"google.golang.org/grpc/codes"
@@ -16,7 +17,16 @@ func (s *Service) resumeInitializingCreate(ctx context.Context, existing volumea
 		// Old releases could leave a spec without an admitted Pool. No effect
 		// was authorized; re-admit the same request under its exact UID before
 		// recording the newly selected Pool reservation.
-		return s.placeNewCreate(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, parameters, existing.UID)
+		state, err := s.placeNewCreate(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, parameters, existing.UID)
+		if status.Code(err) == codes.ResourceExhausted {
+			// The recorded initialNode is immutable even for a scheduler-managed
+			// consumer. Do not tell the provisioner to reschedule this request.
+			if s.RetryRequests != nil {
+				s.RetryRequests.Register(parameters[PVCNamespaceKey], parameters[PVCNameKey], strings.TrimPrefix(existing.RequestName, "pvc-"), existing.InitialNode, requestedPoolGroup(parameters), existing.CapacityBytes)
+			}
+			return volumeapi.State{}, status.Errorf(codes.Unavailable, "%s; recorded creation must preserve node %q and retry", status.Convert(err).Message(), existing.InitialNode)
+		}
+		return state, err
 	}
 	ref := existing.InitialPool
 	pool, err := s.CapacityPools.PoolForIdentity(ctx, ref.Name, ref.UID, existing.InitialNode)

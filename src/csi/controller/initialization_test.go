@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,6 +22,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -169,6 +171,78 @@ func TestLegacyInitializationsReadmitWithoutBlockingEachOther(t *testing.T) {
 	}
 	if probe.callCount() != 2 {
 		t.Fatalf("legacy requests skipped fresh admission: %d", probe.callCount())
+	}
+}
+
+func TestCapacityWaitRetainsLegacyInitialNode(t *testing.T) {
+	for _, shortage := range []string{"quota", "available bytes"} {
+		for _, lifecycle := range []string{"legacy initialization", "new request"} {
+			t.Run(shortage+"/"+lifecycle, func(t *testing.T) {
+				ctx := context.Background()
+				api, registry, newService, probe := initializationFixture(t)
+				req := validCreateRequest("worker-a")
+				req.Parameters = map[string]string{PVCNamespaceKey: "test", PVCNameKey: "claim"}
+				id, _ := volume.IDFromName(req.Name)
+				var original volumeapi.State
+				if lifecycle == "legacy initialization" {
+					legacyInitialization(t, api, req.Name)
+					original, _ = registry.Get(ctx, id)
+				}
+				if shortage == "quota" {
+					competitor := validCreateRequest("worker-a")
+					competitor.Name, competitor.CapacityRange.RequiredBytes = "pvc-full-pool", 1<<30
+					if _, err := newService().CreateVolume(ctx, competitor); err != nil {
+						t.Fatalf("prepare occupied Pool: %v", err)
+					}
+				} else {
+					probe.stats.AvailableBytes = 0
+				}
+				service := newService()
+				service.ConsumerPlacement = &placementStub{result: consumer.Result{Placement: consumer.Reschedulable, Reason: "scheduler-owned consumer"}}
+				retries := &retryRecorder{}
+				service.RetryRequests = retries
+				_, err := service.CreateVolume(ctx, req)
+				if lifecycle == "new request" {
+					if status.Code(err) != codes.ResourceExhausted || len(retries.calls) != 0 {
+						t.Fatalf("new request lost rescheduling: err=%v retries=%+v", err, retries.calls)
+					}
+					if _, err := registry.Get(ctx, id); !apierrors.IsNotFound(err) {
+						t.Fatalf("denied new request acquired an intent: %v", err)
+					}
+					return
+				}
+				if status.Code(err) != codes.Unavailable {
+					t.Fatalf("legacy immutable initialNode would be released: %v", err)
+				}
+				want := consumer.Request{Namespace: "test", Name: "claim", UID: "uid", Node: "worker-a"}
+				if len(retries.calls) != 1 || retries.calls[0] != want || retries.bytes[0] != original.CapacityBytes || retries.groups[0] != volumeapi.DefaultPoolGroup {
+					t.Fatalf("legacy capacity wait lost its original placement: %+v", retries)
+				}
+				waiting, err := registry.Get(ctx, id)
+				if err != nil || waiting.UID != original.UID || !waiting.Initializing() || waiting.InitialPool != nil || service.Operator.(*fakeDirectoryOperator).createCalls != 0 {
+					t.Fatalf("capacity wait gained execution authority: state=%+v err=%v", waiting, err)
+				}
+				// Recovery on the same node must converge using the same Volume UID.
+				pool, _ := api.Resource(volumeapi.PoolResource).Get(ctx, "pool-a", metav1.GetOptions{})
+				if err := unstructured.SetNestedField(pool.Object, "2Gi", "spec", "capacity", "limit"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := api.Resource(volumeapi.PoolResource).Update(ctx, pool, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				probe.stats.AvailableBytes = 1 << 30
+				if _, err := service.Client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "test"}}, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := service.CreateVolume(ctx, req); err != nil {
+					t.Fatalf("legacy capacity wait did not resume: %v", err)
+				}
+				completed, _ := registry.Get(ctx, id)
+				if completed.UID != original.UID || completed.Phase != volumeapi.PhaseReady || completed.InitialNode != "worker-a" || completed.CurrentCopy == nil || completed.CurrentCopy.PoolUID != "pool-a-uid" {
+					t.Fatalf("capacity recovery changed placement: %+v", completed)
+				}
+			})
+		}
 	}
 }
 
