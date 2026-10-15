@@ -205,7 +205,8 @@ func (r *Reconciler) recoveryClaim(ctx context.Context, move volumeapi.Move) (*c
 	if err != nil {
 		return nil, err
 	}
-	if !validBinding(pv, claim, move.Spec.VolumeID) {
+	if !validBinding(pv, claim, move.Spec.VolumeID) ||
+		(move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && !preparedBindingMatches(move, pv, claim)) {
 		return nil, fmt.Errorf("PV/PVC binding or volume handle changed")
 	}
 	namespace, err := r.Client.CoreV1().Namespaces().Get(ctx, claim.Namespace, metav1.GetOptions{})
@@ -263,6 +264,9 @@ func (r *Reconciler) recoveryAdvance(ctx context.Context, move volumeapi.Move, p
 }
 
 func (r *Reconciler) recoveryError(ctx context.Context, move volumeapi.Move, reason string, err error) error {
+	if errors.Is(err, errMoveStatusPersistence) {
+		return err
+	}
 	previous := move.Status
 	move.Status.RecoveryReason = reason
 	move.Status.RecoveryMessage = err.Error()

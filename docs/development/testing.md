@@ -109,6 +109,9 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | `csi/controller`: `TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode`, `TestConcurrentAdmissionToSamePoolCannotOversubscribe` | 실제 Pool Locker + capacity probe 지연 + durable hold |
 | `csi/controller`: `TestCreateInitializationRecoversAPIWriteBoundaries`, `TestLegacyInitializationsReadmitWithoutBlockingEachOther` | 실제 Registry/ledger + Create·status 실패/응답 유실 + 재시작 + 다른 Pool 진행 |
 | `csi/controller`: `placement_progress_test.go`, `TestMissingPoolUsesPlacementAuthority` | 등록 부재·일시 NotReady·소비자 배치 권한을 구분하고 원래 생성 intent·예약을 보존 |
+| `mobility/controller`: `preparation_boundary_test.go`, `prepared_execution_test.go`, `prepared_cancellation_test.go` | 실제 Registry/RV CAS + 5Gi에 2Gi 4개 요청, hold 전환·응답 유실·지연 claim/Moving PUT·binding 부재·placement NotFound와 취소 정산 |
+| `e2e/kind/mobility/preparation.sh`, `legacy-upgrade.sh` (preparation) | 실제 scheduler/API admission + 2개 hold/4개 원본 유지, restart, 2개 완료/2개 원본 유지; 구버전 controller의 in-flight legacy Move를 candidate가 같은 UID로 완료 |
+| `e2e/kind/mobility-node-restarts.sh` (source/destination) | 실행 승인 전 노드 장애 → 취소·같은 held Pod 복구; test-owned placement finalizer로 삭제 대기 중 hold 유지와 NotFound 후 정산을 검증. source에 쓴 PVC별 고유 데이터로 재생성 없는 보존 확인 |
 | `mobility/controller`: `approval_recovery_test.go` | 승인 직후 source 장애 + 원자적 copy 계획 + 구버전 승인·재시작·fresh absence 전 hold 유지 |
 | `mobility/controller`: `owner_placement_test.go`, `owner_placement_boundary_test.go` | 실제 admission patch → Move 생성 전 uncordon·controller 재시작 → 같은 Pod gate 회수, 충돌 뒤 UID/binding/owner 재검증, 사용자 제약 보존과 Pod별 오류 격리 |
 | `e2e/kind/mobility/preflight.sh` (g1) | source-only workload의 replacement가 gated 상태일 때 uncordon → 같은 Pod UID Ready·checksum 보존·Move 미생성까지 실제 webhook/controller/scheduler/kubelet로 검증 |

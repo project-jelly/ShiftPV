@@ -1,0 +1,12 @@
+{{- if .Values.mobility.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "shiftpv.placementPriorityClassName" . }}
+  labels:
+    {{- include "shiftpv.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+value: 0
+globalDefault: false
+preemptionPolicy: Never
+description: ShiftPV preparation reservations wait for resources without preempting workloads.
+{{- end }}

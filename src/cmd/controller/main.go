@@ -67,6 +67,7 @@ type config struct {
 	mobilityEnabled                           bool
 	mobilityInterval, moveJournalRetention    time.Duration
 	mobilityImage                             string
+	mobilityPlacementPriorityClass            string
 	webhookAddress, webhookService            string
 	webhookSecret, webhookConfiguration       string
 	validationConfiguration                   string
@@ -96,6 +97,7 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.mobilityInterval, "mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
 	flag.DurationVar(&cfg.moveJournalRetention, "move-journal-retention", mobilitycontroller.DefaultMoveJournalRetention, "minimum retention for settled terminal ShiftPVMove journals")
 	flag.StringVar(&cfg.mobilityImage, "mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
+	flag.StringVar(&cfg.mobilityPlacementPriorityClass, "mobility-placement-priority-class", mobilitycontroller.DefaultPlacementPriorityClassName, "existing value-0 PriorityClass with preemptionPolicy Never for preparation reservations")
 	flag.StringVar(&cfg.webhookAddress, "webhook-listen-address", ":9443", "mobility admission HTTPS listen address")
 	flag.StringVar(&cfg.webhookService, "webhook-service-name", "shiftpv-webhook", "mobility admission Service name")
 	flag.StringVar(&cfg.webhookSecret, "webhook-tls-secret-name", "shiftpv-webhook-tls", "managed mobility admission TLS Secret name")
@@ -333,7 +335,7 @@ func startMobility(ctx context.Context, cfg config, components mobilityComponent
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: components.client.CoreV1().Events("")})
 	eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 	wake := mobilitycontroller.WatchEvents(ctx, components.client, components.dynamicClient, cfg.namespace)
-	reconciler := &mobilitycontroller.Reconciler{Client: components.client, Repository: components.volumes, CapacityProbe: components.operator, PoolLocks: components.poolLocks, Namespace: cfg.namespace, HelperImage: cfg.mobilityImage, ServiceAccountName: cfg.helperServiceAccount, Cleanups: components.cleanups, CleanupOperator: components.operator, Interval: cfg.mobilityInterval, MoveJournalRetention: cfg.moveJournalRetention, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
+	reconciler := &mobilitycontroller.Reconciler{Client: components.client, Repository: components.volumes, CapacityProbe: components.operator, PoolLocks: components.poolLocks, Namespace: cfg.namespace, HelperImage: cfg.mobilityImage, PlacementPriorityClassName: cfg.mobilityPlacementPriorityClass, ServiceAccountName: cfg.helperServiceAccount, Cleanups: components.cleanups, CleanupOperator: components.operator, Interval: cfg.mobilityInterval, MoveJournalRetention: cfg.moveJournalRetention, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
 	if components.exporter != nil {
 		components.exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
 		reconciler.ObserveDiscovery = components.exporter.ObserveDiscovery

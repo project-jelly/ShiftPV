@@ -46,8 +46,11 @@ func TestContainerSecurityContextRequiresRunAsUserKey(t *testing.T) {
 }
 
 type renderedObject struct {
-	Kind     string `json:"kind"`
-	Metadata struct {
+	Kind             string `json:"kind"`
+	Value            *int32 `json:"value"`
+	GlobalDefault    *bool  `json:"globalDefault"`
+	PreemptionPolicy string `json:"preemptionPolicy"`
+	Metadata         struct {
 		Name        string            `json:"name"`
 		Namespace   string            `json:"namespace"`
 		Labels      map[string]string `json:"labels"`

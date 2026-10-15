@@ -21,6 +21,15 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 	if err != nil {
 		return r.recordMoveError(ctx, &move, previous, "ObservationFailed", "failed to observe Kubernetes state", err)
 	}
+	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && !move.Status.CapacityApproved {
+		reason, err := r.preparedExecutionChanged(ctx, move, observed)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			return r.requestPreparationCancellation(ctx, &move, reason)
+		}
+	}
 	if observed.PendingObsolete {
 		klog.Infof("deleting unstarted ShiftPVMove %s because source node %s is schedulable", move.Name, move.Spec.SourceNode)
 		if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
@@ -31,6 +40,9 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 	decision, err := fsm.Decide(fsm.Phase(move.Status.Phase), observed.FSM)
 	if err != nil {
 		return r.recordMoveError(ctx, &move, previous, "ActionFailed", "failed to decide the next mobility action", err)
+	}
+	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && !move.Status.CapacityApproved && decision.Next == fsm.PhaseBlocked {
+		return r.requestPreparationCancellation(ctx, &move, decision.Reason)
 	}
 	if err := r.execute(ctx, &move, observed, decision); err != nil {
 		if errors.Is(err, errCapacityApprovalPersistence) {

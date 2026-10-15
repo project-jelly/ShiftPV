@@ -254,5 +254,6 @@ func pvcNames(spec corev1.PodSpec) map[string]bool {
 // EvictionRequested only matters in Evicting); do not unify them blindly.
 func preEviction(move volumeapi.Move) bool {
 	return !move.Status.EvictionRequested && (move.Status.Phase == "" || move.Status.Phase == string(fsm.PhasePending) ||
-		move.Status.Phase == string(fsm.PhaseLocking) || move.Status.Phase == string(fsm.PhaseEvicting))
+		move.Status.Phase == string(fsm.PhaseLocking) || move.Status.Phase == string(fsm.PhaseEvicting) ||
+		move.Status.Phase == string(fsm.PhasePreparing) || move.Status.Phase == string(fsm.PhaseStartingDisruption))
 }

@@ -40,7 +40,8 @@ func (r *Reconciler) observeBinding(ctx context.Context, move volumeapi.Move, re
 	result.Claim = claim
 	// Names can be reused after PVC/namespace deletion while Retain PVs and
 	// ShiftPVVolumes survive. Never associate that old volume with the new Pod.
-	if !validBinding(result.PV, claim, move.Spec.VolumeID) {
+	if !validBinding(result.PV, claim, move.Spec.VolumeID) ||
+		(move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && move.Status.SourceCopy != nil && !preparedBindingMatches(move, result.PV, claim)) {
 		result.FSM.UnsafeReason = "VolumeBindingMismatch"
 		result.FSM.SourceAuthorityInvalid = true
 		return true, nil
@@ -117,6 +118,12 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 		}
 		if result.Replacement == nil {
 			result.Replacement = pod.DeepCopy()
+		} else if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 {
+			// Do not hide a second live consumer behind the first held Pod.
+			// Preparation may not reserve or disrupt this unsupported shape.
+			result.FSM.UnsafeReason = "MultipleConsumers"
+			result.FSM.PreflightDeferred = true
+			return true, nil
 		}
 	}
 	return false, nil

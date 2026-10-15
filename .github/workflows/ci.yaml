@@ -314,7 +314,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [g1, g2, g3]
+        group: [g1, g2, g3, preparation]
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig

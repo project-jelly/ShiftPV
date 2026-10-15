@@ -16,6 +16,8 @@ import (
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
+var errMoveStatusPersistence = errors.New("Move status persistence failed; re-observation required")
+
 type progressSnapshot struct {
 	Phase                string
 	RecoveryPhase        string
@@ -50,14 +52,25 @@ func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move
 	if move.Status.LastProgressTime == "" || progressOf(previous) != progressOf(move.Status) {
 		move.Status.LastProgressTime = now
 	}
-	if err := r.Repository.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
-		return err
+	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 {
+		stored, err := r.Repository.CompareAndSetMoveStatus(ctx, *move, move.Status)
+		if err != nil {
+			return errors.Join(errMoveStatusPersistence, err)
+		}
+		*move = stored
+	} else {
+		if err := r.Repository.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
+			return err
+		}
 	}
 	r.emitMoveEvent(*move, previous)
 	return nil
 }
 
 func (r *Reconciler) recordMoveError(ctx context.Context, move *volumeapi.Move, previous volumeapi.MoveStatus, reason, operation string, cause error) error {
+	if errors.Is(cause, errMoveStatusPersistence) {
+		return cause
+	}
 	move.Status.Reason = reason
 	move.Status.Message = fmt.Sprintf("automatic retry; %s: %v", operation, cause)
 	statusErr := r.persistMoveStatus(ctx, move, previous)

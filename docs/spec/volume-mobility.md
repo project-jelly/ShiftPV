@@ -30,28 +30,53 @@ Destination approval records the Pool, incoming/destination copy identities,
 operation IDs and planned copy Job name in one status write. An interruption
 after approval therefore retains both the capacity hold and its recovery plan.
 
-### Preparation storage contract
+### Preparation and execution
 
-The CRD also accepts the immutable `spec.protocolVersion: prepared-v1` and a
-`status.preparation` logical reservation identified by Pool name/UID, node and
+New discovery creates Moves with immutable `spec.protocolVersion: prepared-v1`.
+Preparation later records a `status.preparation` logical reservation identified by Pool name/UID, node and
 requested bytes. The shared capacity ledger counts it once; it protects its Pool
 from deletion and never authorizes a disk effect. Updates use exact Move UID and
 resourceVersion CAS, preserving the embedded cleanup journal.
 
-Execution of this protocol is not enabled yet. Discovery still creates legacy
-Moves without a protocol field. Versioned records are retained without legacy
-execution, recovery, gate release or journal collection. Upgrade the CRD before
-using the new writer, and do not run an older controller while versioned records
-remain. The activation plan is in [mobility stabilization](../development/mobility-stabilization-plan.md).
+Preparation keeps the source `Ready + activeMove`, so the original consumer can
+keep using its copy. A non-preempting placement Pod reserves scheduler resources
+before the destination Pool grants requested bytes. This reservation uses the
+chart-provided, non-global PriorityClass at priority 0 with `preemptionPolicy: Never`;
+it may wait behind higher-priority work even when the consumer has higher priority.
+The controller writes `StartingDisruption`, re-observes the binding, source and placement, and only then
+changes the source to `Moving` and evicts the recorded consumer UID.
+
+After source unpublish, it measures actual source usage and destination free
+space. One CAS converts the logical hold to execution approval with the complete
+disk plan. The bytes stay counted once, even if the Pool limit was reduced after
+the hold was granted. Logical reservations are not quotas: source growth or an
+external writer can still make the physical-space check fail.
+
+Until execution approval, a deleted Move or changed binding, workload placement,
+destination or source cordon can cancel preparation. `Canceling` restores the exact
+source to Ready, confirms the owned placement Pod is absent, then records
+`Cancelled` and releases the logical hold. A later pass clears `activeMove` before
+retiring the journal. Cancellation needs no surviving PVC or consumer. After
+`StartingDisruption`, an already submitted eviction can still complete for the
+original UID; cancellation restores source authority, not that Pod's lifetime.
+
+Apply the CRDs separately before upgrading the chart and controller together.
+The new chart passes the preparation PriorityClass flag, which older controller
+binaries do not accept; pinning an old image under the new chart is not a CRD-only
+upgrade. Moves without a protocol field keep their legacy path; unknown protocols retain their records without executing effects.
+Do not run an older controller while prepared records remain. The implementation
+sequence is in [mobility stabilization](../development/mobility-stabilization-plan.md).
 
 ## Flow
 
 ```text
 source owner
-  -> lock volume and evict consumer
-  -> wait for source unpublish
-  -> create replacement placement
-  -> reserve destination capacity
+  -> persist binding/copy/consumer identities
+  -> claim Ready + activeMove (source remains publishable)
+  -> reserve scheduler placement and logical Pool capacity
+  -> persist StartingDisruption, re-observe, lock Moving and evict original UID
+  -> wait for source unpublish and held replacement
+  -> check physical capacity and atomically convert the logical hold
   -> copy to destination incoming
   -> promote destination serving copy
   -> owner CAS commit
@@ -123,12 +148,15 @@ verified with the same exclusions before promotion.
 | State | Entry condition | Allowed next step |
 |---|---|---|
 | `Pending` | Volume is Ready, RWO Filesystem, one active owner, no active Move | Validate preconditions |
-| `Locking` | Preconditions pass | Acquire `activeMove` by CAS |
-| `Evicting` | Move lock held, source still owner | Evict the current consumer or wait if eviction is already requested |
-| `WaitingForUnpublish` | Consumer is gone | Wait until source publication is absent |
+| `Preparing` | Exact binding, consumer and serving copy recorded | Claim source, reserve placement, grant logical hold |
+| `StartingDisruption` | Protected logical hold and exact placement UID recorded | Recheck conditions, fence source publication and evict recorded consumer UID |
+| `Canceling` | No destination execution authority | Restore source Ready; confirm placement absence; release logical hold |
+| `Cancelled` | Logical hold released | Clear the exact source lock, then retain the settled journal for its retention period |
+| `Locking` / `Evicting` | Legacy Move only | Acquire Moving lock / evict using the previous protocol |
+| `WaitingForUnpublish` | Original consumer eviction was accepted or the consumer is gone | Wait until source publication is absent |
 | `WaitingForReplacement` | Source is unpublished | Wait for a replacement claim/placement object |
 | `WaitingForDestination` | Replacement exists and its hold is intact | Ensure destination placement and node readiness |
-| `WaitingForCapacity` | Destination placement is scheduled and usable | Reserve destination capacity |
+| `WaitingForCapacity` | Destination placement is scheduled and usable | Verify quiesced physical usage; convert prepared hold (legacy: grant capacity) |
 | `Copying` | Destination capacity hold is approved | Copy into destination incoming path |
 | `Promoting` | Checksum and identities match | Promote incoming to destination serving copy |
 | `Committing` | Destination serving copy exists | CAS owner/currentCopy to destination |
@@ -211,6 +239,36 @@ For legacy approval-only records with no copy or cleanup intent, recovery derive
 the expected identities only to check absence after this fence. It does not save
 them as deletion authority. Any matching artifact or contradictory evidence keeps
 the hold for review; complete fresh absence permits source recovery.
+
+### Operator procedure
+
+For planned maintenance, use **cordon → Move completion → drain**. Confirm the
+consumer is Ready on the destination, the Move has settled cleanup and the Volume
+has no `activeMove` before draining the source. Draining first can remove the only
+controlled source consumer before discovery; that is outside automatic migration
+support. Uncordon a healthy source to recover an unassigned held replacement when
+no unsettled Move owns it, then retry the planned sequence.
+
+For `Blocked` after execution approval on a new `prepared-v1` Move:
+
+1. Inspect the Move, Volume current owner/copy, Pool readiness and embedded cleanup
+   reason. Keep the PV/PVC and workload; deleting or recreating a claim changes its
+   UID and cannot repair the recorded binding.
+2. Restore the prerequisite named by the reason (node/Pool availability, exact
+   workload placement, or cleanup evidence). Preserve transaction artifacts and
+   finalizers. Precommit recovery needs the original binding and a controlled
+   consumer so it can verify the owner and restore publication.
+3. Request recovery on that Move with
+   `kubectl patch shiftpvmove <move> --type=merge -p '{"spec":{"recovery":"ResumeOwner"}}'`.
+   Observe `status.recoveryReason`, `status.recoveryPhase`, current owner and Pod
+   readiness. Completion is `Recovered` with cleared `activeMove` and settled
+   cleanup/holds, not merely acceptance of the patch.
+
+A missing/recreated claim after prepared execution approval remains an operator
+recovery case. `ResumeOwner` does not adopt a new UID or fabricate absent publication
+proof. Legacy Moves retain their original protocol's binding checks.
+Before approval, preparation cancellation settles metadata without those objects;
+restoring application availability still requires a valid workload and binding.
 
 ## Safety Invariants
 

@@ -80,7 +80,8 @@ func TestMoveDiscoveryConvergesAfterCreateResponseLost(t *testing.T) {
 	if err := reconciler.ReconcileAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(inner.moves) != 1 || inner.moves[0].Status.Phase != string(fsm.PhasePending) {
+	if len(inner.moves) != 1 || inner.moves[0].Status.Phase != string(fsm.PhasePreparing) ||
+		inner.moves[0].Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 {
 		t.Fatalf("create retry did not converge without duplication: %#v", inner.moves)
 	}
 }

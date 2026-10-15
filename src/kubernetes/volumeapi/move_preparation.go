@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -93,6 +94,16 @@ func validatePreparedPlan(move Move) error {
 	return nil
 }
 
+// ValidatePreparedMovePlan checks the identities that must survive every
+// prepared transaction stage, including execution after its logical hold was
+// converted. It does not replace observation of the live binding or copy.
+func ValidatePreparedMovePlan(move Move) error {
+	if move.Spec.ProtocolVersion != MoveProtocolPreparedV1 {
+		return fmt.Errorf("%w: prepared protocol is required", ErrStateConflict)
+	}
+	return validatePreparedPlan(move)
+}
+
 func hasMoveDestinationIntent(status MoveStatus) bool {
 	return status.IncomingCopy != nil || status.DestinationCopy != nil || status.CopyOperationID != "" ||
 		status.PromotionOperationID != "" || status.CopyJobName != "" || status.PromotionJobName != "" ||
@@ -128,11 +139,11 @@ func (r *Registry) CompareAndSetMoveStatus(ctx context.Context, expected Move, n
 	// Cleanup is a separate writer. Its raw journal and observed phase belong
 	// to this resource version, not to the caller's proposed status value.
 	next.CleanupPhase = current.Status.CleanupPhase
-	if err := validatePreparedTransition(current, next); err != nil {
+	if err := validatePreparedProtection(current, next, moveCleanup(object) != nil); err != nil {
 		return Move{}, err
 	}
-	if object.GetDeletionTimestamp() != nil && ((current.Status.Preparation == nil && next.Preparation != nil) || (!current.Status.CapacityApproved && next.CapacityApproved)) {
-		return Move{}, fmt.Errorf("%w: deleting Move cannot acquire preparation or execution authority", ErrStateConflict)
+	if err := validatePreparedTransition(current, next); err != nil {
+		return Move{}, err
 	}
 	setMoveStatus(object, next)
 	stored, err := resource.UpdateStatus(ctx, object, metav1.UpdateOptions{FieldValidation: metav1.FieldValidationStrict})
@@ -140,6 +151,20 @@ func (r *Registry) CompareAndSetMoveStatus(ctx context.Context, expected Move, n
 		return Move{}, fmt.Errorf("compare-and-set Move status: %w", err)
 	}
 	return storedMoveStatus(current, object, stored)
+}
+
+func validatePreparedProtection(current Move, next MoveStatus, hasCleanup bool) error {
+	if next.Phase == "Cancelled" && hasCleanup {
+		return fmt.Errorf("%w: cancellation cannot settle a Move with a cleanup journal", ErrStateConflict)
+	}
+	granting := (current.Status.Preparation == nil && next.Preparation != nil) || (!current.Status.CapacityApproved && next.CapacityApproved)
+	if granting && current.Deleting {
+		return fmt.Errorf("%w: deleting Move cannot acquire preparation or execution authority", ErrStateConflict)
+	}
+	if granting && !slices.Contains(current.Finalizers, MoveProtectionFinalizer) {
+		return fmt.Errorf("%w: Move protection is required before granting capacity", ErrStateConflict)
+	}
+	return nil
 }
 
 func storedMoveStatus(current Move, expected, stored *unstructured.Unstructured) (Move, error) {

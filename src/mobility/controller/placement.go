@@ -26,25 +26,31 @@ func (r *Reconciler) ensurePlacement(ctx context.Context, move *volumeapi.Move, 
 	}
 	names := namesFor(move.Name)
 	desired := r.placementPod(*move, observed.Replacement, names)
+	_, err := r.ensurePlacementPod(ctx, *move, desired)
+	return err
+}
+
+func (r *Reconciler) ensurePlacementPod(ctx context.Context, move volumeapi.Move, desired *corev1.Pod) (*corev1.Pod, error) {
+	names := namesFor(move.Name)
 	existing, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.PlacementPod, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, err = r.Client.CoreV1().Pods(r.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+		existing, err = r.Client.CoreV1().Pods(r.Namespace).Create(ctx, desired, metav1.CreateOptions{})
 		if err == nil {
-			return nil
+			return existing, nil
 		}
 		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create placement reservation Pod: %w", err)
+			return nil, fmt.Errorf("create placement reservation Pod: %w", err)
 		}
 		existing, err = r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.PlacementPod, metav1.GetOptions{})
 		if err != nil {
-			return fmt.Errorf("read concurrent placement reservation Pod: %w", err)
+			return nil, fmt.Errorf("read concurrent placement reservation Pod: %w", err)
 		}
-		return validatePlacementIdentity(existing, *move, names)
+		return existing, validatePlacementIdentity(existing, move, names)
 	}
 	if err != nil {
-		return fmt.Errorf("read placement reservation Pod: %w", err)
+		return nil, fmt.Errorf("read placement reservation Pod: %w", err)
 	}
-	return validatePlacementIdentity(existing, *move, names)
+	return existing, validatePlacementIdentity(existing, move, names)
 }
 
 func (r *Reconciler) placementPod(move volumeapi.Move, replacement *corev1.Pod, names resourceNames) *corev1.Pod {
@@ -211,6 +217,9 @@ func (r *Reconciler) deletePlacement(ctx context.Context, move volumeapi.Move) e
 }
 
 func validatePlacementIdentity(pod *corev1.Pod, move volumeapi.Move, names resourceNames) error {
+	if move.Status.PlacementPodUID != "" && string(pod.UID) != move.Status.PlacementPodUID {
+		return fmt.Errorf("placement reservation Pod UID changed")
+	}
 	if pod.Labels["shiftpv.io/move"] != names.Base || pod.Labels["shiftpv.io/role"] != placementRole {
 		return fmt.Errorf("placement reservation Pod %q labels do not match move", pod.Name)
 	}

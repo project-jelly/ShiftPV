@@ -124,11 +124,11 @@ kubectl -n shiftpv-system wait --for=condition=Ready pod \
 
 BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
 
-# Scenario groups. CI runs g1/g2/g3 as parallel shards on separate clusters;
-# `all` (the default) runs the original sweep on one cluster in the original
-# order. The split targets equal wall clock once the ~200 s cluster and install
+# Scenario groups. CI runs each group on a separate cluster.
+# `all` (the default) runs preparation, then the original g1/g2/g3 sweep. The split targets equal wall clock once the ~200 s cluster and install
 # setup that every group pays for is included:
 #
+#   preparation  legacy in-flight upgrade, then durable admission/restart/cancel
 #   g1  preflight (478 s)
 #       The four deferral scenarios share the retained-volume bookkeeping that
 #       test_preflight itself re-asserts after every scenario, so they stay
@@ -154,7 +154,7 @@ BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
 # test_preflight runs it after every scenario.
 KIND_MOBILITY_GROUP=${KIND_MOBILITY_GROUP:-all}
 case "${KIND_MOBILITY_GROUP}" in
-all | g1 | g2 | g3) ;;
+all | g1 | g2 | g3 | preparation) ;;
 *)
 	echo "unsupported KIND_MOBILITY_GROUP: ${KIND_MOBILITY_GROUP}" >&2
 	exit 1
@@ -164,6 +164,11 @@ esac
 group_selected() {
 	[[ "${KIND_MOBILITY_GROUP}" == all || "${KIND_MOBILITY_GROUP}" == "$1" ]]
 }
+
+if group_selected preparation; then
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/legacy-upgrade.sh"
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/preparation.sh"
+fi
 
 if group_selected g1; then
 	test_preflight

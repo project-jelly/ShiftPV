@@ -355,9 +355,36 @@ func (r *Registry) RemoveVolumeFinalizer(ctx context.Context, volumeID, uid stri
 }
 
 func (r *Registry) CompareAndSetState(ctx context.Context, volumeID, expectedPhase, expectedActiveMove, expectedOwner string, next State) error {
+	return r.compareAndSetState(ctx, volumeID, expectedPhase, expectedActiveMove, expectedOwner, nil, next)
+}
+
+// CompareAndSetSourceState changes a source's mobility state without changing
+// its owner or copy. Publication changes are independent and remain live across
+// API conflicts; a changed copy can never be adopted by a stale preparation.
+func (r *Registry) CompareAndSetSourceState(ctx context.Context, volumeID string, expected, next State) error {
+	copy := expected.CurrentCopy
+	if copy == nil || copy.Validate() != nil || copy.Role != volume.RoleServing ||
+		copy.VolumeID != volumeID || copy.VolumeUID != expected.UID || copy.NodeName != expected.OwnerNode ||
+		next.UID != expected.UID || next.OwnerNode != expected.OwnerNode ||
+		(next.CurrentCopy != nil && *next.CurrentCopy != *copy) {
+		return fmt.Errorf("%w: source transition must preserve the exact serving copy", ErrStateConflict)
+	}
+	next.CurrentCopy = copy
+	return r.compareAndSetState(ctx, volumeID, expected.Phase, expected.ActiveMove, expected.OwnerNode, copy, next)
+}
+
+func (r *Registry) compareAndSetState(ctx context.Context, volumeID, expectedPhase, expectedActiveMove, expectedOwner string, expectedCopy *volume.CopyIdentity, next State) error {
 	return r.mutateState(ctx, volumeID, func(current State) (State, error) {
 		if next.UID == "" || current.UID != next.UID || current.Phase != expectedPhase || current.ActiveMove != expectedActiveMove || current.OwnerNode != expectedOwner {
 			return State{}, fmt.Errorf("%w: volume %q is phase=%q activeMove=%q owner=%q", ErrStateConflict, volumeID, current.Phase, current.ActiveMove, current.OwnerNode)
+		}
+		if expectedCopy != nil {
+			if current.CurrentCopy == nil || *current.CurrentCopy != *expectedCopy {
+				return State{}, fmt.Errorf("%w: source copy changed", ErrStateConflict)
+			}
+			if expectedActiveMove == "" && next.ActiveMove != "" && (current.Deleting || current.HasCleanup) {
+				return State{}, fmt.Errorf("%w: source is being deleted", ErrStateConflict)
+			}
 		}
 		// Node publication is independently maintained by the CSI node service.
 		// A controller's earlier observation must not erase a concurrent publish/unpublish.

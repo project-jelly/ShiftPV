@@ -57,6 +57,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- default (include "shiftpv.controllerImage" .) .Values.mobility.helperImage -}}
 {{- end }}
 
+{{- define "shiftpv.placementPriorityClassName" -}}
+{{- printf "%s-placement" (include "shiftpv.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
 {{- define "shiftpv.controllerServiceAccount" -}}
 {{- default (printf "%s-controller" (include "shiftpv.fullname" .)) .Values.serviceAccount.controller.name }}
 {{- end }}

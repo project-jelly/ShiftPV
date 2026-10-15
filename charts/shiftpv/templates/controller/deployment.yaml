@@ -72,6 +72,7 @@ spec:
             - --mobility-interval={{ .Values.mobility.interval }}
             - --move-journal-retention={{ .Values.mobility.journalRetention }}
             - --mobility-helper-image={{ include "shiftpv.mobilityHelperImage" . }}
+            - --mobility-placement-priority-class={{ include "shiftpv.placementPriorityClassName" . }}
             {{- end }}
             - --v={{ .Values.controller.logLevel }}
           env:
