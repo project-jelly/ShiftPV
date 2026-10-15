@@ -59,32 +59,44 @@ func ownerPoolUID(volumeID string, state volumeapi.State) (string, error) {
 
 func moveHeldBytesForPool(total int64, volumes map[string]volumeapi.State, moves []volumeapi.Move, poolUID string) (int64, error) {
 	for _, move := range moves {
-		if volumeapi.MoveCleanupSettled(move) || !move.Status.CapacityApproved {
-			continue
-		}
-		state, exists := volumes[move.Spec.VolumeID]
-		if !exists {
-			return 0, fmt.Errorf("move %q has no volume state", move.Name)
-		}
-		if state.ActiveMove != move.Name || state.CurrentCopy == nil ||
-			move.Status.SourceCopy == nil || move.Status.SourceCopy.PoolUID == "" ||
-			move.Status.DestinationPoolUID == "" {
-			return 0, fmt.Errorf("move %q has incomplete capacity hold identity", move.Name)
-		}
-		heldPoolUID := move.Status.DestinationPoolUID
-		if state.CurrentCopy.PoolUID == heldPoolUID {
-			// Owner CAS committed: retain the source copy's hold until cleanup.
-			heldPoolUID = move.Status.SourceCopy.PoolUID
+		heldPoolUID, reserved, err := moveReservation(volumes, move)
+		if err != nil {
+			return 0, err
 		}
 		if heldPoolUID == poolUID {
-			var err error
-			total, err = add(total, state.CapacityBytes)
+			total, err = add(total, reserved)
 			if err != nil {
 				return 0, err
 			}
 		}
 	}
 	return total, nil
+}
+
+func moveReservation(volumes map[string]volumeapi.State, move volumeapi.Move) (string, int64, error) {
+	// Preparation is a durable logical hold even if a terminal phase was
+	// recorded. Only explicitly removing it releases the reservation.
+	if move.Status.Preparation != nil {
+		return preparationReservation(volumes, move)
+	}
+	if volumeapi.MoveCleanupSettled(move) || !move.Status.CapacityApproved {
+		return "", 0, nil
+	}
+	state, exists := volumes[move.Spec.VolumeID]
+	if !exists {
+		return "", 0, fmt.Errorf("move %q has no volume state", move.Name)
+	}
+	if state.ActiveMove != move.Name || state.CurrentCopy == nil ||
+		move.Status.SourceCopy == nil || move.Status.SourceCopy.PoolUID == "" ||
+		move.Status.DestinationPoolUID == "" {
+		return "", 0, fmt.Errorf("move %q has incomplete capacity hold identity", move.Name)
+	}
+	heldPoolUID := move.Status.DestinationPoolUID
+	if state.CurrentCopy.PoolUID == heldPoolUID {
+		// Owner CAS committed: retain the source copy's hold until cleanup.
+		heldPoolUID = move.Status.SourceCopy.PoolUID
+	}
+	return heldPoolUID, state.CapacityBytes, nil
 }
 
 func add(left, right int64) (int64, error) {

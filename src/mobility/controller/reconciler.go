@@ -108,6 +108,12 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	}
 	reconcileErrors := []error{discoveryErr}
 	for _, move := range moves {
+		// The preparation storage contract precedes its executor. Fence every
+		// legacy path, including recovery, cleanup and journal collection.
+		if !legacyMoveProtocol(move) {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("retain move %s: protocol %q execution is not enabled", move.Name, move.Spec.ProtocolVersion))
+			continue
+		}
 		phase := fsm.Phase(move.Status.Phase)
 		if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {
 			if err := r.reconcileRecovery(ctx, move); err != nil {
@@ -147,6 +153,10 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	// from the transactions above.
 	reconcileErrors = append(reconcileErrors, r.reconcileOwnerPlacements(ctx))
 	return errors.Join(reconcileErrors...)
+}
+
+func legacyMoveProtocol(move volumeapi.Move) bool {
+	return move.Spec.ProtocolVersion == "" && move.Status.Preparation == nil
 }
 
 func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.Move) error {

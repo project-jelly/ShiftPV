@@ -435,6 +435,10 @@ func copyUsesPool(copy *cleanupapi.CopyIdentity, pool volumeapi.Pool) bool {
 }
 
 func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
+	preparationUses, destinationKnown := preparationUsesPool(move.Status.Preparation, pool)
+	if preparationUses {
+		return true
+	}
 	sourceKnown := exactMoveCopy(move.Status.SourceCopy, move.Spec.VolumeID, move.Spec.SourceNode, volume.RoleServing)
 	if sourceKnown {
 		if copyUsesPool(move.Status.SourceCopy, pool) {
@@ -444,7 +448,6 @@ func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
 		return true
 	}
 
-	destinationKnown := false
 	for _, candidate := range []struct {
 		identity *volume.CopyIdentity
 		role     string
@@ -464,6 +467,22 @@ func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
 		}
 	}
 	return !destinationKnown && (move.Status.DestinationNode == pool.NodeName || slices.Contains(move.Status.CandidateNodes, pool.NodeName))
+}
+
+func preparationUsesPool(preparation *volumeapi.MovePreparation, pool volumeapi.Pool) (uses, known bool) {
+	if preparation == nil {
+		return false, false
+	}
+	// A contradictory name or node must not erase a retained Pool UID.
+	if preparation.Pool.UID == pool.UID {
+		return true, true
+	}
+	if volume.ValidObjectName(preparation.Pool.Name) && volume.ValidIdentityToken(preparation.Pool.UID) &&
+		volume.ValidObjectName(preparation.NodeName) {
+		return false, true
+	}
+	// Without an exact target, retain protection wherever it might belong.
+	return preparation.Pool.Name == pool.Name || preparation.NodeName == "" || preparation.NodeName == pool.NodeName, false
 }
 
 func exactMoveCopy(copy *volume.CopyIdentity, volumeID, nodeName, role string) bool {
