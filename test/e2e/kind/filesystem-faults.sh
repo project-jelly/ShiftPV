@@ -78,22 +78,6 @@ wait_for_pool_reason() {
   exit 1
 }
 
-wait_for_not_ready_event() {
-  local name=$1
-  local attempt messages
-  for ((attempt = 0; attempt < 120; attempt++)); do
-    messages=$(kubectl get events \
-      --field-selector "involvedObject.kind=PersistentVolumeClaim,involvedObject.name=${name}" \
-      -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' 2>/dev/null || true)
-    if grep -Eq 'Pool is not ready|has no Ready Pool in group' <<<"${messages}"; then
-      return
-    fi
-    sleep 1
-  done
-  echo "PVC/${name} did not report a not-ready Pool" >&2
-  exit 1
-}
-
 # Overlay the fault worker pool with a byte-sufficient tmpfs and exhaust only
 # its inodes. The write probe must reject the Pool even though byte statfs alone
 # would pass; the statfs-to-I/O race is covered separately by controller tests.
@@ -121,7 +105,7 @@ kubectl apply -f "${TEST_DIR}/filesystem-fault-storageclass.yaml"
 kubectl apply -f "${TEST_DIR}/filesystem-fault-pvc.yaml"
 PVC_UID=$(kubectl get pvc shiftpv-filesystem-fault -o jsonpath='{.metadata.uid}')
 kubectl apply -f "${TEST_DIR}/filesystem-fault-pod.yaml"
-wait_for_not_ready_event shiftpv-filesystem-fault
+wait_for_unavailable_event PersistentVolumeClaim shiftpv-filesystem-fault
 
 PVC_PHASE=$(kubectl get pvc shiftpv-filesystem-fault -o jsonpath='{.status.phase}')
 if [[ "${PVC_PHASE}" != "Pending" ]]; then
