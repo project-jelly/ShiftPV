@@ -290,15 +290,15 @@ func TestVolumeLockConvergesAfterCASResponseLost(t *testing.T) {
 func TestOwnerCommitConvergesAfterCASResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	_, _, destination := testCopyIdentities(volumeID, "source", "destination")
+	source, _, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{
-		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination,
+		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination, SourceCopy: &source, DestinationPoolUID: destination.PoolUID,
 	}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
-		Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name,
+		UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CurrentCopy: &source,
 	}}}
 	repository := &lostResponseRepository{memoryRepository: inner, stateCASResponses: 1}
-	reconciler := &Reconciler{Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(nil, repository)
 	placement := reconciler.placementPod(move, &corev1.Pod{}, namesFor(move.Name))
 	placement.Spec.NodeName = "destination"
 	reconciler.Client = fake.NewSimpleClientset(placement)
