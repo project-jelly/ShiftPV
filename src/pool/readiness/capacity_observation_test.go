@@ -12,6 +12,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -51,15 +52,17 @@ func TestCapacityObservationReusesReadinessProbeAndRecovers(t *testing.T) {
 		writeErr   error
 		statErr    error
 		ready      bool
+		reason     string
 	}{
-		{name: "available", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 128, AvailableInodes: 16}, ready: true},
-		{name: "statfs failure", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 512, AvailableInodes: 32}, statErr: errors.New("statfs unavailable")},
-		{name: "recovered", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 256, AvailableInodes: 8}, ready: true},
-		{name: "zero available bytes", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableInodes: 8}, ready: true},
-		{name: "zero available inodes", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 256}, ready: true},
-		{name: "write failure with readable capacity", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 128, AvailableInodes: 16}, writeErr: syscall.ENOSPC},
-		{name: "inaccessible skips statfs", inspectErr: os.ErrNotExist},
-		{name: "recovered after skipped probe", filesystem: poolcapacity.Filesystem{TotalBytes: 2048, AvailableBytes: 768, AvailableInodes: 64}, ready: true},
+		{name: "available", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 128, AvailableInodes: 16}, ready: true, reason: "PoolReady"},
+		{name: "statfs failure", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 512, AvailableInodes: 32}, statErr: errors.New("statfs unavailable"), reason: "ProbeFailed"},
+		{name: "recovered", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 256, AvailableInodes: 8}, ready: true, reason: "PoolReady"},
+		{name: "zero available bytes with successful write", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableInodes: 8}, reason: "NoSpace"},
+		{name: "zero available inodes with successful write", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 256}, reason: "NoSpace"},
+		{name: "write failure with readable capacity", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 128, AvailableInodes: 16}, writeErr: syscall.ENOSPC, reason: "NoSpace"},
+		{name: "read only and no bytes", filesystem: poolcapacity.Filesystem{TotalBytes: 1024, AvailableInodes: 8}, writeErr: syscall.EROFS, reason: "ReadOnly"},
+		{name: "inaccessible skips statfs", inspectErr: os.ErrNotExist, reason: "PathMissing"},
+		{name: "recovered after skipped probe", filesystem: poolcapacity.Filesystem{TotalBytes: 2048, AvailableBytes: 768, AvailableInodes: 64}, ready: true, reason: "PoolReady"},
 	} {
 		t.Run(step.name, func(t *testing.T) {
 			filesystem, inspectErr, writeErr, statErr = step.filesystem, step.inspectErr, step.writeErr, step.statErr
@@ -88,8 +91,23 @@ func TestCapacityObservationReusesReadinessProbeAndRecovers(t *testing.T) {
 				t.Fatalf("successful probe lost capacity, including zero: %+v", status)
 			}
 			repository.pool.Status = status
-			if ready, reason := repository.pool.ReadyAt(now, time.Minute); ready != step.ready {
-				t.Fatalf("capacity observation changed readiness: ready=%v reason=%s want=%v", ready, reason, step.ready)
+			if ready, reason := repository.pool.ReadyAt(now, time.Minute); ready != step.ready || reason != step.reason {
+				t.Fatalf("allocation readiness: ready=%v reason=%s want=%v/%s", ready, reason, step.ready, step.reason)
+			}
+			writable := meta.FindStatusCondition(status.Conditions, volumeapi.PoolConditionWritable)
+			capacity := meta.FindStatusCondition(status.Conditions, volumeapi.PoolConditionCapacityReadable)
+			wantWritable := inspectErr == nil && writeErr == nil
+			wantCapacity := inspectErr == nil && statErr == nil
+			if writable == nil || (writable.Status == metav1.ConditionTrue) != wantWritable ||
+				capacity == nil || (capacity.Status == metav1.ConditionTrue) != wantCapacity {
+				t.Fatalf("allocation decision changed independent observations: writable=%+v capacity=%+v", writable, capacity)
+			}
+			for name, check := range map[string]func(time.Time, time.Duration) (bool, string){
+				"cleanup": repository.pool.CleanupReadyAt, "execution": repository.pool.ExecutionReadyAt,
+			} {
+				if allowed, reason := check(now, time.Minute); allowed != (wantWritable && wantCapacity) {
+					t.Fatalf("%s readiness changed with allocation headroom: allowed=%v reason=%s", name, allowed, reason)
+				}
 			}
 			repository.pool.Generation++
 			now = now.Add(time.Minute)

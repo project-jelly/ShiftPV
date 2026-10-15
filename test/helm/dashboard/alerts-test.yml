@@ -22,6 +22,8 @@ tests:
         values: '1+0x6 0+0x5'
       - series: 'shiftpv_copy_observations{shiftpv="true",namespace="shiftpv-system",pool="pool-a",state="OrphanPreserved"}'
         values: '1+0x6 0+0x5'
+      - series: 'shiftpv_copy_observations{shiftpv="true",namespace="shiftpv-system",pool="pool-b",state="NeedsReview"}'
+        values: '0+0x11'
     alert_rule_test:
       - eval_time: 6m
         alertname: ShiftPVObservationFailed
@@ -93,6 +95,122 @@ tests:
         exp_alerts: []
       - eval_time: 8m
         alertname: ShiftPVCopyNeedsReview
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'shiftpv_volumes_without_persistent_volume{shiftpv="true",namespace="shiftpv-system",pool="retained"}'
+        values: '1+0x361 0+0x4'
+      - series: 'shiftpv_volumes_without_persistent_volume{shiftpv="true",namespace="shiftpv-system",pool="publishing"}'
+        values: '1+0x2 0+0x363'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="shiftpv-system",source="metadata"}'
+        values: '1+0x365'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="shiftpv-system",source="metadata"}'
+        values: '1+60x365'
+    alert_rule_test:
+      - eval_time: 5h59m
+        alertname: ShiftPVVolumesWithoutPersistentVolume
+        exp_alerts: []
+      - eval_time: 6h1m
+        alertname: ShiftPVVolumesWithoutPersistentVolume
+        exp_alerts:
+          - exp_labels: {namespace: shiftpv-system, pool: retained, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: "ShiftPV retained owners have no PersistentVolume reference"
+              description: "1 Ready or preserved Blocked Volume owner(s) on pool retained have no matching driver PersistentVolume. This may be delayed PV publication or retained data; inspect the Volume and provisioning history before deciding how to recover it. Data and capacity reservations remain protected."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvvolumeswithoutpersistentvolume"
+      - eval_time: 6h3m
+        alertname: ShiftPVVolumesWithoutPersistentVolume
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'shiftpv_volumes_without_persistent_volume{shiftpv="true",namespace="failed",pool="pool-a"}'
+        values: '1+0x365'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="failed",source="metadata"}'
+        values: '0+0x365'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="failed",source="metadata"}'
+        values: '1+60x365'
+      - series: 'shiftpv_volumes_without_persistent_volume{shiftpv="true",namespace="stale",pool="pool-a"}'
+        values: '1+0x365'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="stale",source="metadata"}'
+        values: '1+0x365'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="stale",source="metadata"}'
+        values: '1+0x365'
+      - series: 'shiftpv_volumes_without_persistent_volume{shiftpv="true",namespace="missing",pool="pool-a"}'
+        values: '1+0x365'
+    alert_rule_test:
+      - eval_time: 6h1m
+        alertname: ShiftPVVolumesWithoutPersistentVolume
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'shiftpv_pool_filesystem_available_bytes{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",node="worker-a",pool="blocks"}'
+        values: '0+0x6 4096+0x5'
+      - series: 'shiftpv_pool_filesystem_available_inodes{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",node="worker-a",pool="blocks"}'
+        values: '10+0x11'
+      - series: 'shiftpv_pool_filesystem_available_bytes{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",node="worker-a",pool="inodes"}'
+        values: '4096+0x11'
+      - series: 'shiftpv_pool_filesystem_available_inodes{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",node="worker-a",pool="inodes"}'
+        values: '0+0x6 10+0x5'
+      - series: 'shiftpv_pool_filesystem_available_bytes{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",node="worker-a",pool="both"}'
+        values: '0+0x6 4096+0x5'
+      - series: 'shiftpv_pool_filesystem_available_inodes{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",node="worker-a",pool="both"}'
+        values: '0+0x6 10+0x5'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",source="filesystem"}'
+        values: '1+0x11'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",job="shiftpv-custom",instance="node-a:8080",namespace="shiftpv-system",source="filesystem"}'
+        values: '1+60x11'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ShiftPVPoolNoSpace
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ShiftPVPoolNoSpace
+        exp_alerts:
+          - exp_labels: {job: shiftpv-custom, instance: "node-a:8080", namespace: shiftpv-system, node: worker-a, pool: blocks, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: "ShiftPV Pool filesystem has no available space"
+              description: "Pool blocks on node worker-a reports zero available bytes or inodes. New allocation is blocked and cleanup may need headroom for durable metadata. Preserve owned data and inspect the filesystem before reclaiming space."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnospace"
+          - exp_labels: {job: shiftpv-custom, instance: "node-a:8080", namespace: shiftpv-system, node: worker-a, pool: inodes, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: "ShiftPV Pool filesystem has no available space"
+              description: "Pool inodes on node worker-a reports zero available bytes or inodes. New allocation is blocked and cleanup may need headroom for durable metadata. Preserve owned data and inspect the filesystem before reclaiming space."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnospace"
+          - exp_labels: {job: shiftpv-custom, instance: "node-a:8080", namespace: shiftpv-system, node: worker-a, pool: both, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: "ShiftPV Pool filesystem has no available space"
+              description: "Pool both on node worker-a reports zero available bytes or inodes. New allocation is blocked and cleanup may need headroom for durable metadata. Preserve owned data and inspect the filesystem before reclaiming space."
+              runbook_url: "https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnospace"
+      - eval_time: 8m
+        alertname: ShiftPVPoolNoSpace
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'shiftpv_pool_filesystem_available_bytes{shiftpv="true",namespace="failed",node="worker-a",pool="pool-a"}'
+        values: '0+0x10'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="failed",node="worker-a",source="filesystem"}'
+        values: '0+0x10'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="failed",node="worker-a",source="filesystem"}'
+        values: '1+60x10'
+      - series: 'shiftpv_pool_filesystem_available_inodes{shiftpv="true",namespace="stale",node="worker-b",pool="pool-b"}'
+        values: '0+0x10'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="stale",node="worker-b",source="filesystem"}'
+        values: '1+0x10'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="stale",node="worker-b",source="filesystem"}'
+        values: '1+0x10'
+      - series: 'shiftpv_pool_filesystem_available_bytes{shiftpv="true",job="shiftpv-custom",instance="node-c:8080",namespace="missing",node="worker-c",pool="pool-c"}'
+        values: '0+0x10'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",job="shiftpv-custom",instance="node-other:8080",namespace="missing",source="filesystem"}'
+        values: '1+0x10'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",job="shiftpv-custom",instance="node-other:8080",namespace="missing",source="filesystem"}'
+        values: '1+60x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShiftPVPoolNoSpace
         exp_alerts: []
 
   - interval: 1m

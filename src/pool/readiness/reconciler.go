@@ -318,7 +318,7 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 	accessible := condition(volumeapi.PoolConditionAccessible, result.Accessible, generation, now)
 	writable := condition(volumeapi.PoolConditionWritable, result.Writable, generation, now)
 	capacity := condition(volumeapi.PoolConditionCapacityReadable, result.CapacityReadable, generation, now)
-	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and capacity-readable"}
+	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and has filesystem headroom"}
 	checks := []Check{}
 	if result.Backing.Reason != "" {
 		checks = append(checks, result.Backing)
@@ -347,6 +347,12 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 			readyCheck.Message = candidate.Message
 			break
 		}
+	}
+	// A small successful write does not establish headroom for a new allocation.
+	// Keep Writable and CapacityReadable as independent observations: exact
+	// already-approved effects still enforce their own write-ahead metadata.
+	if readyCheck.OK && (result.Filesystem.AvailableBytes <= 0 || result.Filesystem.AvailableInodes <= 0) {
+		readyCheck = Check{Known: true, Reason: "NoSpace", Message: "filesystem has no available bytes or inodes for new allocation"}
 	}
 	return append(conditions, condition(volumeapi.PoolConditionReady, readyCheck, generation, now))
 }

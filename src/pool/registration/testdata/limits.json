@@ -1,0 +1,18 @@
+[
+  {"limit":"1", "bytes":1},
+  {"limit":"1Gi", "bytes":1073741824},
+  {"limit":"1G", "bytes":1000000000},
+  {"limit":"1e3", "bytes":1000},
+  {"limit":"1.5k", "bytes":1500},
+  {"limit":"abc", "bytes":0},
+  {"limit":"-1Gi", "bytes":0},
+  {"limit":"0", "bytes":0},
+  {"limit":"1500m", "bytes":0},
+  {"limit":"1n", "bytes":0},
+  {"limit":"1000m", "bytes":0},
+  {"limit":"1.5Gi", "bytes":0},
+  {"limit":"9223372036854775807", "bytes":0},
+  {"limit":"9223372036854775808", "bytes":0},
+  {"limit":"9Ei", "bytes":0},
+  {"limit":"1000000000000000000000000000Gi", "bytes":0}
+]

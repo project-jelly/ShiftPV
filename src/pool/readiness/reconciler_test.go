@@ -15,6 +15,8 @@ import (
 
 var testTime = time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
 
+var testFilesystem = poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 512, AvailableInodes: 64}
+
 type fakeInspector struct{ result Result }
 
 func (f fakeInspector) Inspect(volumeapi.Pool) Result { return f.result }
@@ -96,7 +98,7 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok,
 			Writable:         Check{OK: true, Known: true, Reason: "Writable", Message: "write"},
-			CapacityReadable: Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "capacity"}}},
+			CapacityReadable: Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "capacity"}, Filesystem: testFilesystem}},
 		Interval: time.Minute, Now: func() time.Time { return testTime },
 	}
 	if err := reconciler.Reconcile(context.Background()); err != nil {
@@ -122,7 +124,7 @@ func TestReconcileRequiredMountPointKeepsAnchorAndInvalidatesInventory(t *testin
 		MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
 	}}
 	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
-	inspector := fakeInspector{Result{Accessible: ok, Mounted: ok, Writable: ok, CapacityReadable: ok, MountIdentity: identity}}
+	inspector := fakeInspector{Result{Accessible: ok, Mounted: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem, MountIdentity: identity}}
 	scans := 0
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Inspector: inspector,
@@ -175,7 +177,7 @@ func TestReconcileObservesEveryRegistrationOnNode(t *testing.T) {
 	scanned := map[string]bool{}
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Interval: time.Minute,
-		Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}},
 		Now:       func() time.Time { return testTime },
 		Inventory: func(_ context.Context, pool volumeapi.Pool, _ time.Time) volumeapi.PoolInventory {
 			scanned[pool.Name] = true
@@ -233,7 +235,7 @@ func TestReconcileKeepsInventoryFreshWhilePoolDeregisters(t *testing.T) {
 	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
 	releases := 0
 	reconciler := &Reconciler{
-		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}},
 		Interval: time.Minute, Now: func() time.Time { return testTime },
 		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
 			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true}
@@ -270,7 +272,7 @@ func TestReconcilePreservesPoolIdentityUntilInventoryIsEmpty(t *testing.T) {
 	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
 	releases := 0
 	reconciler := &Reconciler{
-		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}},
 		Interval: time.Minute, Now: func() time.Time { return testTime },
 		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
 			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy"}}}

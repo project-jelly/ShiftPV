@@ -40,15 +40,13 @@ func ownedBytesForPool(volumes map[string]volumeapi.State, poolUID string) (int6
 }
 
 func ownerPoolUID(volumeID string, state volumeapi.State) (string, error) {
-	if state.Initializing() {
+	if state.HasInitialReservation() {
+		return state.InitialPool.UID, nil
+	}
+	if state.Initializing() && state.InitialPool == nil {
 		// Legacy spec-only objects never authorized execution. Each must pass
 		// admission before acquiring a durable InitialPool reservation.
-		if state.InitialPool == nil {
-			return "", nil
-		}
-		if state.InitialPool.Name != "" && state.InitialPool.UID != "" {
-			return state.InitialPool.UID, nil
-		}
+		return "", nil
 	}
 	if state.OwnerNode == "" || state.CapacityBytes <= 0 || state.CurrentCopy == nil ||
 		state.CurrentCopy.PoolUID == "" || state.CurrentCopy.NodeName != state.OwnerNode {

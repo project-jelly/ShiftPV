@@ -65,7 +65,7 @@ func TestMetricsValues(t *testing.T) {
 				}
 			}
 			if tc.rules == 1 {
-				for _, want := range []string{"release: kube-prometheus-stack", "ShiftPVObservationFailed", "ShiftPVObservationStale", "ShiftPVPoolAccountingInvalid", "ShiftPVPoolInventoryUnsafe", "ShiftPVCleanupNeedsReview", "ShiftPVCopyNeedsReview", "ShiftPVReleasedVolumes"} {
+				for _, want := range []string{"release: kube-prometheus-stack", "ShiftPVObservationFailed", "ShiftPVObservationStale", "ShiftPVPoolAccountingInvalid", "ShiftPVPoolInventoryUnsafe", "ShiftPVCleanupNeedsReview", "ShiftPVCopyNeedsReview", "ShiftPVReleasedVolumes", "ShiftPVPoolNoSpace", "ShiftPVVolumesWithoutPersistentVolume"} {
 					if !strings.Contains(output, want) {
 						t.Fatalf("missing alert contract %q", want)
 					}

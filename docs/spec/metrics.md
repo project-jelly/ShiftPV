@@ -38,6 +38,8 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 | `shiftpv_mobility_deferred_volumes` | `reason` | 마지막 완료된 cordon discovery의 보류 사유별 Volume 수 |
 | `shiftpv_persistent_volumes` | `phase`, `pool` | `csi.shiftpv.io`가 provision한 PersistentVolume 수를 PV phase와 현재 copy를 든 Pool별로 집계 |
 | `shiftpv_persistent_volumes_released_bytes` | `pool` | `Released` PersistentVolume의 요청 capacity 합계 |
+| `shiftpv_volumes_without_persistent_volume` | `pool` | 대응하는 driver PV가 없는 Ready 또는 보존 중인 Blocked Volume owner 수; 생성·삭제·이동 중 상태 제외 |
+| `shiftpv_volumes_without_persistent_volume_reserved_bytes` | `pool` | 위 owner의 논리 예약 합계; 실제 disk usage나 폐기 권한이 아님 |
 | `shiftpv_csi_requests_total` | `method`, `code` | 지원하는 CSI lifecycle RPC 완료 횟수 |
 | `shiftpv_csi_request_duration_seconds` | `method` | 지원하는 CSI lifecycle RPC 처리 시간 |
 | `shiftpv_provisioning_step_duration_seconds` | `step` | Controller의 admission·생성·삭제·helper 및 Node 실행 시간. 중첩 단계이므로 합산하지 않는다 |
@@ -96,6 +98,11 @@ Node metrics가 켜져 있으면 API 역할(`foreground`, `observation`, `measur
 고정된 집합 밖의 값을 `Unknown`으로 접는다. Volume UID, Move UID, copy ID, operation/executor ID,
 filesystem path, Pod UID, 오류 문자열과 timestamp를 label로 사용하지 않는다.
 
+PV 부재 지표는 성공한 PV 전체 목록과 정확한 current copy·Volume UID·owner를 대조한다. Pool UID가
+현재 등록과 맞지 않으면 `pool="unknown"`으로 집계한다. 목록 실패는 snapshot 실패로 노출하며
+새로운 부재로 판정하지 않는다. `Ready` 저장과 PV 게시 사이에도 잠깐 집계될 수 있으므로 이 지표만으로
+PV 삭제나 orphan을 확정하지 않는다. 외부 API나 filesystem을 변경하지 않는다.
+
 같은 node에 여러 Pool이 있더라도 예약은 각 copy의 Pool UID로 계산한다. Pool group은
 이 합계를 묶지 않는다. owner가 destination Pool로 바뀐 뒤에도 미정산 source copy의
 예약은 원래 Pool에 남으며 cleanup이 정산되면 해제한다.
@@ -111,6 +118,7 @@ filesystem path, Pod UID, 오류 문자열과 timestamp를 label로 사용하지
 | cleanup `Verifying`/`ConfirmingAbsence` | receipt 확인 또는 post-receipt generation absence를 기다림 |
 | cleanup `NeedsReview` | parent-owned cleanup 모순으로 자동 destructive action이 닫힘 |
 | copy `OrphanPreserved` | inventory에는 있지만 현재 API transaction이 소유하지 않아 report-only로 보존함 |
+| PV 없는 owner | PV 게시 지연 또는 PV 없이 보존된 데이터·예약을 조사해야 함; 자동 삭제 대상이 아님 |
 | Move/Volume `Blocked` | API phase상 자동 진행이 닫혀 운영자 판단이 필요함 |
 
 API receipt만 있고 absence가 없거나 absence만 있고 receipt가 없는 상태는 정상적인 pending으로 계속
@@ -122,7 +130,9 @@ API receipt만 있고 absence가 없거나 absence만 있고 receipt가 없는 �
 기본 dashboard는 collection 상태, Pool readiness/inventory, Pool별 aggregate hold와 filesystem 여유,
 Volume/active Move phase, mobility deferral, CSI rate/error/latency를 분리해 보여 준다. 기본 alert rules는
 snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory, cleanup `NeedsReview`,
-orphan/missing/unsafe copy observation, 그리고 회수 판단을 기다리는 `Released` PersistentVolume을 경고한다.
+orphan/missing/unsafe copy observation, filesystem 공간 소진, PV 없는 보존 owner와 회수 판단을 기다리는
+`Released` PersistentVolume을 경고한다. Invalid/truncated/missing inventory는 inventory 경보로 다루며
+가짜 `copy_observations{state="NeedsReview"}` 수를 더하지 않는다. 실제 관측된 unsafe copy는 계속 집계한다.
 
 현재 metric에는 개별 hold owner/role, cleanup reason class, journal별 age가 label로 노출되지 않는다.
 상세 원인은 해당 Volume/Move status, Event와 log에서 확인한다.
@@ -132,3 +142,19 @@ orphan/missing/unsafe copy observation, 그리고 회수 판단을 기다리는 
 
 영구 node/disk 손실은 자동 정상화 metric으로 감추지 않고 `Blocked`/cleanup `NeedsReview`와 보존된 hold로 계속 노출한다.
 HA/replication, RWX, snapshot과 hard-quota 사용량은 0.4 metrics 계약 범위 밖이다.
+
+### ShiftPVVolumesWithoutPersistentVolume
+
+Pool별 PV 부재 count가 6시간 양수로 유지되고 metadata snapshot이 성공·신선할 때 경고한다. 먼저 Volume ID와 driver PV의
+`volumeHandle`, provisioning 진행 상태, current copy·owner와 보존 의도를 대조한다. 삭제된 Retain PV라면
+[Retain lifecycle](storage-class.md#retain-lifecycle)의 지원 경로로 같은 handle을 다시 연결하거나 명시적으로
+폐기한다. 이 경보를 근거로 finalizer·Volume·디렉터리를 강제 삭제하거나 예약을 반환하지 않는다.
+PV를 복구하면 부재 지표는 0으로 돌아가며 기존 예약은 유지된다.
+
+### ShiftPVPoolNoSpace
+
+성공·신선한 filesystem 관측에서 가용 bytes 또는 inode가 0인 상태가 5분 유지되면 경고한다.
+`Writable=True`는 작은 write/fsync probe의 성공이며 새 파일이나 cleanup metadata 공간을 보장하지 않는다.
+먼저 filesystem의 공간·inode와 외부 writer를 확인하고 안전하게 식별한 외부 점유를 줄인다. cleanup은
+durable intent를 기록하지 못하면 계속 대기한다. 데이터·metadata를 임의 삭제하거나 receipt·absence
+검증을 건너뛰지 않는다. 여유 회복 후 새 관측과 정상 재시도로 수렴하는지 확인한다.

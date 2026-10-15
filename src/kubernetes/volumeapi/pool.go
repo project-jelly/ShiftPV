@@ -497,7 +497,7 @@ func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string
 				return fmt.Errorf("%w: ShiftPVPool %q registration approval cannot be cleared", ErrStateConflict, name)
 			}
 			if status.ObservedGeneration != 0 && status.ObservedGeneration != current.Generation {
-				return fmt.Errorf("%w: ShiftPVPool %q observation generation changed", ErrStateConflict, name)
+				return fmt.Errorf("%w: ShiftPVPool %q", ErrPoolObservationChanged, name)
 			}
 			if status.CapacityUnit != nil {
 				if err := status.CapacityUnit.Validate(); err != nil {

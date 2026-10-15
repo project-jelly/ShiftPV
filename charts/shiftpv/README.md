@@ -480,8 +480,8 @@ authority가 아니며, ShiftPV는 이 신호만으로 data를 삭제하거나 f
 
 `severity`는 두 단계다. `ShiftPVObservationFailed`와 `ShiftPVObservationStale`은 controller나 node의
 관측 자체가 멈췄다는 뜻이므로 `critical`이다. 이때는 나머지 metric이 최신이 아니고, 다른 alert가
-조용하다는 사실도 근거가 되지 못한다. 나머지 다섯 alert는 관측이 살아 있는 상태에서 운영자 판단을
-요구하는 review/inventory/reclaim 신호이므로 `warning`이며, ShiftPV가 data를 보존한 채 멈춰 기다린다.
+조용하다는 사실도 근거가 되지 못한다. 나머지 alert는 용량·review·inventory·reclaim 상태에 대한
+운영자 확인을 요구하는 `warning`이다.
 
 ### ShiftPVObservationFailed
 

@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/node/ownership"
 	"github.com/project-jelly/ShiftPV/src/pool/readiness"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 // These tests use only the disposable ext4 images mounted by run.sh. Ordinary
@@ -54,6 +57,22 @@ func qualifyFullFilesystem(t *testing.T, path, mode string) {
 	if err := os.WriteFile(sentinel, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	target := volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid", NodeName: "node",
+		VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", VolumeUID: "volume-uid", CopyID: "copy-" + mode, Role: volume.RoleServing,
+	}
+	if err := ownership.PrepareServing(context.Background(), path, target, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(path, "volumes", target.VolumeID)
+	copyPayload := filepath.Join(copyPath, "payload")
+	if err := os.WriteFile(copyPayload, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copyInfo, err := os.Stat(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository := &poolRepository{pool: volumeapi.Pool{
 		Name: "pool", UID: "pool-uid", NodeName: "node", PoolGroup: "default",
 		MountPath: path, MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
@@ -72,16 +91,27 @@ func qualifyFullFilesystem(t *testing.T, path, mode string) {
 		if err := reconciler.Reconcile(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+		if got, why := repository.pool.ReadyAt(time.Now(), time.Minute); got != allowed || (!allowed && why != reason) {
+			t.Fatalf("placement: allowed=%t reason=%s, want allowed=%t reason=%s", got, why, allowed, reason)
+		}
+		writable := meta.FindStatusCondition(repository.pool.Status.Conditions, volumeapi.PoolConditionWritable)
+		capacity := meta.FindStatusCondition(repository.pool.Status.Conditions, volumeapi.PoolConditionCapacityReadable)
+		if writable == nil || capacity == nil || capacity.Status != metav1.ConditionTrue {
+			t.Fatalf("missing independent filesystem observations: writable=%+v capacity=%+v", writable, capacity)
+		}
+		// A full filesystem may still accept a small probe. Existing exact
+		// effects use that observation and their own durable intent, not Ready.
+		cleanupAllowed := writable.Status == metav1.ConditionTrue
 		for name, check := range map[string]func(time.Time, time.Duration) (bool, string){
-			"placement":      repository.pool.ReadyAt,
 			"helper cleanup": repository.pool.CleanupReadyAt,
 			"native cleanup": repository.pool.ExecutionReadyAt,
 		} {
 			got, why := check(time.Now(), time.Minute)
-			if got != allowed || (!allowed && why != reason) {
-				t.Fatalf("%s: allowed=%t reason=%s, want allowed=%t reason=%s", name, got, why, allowed, reason)
+			if got != cleanupAllowed || (!cleanupAllowed && why != writable.Reason) {
+				t.Fatalf("%s: allowed=%t reason=%s, writable=%+v", name, got, why, writable)
 			}
 		}
+		t.Logf("allocation allowed=%t; Writable=%s/%s", allowed, writable.Status, writable.Reason)
 	}
 	observe(true, "")
 	anchor := *repository.pool.Status.MountIdentity
@@ -99,10 +129,43 @@ func qualifyFullFilesystem(t *testing.T, path, mode string) {
 	}
 	t.Logf("%s exhausted: available bytes=%d inodes=%d", mode, fs.Bavail*uint64(fs.Bsize), fs.Ffree)
 	observe(false, "NoSpace")
+	checks := 0
+	operationID := "cleanup-full-" + mode
+	authority := func(_ context.Context, effectStarted bool) error {
+		checks++
+		if effectStarted {
+			return fmt.Errorf("fresh cleanup must not have started")
+		}
+		return nil
+	}
+	receipt, digest, cleanupErr := ownership.ReclaimWithResume(context.Background(), path, target, operationID, authority)
+	if !errors.Is(cleanupErr, syscall.ENOSPC) || !strings.Contains(cleanupErr.Error(), "persist local cleanup intent") ||
+		receipt != (ownership.Receipt{}) || digest != "" || checks != 1 {
+		t.Fatalf("cleanup did not stop at write-ahead intent: receipt=%+v digest=%q checks=%d err=%v", receipt, digest, checks, cleanupErr)
+	}
+	if current, err := os.Stat(copyPath); err != nil || !os.SameFile(copyInfo, current) {
+		t.Fatal("failed cleanup intent retired or replaced the source inode", err)
+	}
+	if data, err := os.ReadFile(copyPayload); err != nil || string(data) != payload {
+		t.Fatal("failed cleanup intent changed existing payload", err)
+	}
+	if err := ownership.VerifyServingPath(path, target); err != nil {
+		t.Fatal("failed cleanup intent changed serving identity", err)
+	}
+	if _, err := os.Stat(filepath.Join(path, ".shiftpv", "retired", target.CopyID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("failed cleanup intent created a retired copy", err)
+	}
 	if err := os.RemoveAll(filler); err != nil {
 		t.Fatal(err)
 	}
 	observe(true, "")
+	receipt, digest, cleanupErr = ownership.ReclaimWithResume(context.Background(), path, target, operationID, authority)
+	if cleanupErr != nil || !receipt.Retired || !receipt.Purged || digest == "" || checks != 3 {
+		t.Fatalf("cleanup did not recover with the same operation: receipt=%+v digest=%q checks=%d err=%v", receipt, digest, checks, cleanupErr)
+	}
+	if _, err := os.Stat(copyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("recovered exact cleanup retained its source path", err)
+	}
 	if *repository.pool.Status.MountIdentity != anchor {
 		t.Fatal("recovery replaced the anchored filesystem identity")
 	}
@@ -110,7 +173,7 @@ func qualifyFullFilesystem(t *testing.T, path, mode string) {
 	if err != nil || string(data) != payload {
 		t.Fatal("existing payload changed", err)
 	}
-	t.Log("freeing only test filler restored placement and cleanup gates; existing payload retained")
+	t.Log("freeing only test filler restored allocation and exact cleanup; unrelated existing payload retained")
 }
 
 func fillBlocks(t *testing.T, path string) {

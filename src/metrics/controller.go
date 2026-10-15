@@ -99,6 +99,7 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 		if persistentVolumes, err = c.PersistentVolumes.List(ctx); err != nil {
 			return err
 		}
+		values = append(values, retainedVolumeSamples(pools, persistentVolumes, volumes)...)
 	}
 	// Emitted even with no inventory: an absent series cannot be told from a
 	// Released count of zero, and ShiftPVReleasedVolumes reads absence as calm.
@@ -269,9 +270,7 @@ func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi
 	// reviewed copies. Volume and copy IDs stay out of the label set.
 	for _, pool := range pools {
 		counts := map[string]int{}
-		if pool.Status.Inventory == nil || !pool.Status.Inventory.Valid || pool.Status.Inventory.Truncated {
-			counts["NeedsReview"]++
-		}
+		// Inventory validity has its own signal; it cannot invent a copy.
 		if pool.Status.Inventory != nil {
 			for _, observed := range pool.Status.Inventory.Copies {
 				counts[observationState(observed, authority)]++

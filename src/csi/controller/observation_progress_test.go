@@ -25,7 +25,8 @@ type observationProgressInspector struct{}
 
 func (observationProgressInspector) Inspect(volumeapi.Pool) readiness.Result {
 	ok := readiness.Check{Known: true, OK: true, Reason: "OK"}
-	return readiness.Result{Accessible: ok, Writable: ok, CapacityReadable: ok}
+	return readiness.Result{Accessible: ok, Writable: ok, CapacityReadable: ok,
+		Filesystem: poolcapacity.Filesystem{TotalBytes: 1 << 30, AvailableBytes: 1 << 30, AvailableInodes: 1024}}
 }
 func (observationProgressInspector) InspectCapacityUnit(volumeapi.Pool) (*volumeapi.PoolCapacityUnit, readiness.Check) {
 	return nil, readiness.Check{}
