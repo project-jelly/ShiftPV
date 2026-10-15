@@ -11,7 +11,8 @@
 5B-2 단계 비동기 source 사용량 측정과 결과 저장 경계 [PR #207](https://github.com/project-jelly/ShiftPV/pull/207) 머지.
 5B-3 단계 legacy 상태 저장의 응답 유실 시 진단 재쓰기 방지 [PR #208](https://github.com/project-jelly/ShiftPV/pull/208) 머지.
 5B-4 단계 이동 전용 resident 용량 조회와 중단 전 확인 [PR #209](https://github.com/project-jelly/ShiftPV/pull/209) 머지.
-5B-5 단계 Volume별 API 시간 예산과 만료 후 재관측 구현 중.
+5B-5 단계 Volume별 API 시간 예산과 만료 후 재관측 [PR #210](https://github.com/project-jelly/ShiftPV/pull/210) 머지.
+5C 단계 copy 압축 후보와 실제 이미지의 metadata·중단·재시도 검증 진행 중.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.

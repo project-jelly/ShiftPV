@@ -193,7 +193,7 @@ func moveCopyArguments(source, target string) ([]string, []string) {
 		"--no-devices",
 		"--delete",
 	}
-	copyArguments := append(append([]string{}, common...), "--fsync", source, target+"/")
+	copyArguments := append(append([]string{}, common...), "--fsync", "--compress", "--compress-choice=zstd", "--compress-level=1", source, target+"/")
 	verifyArguments := append(append([]string{}, common...), "--checksum", "--dry-run", "--itemize-changes", source, target+"/")
 	return copyArguments, verifyArguments
 }

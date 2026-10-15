@@ -114,6 +114,13 @@ jobs:
       - name: Verify entrypoint
         run: docker run --rm "shiftpv-${{ matrix.component }}:ci" --help
 
+      - name: Qualify rsync filesystem primitives
+        if: matrix.component == 'controller'
+        timeout-minutes: 6
+        run: |
+          image_id=$(docker image inspect --format '{{.Id}}' shiftpv-controller:ci)
+          ./test/model/filesystem-primitives.sh "${image_id}"
+
       - name: Verify image boundary
         env:
           COMPONENT: ${{ matrix.component }}
@@ -125,6 +132,16 @@ jobs:
             docker run --rm --entrypoint /bin/sh "shiftpv-node:ci" \
               -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-volume-helper"
           fi
+
+      - name: Upload rsync qualification evidence
+        if: always() && matrix.component == 'controller'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rsync-qualification
+          path: .tmp/rsync-qualification/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
 
   candidate-image:
     name: candidate-${{ matrix.component }}

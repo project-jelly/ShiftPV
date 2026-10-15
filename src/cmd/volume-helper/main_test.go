@@ -80,6 +80,7 @@ func TestMoveCopyArgumentsPreserveFilesystemContract(t *testing.T) {
 	copyArguments, verifyArguments := moveCopyArguments("rsync://source/data/", "/pool/incoming")
 	wantCopy := []string{
 		"-aHAXS", "--numeric-ids", "--one-file-system", "--no-devices", "--delete", "--fsync",
+		"--compress", "--compress-choice=zstd", "--compress-level=1",
 		"rsync://source/data/", "/pool/incoming/",
 	}
 	wantVerify := []string{
