@@ -25,9 +25,13 @@ SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
 SOURCE_MOUNT=$(pool_mount_for_node "${SOURCE_NODE}")
 DESTINATION_MOUNT=$(pool_mount_for_node "${DESTINATION_NODE}")
+MOVE_CLEANUP_CAPABILITY=""
 
 cleanup() {
 	local result_code=$?
+	if [[ -n "${MOVE_CLEANUP_CAPABILITY}" ]]; then
+		restore_move_cleanup_capability "${MOVE_CLEANUP_CAPABILITY}" || result_code=1
+	fi
 	kubectl uncordon "${SOURCE_NODE}" >/dev/null 2>&1 || true
 	kubectl uncordon "${DESTINATION_NODE}" >/dev/null 2>&1 || true
 	kubectl delete namespace "${NAMESPACE}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
@@ -41,7 +45,7 @@ cleanup_pod_name_for_uid() {
 		-o jsonpath="{.items[?(@.metadata.uid=='${pod_uid}')].metadata.name}" 2>/dev/null || true
 }
 
-for command in docker kubectl awk; do
+for command in docker kubectl awk jq; do
 	command -v "${command}" >/dev/null || {
 		echo "required command not found: ${command}" >&2
 		exit 1
@@ -127,6 +131,9 @@ kubectl -n "${NAMESPACE}" exec "${SOURCE_POD}" -- sh -ec '
 SOURCE_CHECKSUM=$(pod_sha256 "${NAMESPACE}" "${SOURCE_POD}" /data/payload)
 
 kubectl uncordon "${DESTINATION_NODE}"
+# This case must exercise Job Pod rebinding even when resident cleanup is
+# available. Restore the capability once this Move has bound its Job.
+MOVE_CLEANUP_CAPABILITY=$(suspend_move_cleanup_capability "${SOURCE_NODE}")
 kubectl cordon "${SOURCE_NODE}"
 MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 180)
 
@@ -159,6 +166,8 @@ if [[ -z "${killed_pod_name}" ]]; then
 	kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2 || true
 	exit 1
 fi
+restore_move_cleanup_capability "${MOVE_CLEANUP_CAPABILITY}"
+MOVE_CLEANUP_CAPABILITY=""
 
 retry_pod_uid=""
 for _ in {1..300}; do
@@ -180,6 +189,7 @@ kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Succeed
 cleanup_job_uid_after=$(kubectl -n shiftpv-system get "job/${cleanup_job}" -o jsonpath='{.metadata.uid}')
 final_pod_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.executor.podUID}')
 receipt_executor_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.receipt.executorUID}')
+test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.executor.kind}')" = ""
 test "${cleanup_job_uid_after}" = "${cleanup_job_uid_before}"
 test "${final_pod_uid}" = "${retry_pod_uid}"
 test "${final_pod_uid}" != "${killed_pod_uid}"
