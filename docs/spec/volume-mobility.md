@@ -177,8 +177,15 @@ incoming copy and promotes only after verification.
 Required copy command semantics:
 
 ```text
-rsync -aHAXS --numeric-ids --one-file-system --no-devices --delete --fsync
+rsync -aHAXS --numeric-ids --one-file-system --no-devices --delete --fsync \
+  --compress --compress-choice=zstd --compress-level=1
 ```
+
+Compression applies only to copy transport. Both helper endpoints need
+zstd-capable rsync; custom images without it fail the copy before promotion.
+Checksum verification keeps its uncompressed command. Sparse, bandwidth-limited
+copies can transfer fewer bytes; incompressible data still incurs codec CPU work.
+This does not bound total Move time or change the Job deadline.
 
 The copy must be followed by checksum verification before promotion. `--fsync`
 reduces the crash window, but real power-loss durability still needs dedicated
@@ -187,6 +194,11 @@ fault validation on the target filesystem and host configuration.
 Nested filesystem traversal and device-node recreation are explicitly excluded
 from the Volume data contract by the copy options. The supported data set is
 verified with the same exclusions before promotion.
+
+Change helper images after active operations settle. Existing source Pods and
+Jobs compare the configured image and execution shape exactly. If upgrading the
+controller first, pin compatible `mobility.helperImage` and `helperPod.image`,
+plus the existing service-account/resource/timeout profile, until settlement.
 
 ## State Table
 

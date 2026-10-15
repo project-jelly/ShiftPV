@@ -36,7 +36,8 @@ v04-kubernetes-primitives:
 	./test/model/kubernetes-primitives.sh
 
 v04-filesystem-primitives:
-	./test/model/filesystem-primitives.sh
+	@image_id=$$(docker image inspect --format '{{.Id}}' "$(IMAGE)") && \
+		./test/model/filesystem-primitives.sh "$${image_id}"
 
 coverage:
 	mkdir -p .tmp

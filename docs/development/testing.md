@@ -41,11 +41,12 @@ Kubernetes probe는 다음 전제를 실제 API server에서 확인한다.
 - `spec.initialPool`은 Create·status 쓰기에서 보존되고, 구버전 객체에 최초 추가만 허용하며 변경·제거는 거부한다.
 - gated Pod의 한 번의 Update에서 owner selector 추가와 ShiftPV gate 제거가 가능하며, 같은 UID와 사용자 gate·selector·affinity가 보존된다. API 제약 검증이며 controller 전체 E2E는 아니다.
 
-Filesystem probe는 target helper image의 rsync daemon에서
-`-aHAXS --numeric-ids --one-file-system --no-devices --delete --fsync`와 checksum dry-run이 hardlink,
-symlink, FIFO, UID/GID, mode, sparse file, ACL, xattr를 보존하는지 확인한다.
-Device node 재생성과 nested filesystem traversal은 제외 범위다. 검사 도구 설치에 network를 사용하며 성능과
-power-loss를 증명하지 않는다.
+Filesystem probe는 immutable helper image에서 baseline과 copy-only zstd level 1을 각각
+clean/TERM/KILL로 검증한다. SHA256·checksum dry-run, hardlink·symlink·FIFO·UID/GID·mode·sparse·ACL·xattr를
+확인하고 실제 partial write 뒤 기존 process group의 종료를 확인한 후 같은 destination으로 재시도한다.
+Copy의 fsync와 검증 command는 유지한다. 도구 설치 전후 원래 rsync와 라이브러리 hash가 같아야 한다.
+Controller image CI가 이 검사를 실행하며 `.tmp/rsync-qualification/`을 artifact로 보관한다.
+검사 도구 설치에만 network를 사용한다. Device node·nested filesystem, 운영 성능과 power-loss 검증은 별도다.
 
 ## Fast repository gate
 
@@ -55,9 +56,9 @@ go test -race -count=1 ./...
 git diff --check
 ```
 
-`make verify`는 model과 repository-local gate를 함께 실행한다. Docker/Kind probe는 로컬 환경에
-의존하므로 별도 gate로 유지하고, copy option·base image·Kubernetes version·CRD protocol 전제가
-바뀐 때 다시 실행한다.
+`make verify`는 model과 repository-local gate를 함께 실행한다. Docker/Kind probe는 별도 gate이며
+관련 CI에서 실행한다. Copy option·base image·Kubernetes version·CRD protocol 전제가 바뀌면 해당
+probe를 다시 검증한다.
 
 ## Required protocol tests
 
