@@ -25,16 +25,18 @@ import (
 )
 
 type retryRepository struct {
-	mu      sync.Mutex
-	pools   []volumeapi.Pool
-	volumes map[string]volumeapi.State
-	moves   []volumeapi.Move
-	err     error
+	mu         sync.Mutex
+	pools      []volumeapi.Pool
+	volumes    map[string]volumeapi.State
+	moves      []volumeapi.Move
+	err        error
+	readyReads int
 }
 
 func (r *retryRepository) ReadyPools(context.Context) ([]volumeapi.Pool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.readyReads++
 	return append([]volumeapi.Pool(nil), r.pools...), r.err
 }
 func (r *retryRepository) ListVolumes(context.Context) (map[string]volumeapi.State, error) {
@@ -270,5 +272,112 @@ func TestInformerDeletionWakesWithoutCSIRequest(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("watch did not stop")
+	}
+}
+
+func TestPoolStatusRecoveryWakesObservationWaitWithoutCSIRequest(t *testing.T) {
+	retries, repo, client := retrySetup(t)
+	if _, err := client.CoreV1().PersistentVolumeClaims("vmtest").Create(context.Background(), retryPVC("scratch"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	healthy := repo.pools
+	repo.pools = nil
+	retries.RegisterObservation("vmtest", "scratch", "scratch", "node", "default", volumeapi.Pool{})
+	pool := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool", "metadata": map[string]any{"name": "pool", "uid": "pool", "resourceVersion": "1"}}}
+	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList",
+	}, pool)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { retries.Run(ctx, dynamicClient); close(done) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("retry watcher did not stop")
+		}
+	}()
+	if err := wait.PollUntilContextTimeout(ctx, time.Millisecond, 3*time.Second, true, func(context.Context) (bool, error) {
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		return repo.readyReads > 0, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if notified(t, client, "scratch") {
+		t.Fatal("unready Pool notified a claim")
+	}
+	repo.mu.Lock()
+	repo.pools = healthy
+	// No spare quota: observation recovery must not double-charge a hold or
+	// depend on the logical capacity fan-out used for new reservations.
+	repo.volumes["full"] = heldVolume("pool", 128<<20)
+	repo.mu.Unlock()
+	pool.SetResourceVersion("2")
+	pool.Object["status"] = map[string]any{"observedGeneration": int64(1)}
+	if _, err := dynamicClient.Resource(volumeapi.PoolResource).UpdateStatus(ctx, pool, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait.PollUntilContextTimeout(ctx, time.Millisecond, 3*time.Second, true, func(context.Context) (bool, error) {
+		return notified(t, client, "scratch"), nil
+	}); err != nil {
+		t.Fatal("Pool status recovery did not wake the claim before the 30s fallback", err)
+	}
+}
+
+func TestObservationWaitRetainsClaimIdentityGuards(t *testing.T) {
+	for _, change := range []func(*corev1.PersistentVolumeClaim){
+		func(p *corev1.PersistentVolumeClaim) { p.UID = "replacement" },
+		func(p *corev1.PersistentVolumeClaim) { p.Annotations[selectedNodeAnnotation] = "other" },
+		func(p *corev1.PersistentVolumeClaim) { p.Spec.VolumeName = "bound" },
+	} {
+		retries, _, client := retrySetup(t, "scratch")
+		retries.RegisterObservation("vmtest", "scratch", "scratch", "node", "default", volumeapi.Pool{})
+		pvc := retryPVC("scratch")
+		change(pvc)
+		if _, err := client.CoreV1().PersistentVolumeClaims("vmtest").Update(context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := retries.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if notified(t, client, "scratch") || len(retries.snapshot()) != 0 {
+			t.Fatal("observation notification bypassed claim identity guards")
+		}
+	}
+}
+
+func TestFailedProbeWaitRequiresNewObservation(t *testing.T) {
+	for _, recovery := range []string{"fresh probe", "clock moves backward", "new generation", "another pool"} {
+		t.Run(recovery, func(t *testing.T) {
+			retries, repo, client := retrySetup(t, "scratch")
+			repo.pools[0].Generation = 3
+			repo.pools[0].Status.LastProbeTime = metav1.NewTime(time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC))
+			observed := repo.pools[0]
+			retries.RegisterObservation("vmtest", "scratch", "scratch", "node", "default", observed)
+			if err := retries.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if notified(t, client, "scratch") {
+				t.Fatal("unchanged Ready snapshot caused an immediate failed-probe retry")
+			}
+			switch recovery {
+			case "fresh probe":
+				repo.pools[0].Status.LastProbeTime = metav1.NewTime(observed.Status.LastProbeTime.Add(time.Second))
+			case "clock moves backward":
+				repo.pools[0].Status.LastProbeTime = metav1.NewTime(observed.Status.LastProbeTime.Add(-time.Second))
+			case "new generation":
+				repo.pools[0].Generation++
+			case "another pool":
+				repo.pools = append(repo.pools, volumeapi.Pool{Name: "peer", UID: "peer", NodeName: "node", CapacityLimit: "128Mi"})
+			}
+			if err := retries.Reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !notified(t, client, "scratch") {
+				t.Fatal("new successful observation did not notify the waiting claim")
+			}
+		})
 	}
 }

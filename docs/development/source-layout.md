@@ -38,7 +38,7 @@ src/
 │   ├── executor/           resident execution; RPC and Watch share one Volume gate
 │   ├── metadata/           settled-record retention and live API reference checks
 │   └── ownership/          exact local identity, stable locks, effects and receipts
-├── provisioning/           capacity retry and Controller-side execution requests
+├── provisioning/           capacity/observation retry and Controller-side execution requests
 │   └── nodeexecutor/       executor selection, binding, transport and receipt waiting
 ├── pool/                   readiness and conservative capacity accounting
 ├── metrics/                cached observation only

@@ -77,6 +77,7 @@ type Service struct {
 	ObserveStep             func(string, time.Duration)
 	RetryRequests           interface {
 		Register(namespace, name, uid, node, group string, requested int64)
+		RegisterObservation(namespace, name, uid, node, group string, observed volumeapi.Pool)
 	}
 	ProvisioningGate ProvisioningGate
 	Cleanups         *cleanupapi.Store

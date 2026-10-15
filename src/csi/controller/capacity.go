@@ -94,6 +94,9 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 	pools, err := s.CapacityPools.ReadyPools(ctx)
 	poolsDone()
 	if err != nil {
+		if errors.Is(err, volumeapi.ErrPoolNotReady) {
+			s.waitForPoolObservation(parameters, requestName, nodeName, volumeapi.Pool{})
+		}
 		return volumeapi.State{}, poolSelectionError(err)
 	}
 	group := requestedPoolGroup(parameters)
@@ -111,6 +114,9 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 		found = true
 		created, fit, err := s.attemptCreateInPool(ctx, pool, id, requestName, requestedBytes, parameters)
 		if err != nil {
+			if errors.Is(err, volumeapi.ErrPoolNotReady) {
+				s.waitForPoolObservation(parameters, requestName, nodeName, pool)
+			}
 			return volumeapi.State{}, err
 		}
 		if fit.allowed {
@@ -121,6 +127,7 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 		}
 	}
 	if !found {
+		s.waitForPoolObservation(parameters, requestName, nodeName, volumeapi.Pool{})
 		return volumeapi.State{}, status.Errorf(codes.FailedPrecondition, "node %q has no Ready Pool in group %q", nodeName, group)
 	}
 	return volumeapi.State{}, denied
@@ -167,6 +174,9 @@ func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, id, request
 
 	stats, err := s.inspectCapacity(ctx, pool, id)
 	if err != nil {
+		if errors.Is(err, volumeapi.ErrPoolNotReady) {
+			s.waitForPoolObservation(parameters, requestName, pool.NodeName, pool)
+		}
 		return poolFit{denial: capacityProbeError("inspect Pool filesystem capacity", err)}, nil
 	}
 	if requestedBytes > stats.AvailableBytes {
@@ -175,6 +185,12 @@ func (s *Service) poolFits(ctx context.Context, pool volumeapi.Pool, id, request
 			pool.Name, requestedBytes, stats.AvailableBytes)}, nil
 	}
 	return poolFit{allowed: true}, nil
+}
+
+func (s *Service) waitForPoolObservation(parameters map[string]string, requestName, node string, observed volumeapi.Pool) {
+	if s.RetryRequests != nil {
+		s.RetryRequests.RegisterObservation(parameters[PVCNamespaceKey], parameters[PVCNameKey], strings.TrimPrefix(requestName, "pvc-"), node, requestedPoolGroup(parameters), observed)
+	}
 }
 
 // Capacity size and placement ownership are independent. Only a scheduler-managed
@@ -198,6 +214,9 @@ func (s *Service) capacityDenied(ctx context.Context, parameters map[string]stri
 		if requestedBytes <= limitBytes && placement.Placement == consumer.Fixed && stats == nil && !s.observedTotalCanFit(pool, requestedBytes) {
 			observed, err := s.inspectCapacity(ctx, pool, id)
 			if err != nil {
+				if errors.Is(err, volumeapi.ErrPoolNotReady) {
+					s.waitForPoolObservation(parameters, requestName, pool.NodeName, pool)
+				}
 				return capacityProbeError("inspect Pool filesystem capacity", err)
 			}
 			stats = &observed

@@ -21,6 +21,7 @@ func TestCleanupReadinessDoesNotRequirePlacementInventory(t *testing.T) {
 		change func(*unstructured.Unstructured)
 		want   error
 	}{
+		{name: "sibling scan pending", change: func(p *unstructured.Unstructured) { p.SetGeneration(2) }},
 		{name: "invalid inventory", change: func(p *unstructured.Unstructured) {
 			_ = unstructured.SetNestedField(p.Object, false, "status", "inventory", "valid")
 		}},

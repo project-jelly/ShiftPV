@@ -33,6 +33,10 @@ type retryRecorder struct {
 	groups []string
 }
 
+func (r *retryRecorder) RegisterObservation(ns, name, uid, node, group string, _ volumeapi.Pool) {
+	r.Register(ns, name, uid, node, group, 0)
+}
+
 func (r *retryRecorder) Register(ns, name, uid, node, group string, size int64) {
 	r.calls = append(r.calls, consumer.Request{Namespace: ns, Name: name, UID: uid, Node: node})
 	r.bytes = append(r.bytes, size)

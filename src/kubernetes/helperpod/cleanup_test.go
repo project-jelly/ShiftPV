@@ -227,6 +227,23 @@ func TestCleanupRunnerDefersEffectWhilePoolIsNotReady(t *testing.T) {
 	}
 }
 
+func TestHelperCleanupRetainsCurrentGenerationRequirement(t *testing.T) {
+	cleanups, cleanup := cleanupFixture(t)
+	client := fake.NewClientset()
+	runner := validRunner(client)
+	pool := readyCleanupPool(volumeapi.Pool{Name: cleanup.Spec.Target.PoolName, UID: cleanup.Spec.Target.PoolUID,
+		NodeName: cleanup.Spec.Target.NodeName, MountPath: "/mnt/shiftpv"})
+	pool.Generation++
+	runner.Pools = fakePoolResolver{pool: pool}
+	if _, err := runner.Reclaim(context.Background(), cleanup, cleanups); err == nil || !isRetryable(err) {
+		t.Fatalf("Helper used the native execution relaxation: %v", err)
+	}
+	jobs, err := client.BatchV1().Jobs(runner.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil || len(jobs.Items) != 0 {
+		t.Fatalf("Helper started without a current observation: jobs=%+v err=%v", jobs, err)
+	}
+}
+
 func TestCleanupRunnerJoinsStartedExecutorFromStalePendingSnapshot(t *testing.T) {
 	ctx := context.Background()
 	cleanups, stale := cleanupFixture(t)

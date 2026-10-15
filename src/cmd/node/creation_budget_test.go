@@ -102,7 +102,7 @@ func TestNodeCreationSharesBoundedBudgetAcrossPools(t *testing.T) {
 				}
 			}
 			node := &executor.Node{Identity: fixture.identity, Pods: clients.effects.Typed.CoreV1().Pods(fixture.identity.Namespace), Volumes: registry,
-				Cleanups: &cleanupapi.Store{Client: clients.effects.Dynamic}, HostRoot: fixture.root, RPCCertificate: "certificate", VerifyPool: func(string, volumeapi.Pool) error { return nil }}
+				Cleanups: &cleanupapi.Store{Client: clients.effects.Dynamic}, HostRoot: fixture.root, RPCCertificate: "certificate", VerifyBacking: func(string, volumeapi.Pool) error { return nil }}
 			service := &rpcserver.Service{Identity: fixture.identity, Executor: node, Pools: registry, VerifyIdentity: node.VerifyRPC,
 				Probe: &measurement.Probe{Pools: registry, HostRoot: fixture.root, VerifyMount: func(string, volumeapi.Pool) error { return nil },
 					Read: func(string) (capacity.Filesystem, error) {

@@ -190,6 +190,8 @@ spec:
                       type: boolean
                     truncated:
                       type: boolean
+                    reason:
+                      type: string
                     message:
                       type: string
                     copies:

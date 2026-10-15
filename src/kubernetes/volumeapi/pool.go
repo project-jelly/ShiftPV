@@ -73,10 +73,13 @@ type PoolMountIdentity struct {
 	Filesystem string `json:"filesystem"`
 }
 
+const InventoryPhysicalChanged = "PhysicalInventoryChanged"
+
 type PoolInventory struct {
 	ObservedAt metav1.Time       `json:"observedAt"`
 	Valid      bool              `json:"valid"`
 	Truncated  bool              `json:"truncated,omitempty"`
+	Reason     string            `json:"reason,omitempty"`
 	Message    string            `json:"message,omitempty"`
 	Copies     []CopyObservation `json:"copies,omitempty"`
 }
@@ -304,9 +307,9 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 	return pool, nil
 }
 
-// CleanupPoolForIdentity checks an approved cleanup's exact Pool and backing
-// readiness. Placement inventory and peer admission do not authorize cleanup;
-// complete post-effect inventory is required later to release its hold.
+// CleanupPoolForIdentity checks an approved native cleanup's exact Pool and
+// backing observation. Its executor must also verify live anchored backing.
+// Complete post-effect inventory is required separately to release its hold.
 func (r *Registry) CleanupPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
 	pool, err := r.PoolForIdentity(ctx, name, uid, nodeName)
 	if err != nil {
@@ -316,7 +319,7 @@ func (r *Registry) CleanupPoolForIdentity(ctx context.Context, name, uid, nodeNa
 		return Pool{}, fmt.Errorf("%w: cleanup Pool protection is unavailable", ErrStateConflict)
 	}
 	now, staleAfter := r.readiness()
-	if ready, reason := pool.CleanupReadyAt(now, staleAfter); !ready {
+	if ready, reason := pool.ExecutionReadyAt(now, staleAfter); !ready {
 		return Pool{}, fmt.Errorf("%w: cleanup Pool %q: %s", ErrPoolNotReady, pool.Name, reason)
 	}
 	return pool, nil
@@ -547,6 +550,10 @@ func (r *Registry) updatePoolFinalizer(ctx context.Context, name, uid string, pr
 }
 
 func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	return p.readyAt(now, staleAfter, p.Generation)
+}
+
+func (p Pool) readyAt(now time.Time, staleAfter time.Duration, generation int64) (bool, string) {
 	if p.DeletionTimestamp != nil {
 		return false, "PoolDeregistering"
 	}
@@ -557,28 +564,28 @@ func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 		}
 		return false, "ProbePending"
 	}
-	if p.Status.ObservedGeneration != p.Generation || condition.ObservedGeneration != p.Generation {
+	if p.Status.ObservedGeneration != generation || condition.ObservedGeneration != generation {
 		return false, "ProbeOutdated"
 	}
 	if p.Status.LastProbeTime.IsZero() || staleAfter <= 0 || now.Sub(p.Status.LastProbeTime.Time) > staleAfter || now.Before(p.Status.LastProbeTime.Time) {
 		return false, "ProbeStale"
 	}
-	if ready, reason := p.mountReady(); !ready {
+	if ready, reason := p.mountReady(generation); !ready {
 		return false, reason
 	}
-	if ready, reason := p.capacityReady(); !ready {
+	if ready, reason := p.capacityReadyAt(generation); !ready {
 		return false, reason
 	}
 	return true, condition.Reason
 }
 
-func (p Pool) mountReady() (bool, string) {
+func (p Pool) mountReady(generation int64) (bool, string) {
 	if p.MountPolicy == PoolMountPolicyRequireMountPoint {
 		if p.Status.MountIdentity == nil {
 			return false, "MountIdentityMissing"
 		}
 		mounted := meta.FindStatusCondition(p.Status.Conditions, PoolConditionMounted)
-		if mounted != nil && mounted.ObservedGeneration != p.Generation {
+		if mounted != nil && mounted.ObservedGeneration != generation {
 			return false, "MountProbeOutdated"
 		}
 		if mounted == nil || mounted.Status != metav1.ConditionTrue {
@@ -595,8 +602,24 @@ func (p Pool) mountReady() (bool, string) {
 // is terminating or has invalid placement settings. Both require fresh backing
 // and directory observations independently of placement Ready.
 func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	return p.cleanupReadyAt(now, staleAfter, p.Generation)
+}
+
+// ExecutionReadyAt is only for exact, already-approved native effects that also
+// verify live mount and block-allocation identity at every authority boundary.
+// A newer scan request does not revoke the original reservation. Retain fresh,
+// coherent successful backing evidence; never use this for placement, Helper
+// execution, destination publication proof, or post-effect absence confirmation.
+func (p Pool) ExecutionReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	if p.Status.ObservedGeneration <= 0 || p.Status.ObservedGeneration > p.Generation {
+		return false, "ProbeOutdated"
+	}
+	return p.cleanupReadyAt(now, staleAfter, p.Status.ObservedGeneration)
+}
+
+func (p Pool) cleanupReadyAt(now time.Time, staleAfter time.Duration, generation int64) (bool, string) {
 	if p.DeletionTimestamp == nil && p.ConfigurationCheck().OK {
-		return p.ReadyAt(now, staleAfter)
+		return p.readyAt(now, staleAfter, generation)
 	}
 	if check := p.BackingConfigurationCheck(); !check.OK {
 		return false, check.Reason
@@ -604,10 +627,10 @@ func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, str
 	if p.MountPolicy == PoolMountPolicyRequireMountPoint && p.Status.MountIdentity == nil {
 		return false, "MountIdentityMissing"
 	}
-	if p.Status.ObservedGeneration != p.Generation {
+	if p.Status.ObservedGeneration != generation {
 		return false, "ProbeOutdated"
 	}
-	if ready, reason := p.capacityReady(); !ready {
+	if ready, reason := p.capacityReadyAt(generation); !ready {
 		return false, reason
 	}
 	conditionTypes := []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable}
@@ -619,7 +642,7 @@ func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, str
 		if condition == nil {
 			return false, "ProbePending"
 		}
-		if condition.ObservedGeneration != p.Generation {
+		if condition.ObservedGeneration != generation {
 			return false, "ProbeOutdated"
 		}
 		if condition.Status != metav1.ConditionTrue {
