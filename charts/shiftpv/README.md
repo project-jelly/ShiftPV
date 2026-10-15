@@ -426,7 +426,7 @@ kubectl get shiftpvpools -o yaml
 Node outage 중에는 관련 journal/finalizer를 제거하지 않는다. Node가 같은 identity로 돌아오면 동일
 transaction을 재개한다. 영구 authoritative disk/node 손실은 제품 복구 범위 밖이다.
 
-실행 승인 뒤 `Blocked` 복구는 [복구 절차](../../docs/spec/volume-mobility.md#operator-procedure)를
+새 `prepared-v1` Move의 실행 승인 뒤 `Blocked` 복구는 [복구 절차](../../docs/spec/volume-mobility.md#operator-procedure)를
 따른다. PV/PVC와 workload를 보존하고 실패 전제조건을 복구한 뒤 `spec.recovery=ResumeOwner`를
 요청한다. PVC 재생성은 UID를 바꾸므로 원래 binding의 복구가 되지 않는다.
 

@@ -249,7 +249,7 @@ controlled source consumer before discovery; that is outside automatic migration
 support. Uncordon a healthy source to recover an unassigned held replacement when
 no unsettled Move owns it, then retry the planned sequence.
 
-For `Blocked` after execution approval:
+For `Blocked` after execution approval on a new `prepared-v1` Move:
 
 1. Inspect the Move, Volume current owner/copy, Pool readiness and embedded cleanup
    reason. Keep the PV/PVC and workload; deleting or recreating a claim changes its
@@ -264,8 +264,9 @@ For `Blocked` after execution approval:
    readiness. Completion is `Recovered` with cleared `activeMove` and settled
    cleanup/holds, not merely acceptance of the patch.
 
-A missing/recreated claim after execution approval remains an operator recovery
-case. `ResumeOwner` does not adopt a new UID or fabricate absent publication proof.
+A missing/recreated claim after prepared execution approval remains an operator
+recovery case. `ResumeOwner` does not adopt a new UID or fabricate absent publication
+proof. Legacy Moves retain their original protocol's binding checks.
 Before approval, preparation cancellation settles metadata without those objects;
 restoring application availability still requires a valid workload and binding.
 
