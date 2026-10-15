@@ -19,6 +19,16 @@ type Discovery struct {
 }
 
 func (d Discovery) Find(ctx context.Context, node string) (*volumeapi.NodeExecutor, error) {
+	return d.find(ctx, node, false)
+}
+
+// FindMoveCleanup requires the additional Move journal recovery capability.
+// The original v1 effect advertisement alone only covers Volume operations.
+func (d Discovery) FindMoveCleanup(ctx context.Context, node string) (*volumeapi.NodeExecutor, error) {
+	return d.find(ctx, node, true)
+}
+
+func (d Discovery) find(ctx context.Context, node string, moveCleanup bool) (*volumeapi.NodeExecutor, error) {
 	if d.DaemonSet == "" {
 		return nil, nil
 	}
@@ -35,7 +45,8 @@ func (d Discovery) Find(ctx context.Context, node string) (*volumeapi.NodeExecut
 	}
 	var result *volumeapi.NodeExecutor
 	for _, pod := range pods.Items {
-		if pod.Spec.NodeName != node || !ownedExecutor(pod, ds) {
+		if pod.Spec.NodeName != node || !ownedExecutor(pod, ds) ||
+			(moveCleanup && pod.Annotations[volumeapi.NodeMoveCleanupAnnotation] != "v1") {
 			continue
 		}
 		if result != nil {

@@ -93,8 +93,12 @@ func (c *Client) cleanupResult(ctx context.Context, expected cleanupapi.Cleanup,
 	if err != nil {
 		return current, err
 	}
-	if current.Spec != expected.Spec || current.UID != expected.UID || current.Status.Receipt == nil || current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode || current.Status.Phase != cleanupapi.PhaseVerifying {
+	if current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode {
 		return current, cleanupapi.ErrConflict
 	}
-	return current, nil
+	done, err := cleanupDone(expected, current)
+	if err == nil && !done {
+		err = cleanupapi.ErrConflict
+	}
+	return current, err
 }

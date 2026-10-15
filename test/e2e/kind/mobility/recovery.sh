@@ -68,13 +68,17 @@ recover_source_only() {
 	kubectl delete namespace shiftpv-mobility-blocked --wait=true --timeout=180s
 }
 
-recover_after_commit_failure() {
-	local return_move current_pod latest_checksum failed_job destination_mount source_copy
+recover_after_commit_failure() (
+	local return_move current_pod latest_checksum failed_job destination_mount source_copy cleanup_capability
+	cleanup_capability=""
+	# Keep this trap local to the case; run.sh owns cluster teardown.
+	trap 'if [[ -n "${cleanup_capability}" ]]; then restore_move_cleanup_capability "${cleanup_capability}"; fi' EXIT
 	# The current owner becomes the return Move source. The test helper fails the
 	# approved cleanup before filesystem mutation without invalidating inventory.
 	source_copy=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
 	test -n "${source_copy}"
 	kubectl uncordon "${SOURCE_NODE}"
+	cleanup_capability=$(suspend_move_cleanup_capability "${DESTINATION_NODE}")
 	kubectl cordon "${DESTINATION_NODE}"
 	return_move=""
 	for _ in {1..120}; do
@@ -87,6 +91,9 @@ recover_after_commit_failure() {
 	local fault_path="${destination_mount}/.shiftpv-e2e-fail-cleanup"
 	docker exec "${DESTINATION_NODE}" test ! -e "${fault_path}"
 	docker exec "${DESTINATION_NODE}" touch -- "${fault_path}"
+	wait_for_cleanup_job_binding "shiftpvmove/${return_move}"
+	restore_move_cleanup_capability "${cleanup_capability}"
+	cleanup_capability=""
 	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.phase}'=Blocked --timeout=480s
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.spec.sourceNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.reason}')" = "CleanupFailed"
@@ -125,4 +132,4 @@ recover_after_commit_failure() {
 	kubectl uncordon "${DESTINATION_NODE}"
 	echo 'post-commit cleanup review passed: current owner writes preserved; non-owner copy, Move lock, and capacity hold retained'
 	verify_cleanup_lifecycle "${return_move}" "${DESTINATION_NODE}" "${destination_mount}" "${latest_checksum}" "${current_pod}"
-}
+)

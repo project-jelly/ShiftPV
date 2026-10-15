@@ -23,7 +23,7 @@ source "${ROOT_DIR}/test/e2e/kind/mobility/cleanup-lifecycle.sh"
 # shellcheck source=test/e2e/kind/mobility/terminal-journal-gc.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/terminal-journal-gc.sh"
 
-for command in docker kind kubectl helm sed; do
+for command in docker kind kubectl helm sed jq shasum; do
 	command -v "${command}" >/dev/null || {
 		echo "required command not found: ${command}" >&2
 		exit 1
@@ -154,7 +154,7 @@ BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
 # test_preflight runs it after every scenario.
 KIND_MOBILITY_GROUP=${KIND_MOBILITY_GROUP:-all}
 case "${KIND_MOBILITY_GROUP}" in
-all | g1 | g2 | g3 | preparation) ;;
+all | g1 | g2 | g3 | preparation | node-cleanup) ;;
 *)
 	echo "unsupported KIND_MOBILITY_GROUP: ${KIND_MOBILITY_GROUP}" >&2
 	exit 1
@@ -168,6 +168,10 @@ group_selected() {
 if group_selected preparation; then
 	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/legacy-upgrade.sh"
 	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/preparation.sh"
+fi
+
+if group_selected node-cleanup; then
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/native-cleanup.sh"
 fi
 
 if group_selected g1; then

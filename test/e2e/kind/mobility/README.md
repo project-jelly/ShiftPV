@@ -6,6 +6,13 @@ Status: 0.4 target suite contract.
 ./test/e2e/kind/mobility/run.sh
 ```
 
+`KIND_MOBILITY_GROUP=node-cleanup` exercises native source cleanup with rejected
+API receipt writes, postcommit source drain, Node Pod replacement and controller
+restart. It requires the same local receipt and operation to finish with a later
+absence scan, unchanged PVC/PV/checksum, and no cleanup Job. The `g2` completion
+and `g3` cleanup-failure cases explicitly select legacy Jobs to retain backend
+compatibility coverage. This does not qualify drain-before-move behavior.
+
 The product Controller must create and advance the Move. Tests may inject API, process, node, network and
 filesystem failures, but must not patch a successful status or perform the product copy/purge from the host.
 

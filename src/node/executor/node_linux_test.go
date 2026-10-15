@@ -41,6 +41,16 @@ func TestNodeRecoversPersistedIntentOnStartup(t *testing.T) {
 	stream := watch.NewRaceFreeFake()
 	opened := make(chan struct{}, 1)
 	dynamic.PrependWatchReactor("shiftpvvolumes", func(ktesting.Action) (bool, watch.Interface, error) { opened <- struct{}{}; return true, stream, nil })
+	// The second watch is empty, but must complete its initial list before the
+	// resident executor advertises either watch as ready.
+	dynamic.PrependWatchReactor("shiftpvmoves", func(ktesting.Action) (bool, watch.Interface, error) {
+		moves := watch.NewRaceFreeFake()
+		bookmark := &unstructured.Unstructured{}
+		bookmark.SetResourceVersion("1")
+		bookmark.SetAnnotations(map[string]string{metav1.InitialEventsAnnotationKey: "true"})
+		moves.Action(watch.Bookmark, bookmark)
+		return true, moves, nil
+	})
 	var receipts atomic.Int32
 	dynamic.PrependReactor("update", "shiftpvvolumes", func(action ktesting.Action) (bool, runtime.Object, error) {
 		object := action.(ktesting.UpdateAction).GetObject().(*unstructured.Unstructured).DeepCopy()

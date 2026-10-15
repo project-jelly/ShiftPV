@@ -63,7 +63,10 @@ func (r *Reconciler) ensureCleanupSpec(ctx context.Context, move *volumeapi.Move
 	if request.Status.Phase == cleanupapi.PhaseCompleted {
 		return nil
 	}
-	if request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
+	// A Job can persist its receipt before exiting. Re-entry must still
+	// observe its termination (or Job and Pod absence) before opening a scan.
+	jobVerifying := request.Status.Phase == cleanupapi.PhaseVerifying && request.Status.Executor != nil && request.Status.Executor.Kind == ""
+	if jobVerifying || request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
 		request, err = r.CleanupOperator.Reclaim(ctx, request, r.Cleanups)
 		if err != nil {
 			return err
@@ -93,7 +96,7 @@ func (r *Reconciler) cleanupContractComplete(move *volumeapi.Move, spec cleanupa
 func cleanupReceiptComplete(request cleanupapi.Cleanup, spec cleanupapi.Spec) bool {
 	return (request.Status.Phase == cleanupapi.PhaseVerifying || request.Status.Phase == cleanupapi.PhaseConfirmingAbsence) &&
 		request.Status.Receipt != nil && request.Status.Executor != nil &&
-		request.Status.Receipt.OperationID == spec.OperationID && request.Status.Receipt.ExecutorUID == request.Status.Executor.JobUID &&
+		request.Status.Receipt.OperationID == spec.OperationID && request.Status.Receipt.ExecutorUID == request.Status.Executor.ExecutionUID() &&
 		request.Status.Receipt.Retired && request.Status.Receipt.Purged
 }
 
