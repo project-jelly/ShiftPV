@@ -149,6 +149,7 @@ func newPreparationRegistryFixture(t *testing.T, count int) *preparationRegistry
 	f.registry = &volumeapi.Registry{Client: f.dynamic}
 	f.reconciler = newTestReconciler(f.client, f.registry, func(r *Reconciler) {
 		r.CapacityProbe = fakeMoveCapacityProbe{usage: 1 << 20, stats: poolcapacity.Filesystem{AvailableBytes: 20 << 30}}
+		r.SourceUsage = r.CapacityProbe.(SourceUsage)
 		r.Cleanups = &cleanupapi.Store{Client: f.dynamic}
 	})
 	return f

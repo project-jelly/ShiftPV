@@ -340,6 +340,25 @@ func (m *memoryRepository) CompareAndSetMoveStatus(_ context.Context, expected v
 	return volumeapi.Move{}, apierrors.NewNotFound(volumeapi.MoveResource.GroupResource(), expected.Name)
 }
 
+// Identity/CAS fixture only; actual Registry tests exercise the authority contract.
+func (m *memoryRepository) RecordSourceUsage(_ context.Context, expected volumeapi.Move, copy volume.CopyIdentity, bytes int64) (volumeapi.Move, error) {
+	for index := range m.moves {
+		current := &m.moves[index]
+		if current.Name != expected.Name {
+			continue
+		}
+		if current.UID != expected.UID || current.ResourceVersion != expected.ResourceVersion || current.Spec != expected.Spec ||
+			bytes <= 0 || (current.Status.SourceBytes > 0 && current.Status.SourceBytes != bytes) {
+			return volumeapi.Move{}, volumeapi.ErrStateConflict
+		}
+		current.Status.SourceCopy = &copy
+		current.Status.SourceBytes = bytes
+		advanceTestMoveVersion(current)
+		return *current, nil
+	}
+	return volumeapi.Move{}, apierrors.NewNotFound(volumeapi.MoveResource.GroupResource(), expected.Name)
+}
+
 func advanceTestMoveVersion(move *volumeapi.Move) {
 	version, _ := strconv.ParseUint(move.ResourceVersion, 10, 64)
 	move.ResourceVersion = strconv.FormatUint(version+1, 10)

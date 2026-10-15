@@ -137,8 +137,18 @@ fresh ledger admission, and owner commit still use that shared lock. Admission
 and external writers remain outside the Volume queue and require the existing
 CAS and publication fences. Cleanup binds an executor and observes its journal
 once, returning the worker while the Node watch or Job executes. Pending cleanup
-preserves the Move phase and holds. Source usage measurement can still wait
-inside a worker; two long measurements can currently occupy both workers.
+preserves the Move phase and holds. Source usage uses one Move UID-owned read-only
+Pod with a fixed deadline. Each pass observes once. A successful result is stored
+by exact Move CAS after rechecking the unpublished source authority; only then
+is the Pod retired. Lost replies retain the result for re-observation. Cancellation
+restores source authority before waiting for this read-only helper to disappear.
+
+Routine Pool scan generations do not restart an unchanged source measurement.
+The helper rechecks current inventory and live backing after reading, waiting only
+for stale successful observations while retaining the measured bytes. Changed
+configuration, copy or publication and explicit failed evidence discard the result.
+Destination statfs and API calls can still occupy a worker; their bounded execution
+is the next step.
 
 ## Copy Contract
 

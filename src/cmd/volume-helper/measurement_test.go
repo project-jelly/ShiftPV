@@ -29,6 +29,10 @@ type measurementRepository struct {
 	err   error
 }
 
+func (r *measurementRepository) PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error) {
+	return r.pool, r.err
+}
+
 func (r *measurementRepository) ReadyPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error) {
 	return r.pool, r.err
 }
@@ -45,6 +49,13 @@ func (r *measurementRepository) InstallationID(context.Context) (string, error) 
 func measurementFixture(t *testing.T) (*measurementRepository, measurementOptions) {
 	t.Helper()
 	pool := volumeapi.Pool{Name: "pool-a", UID: "pool-uid", NodeName: "node-a", MountPath: "/mnt/a", Generation: 1}
+	now := time.Now()
+	pool.Finalizers = []string{volumeapi.PoolProtectionFinalizer}
+	pool.Status = volumeapi.PoolStatus{ObservedGeneration: 1, LastProbeTime: metav1.NewTime(now),
+		Inventory: &volumeapi.PoolInventory{Valid: true, ObservedAt: metav1.NewTime(now)}}
+	for _, kind := range []string{volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable} {
+		pool.Status.Conditions = append(pool.Status.Conditions, metav1.Condition{Type: kind, Status: metav1.ConditionTrue, ObservedGeneration: 1})
+	}
 	copy := volume.CopyIdentity{InstallationID: "installation", PoolName: pool.Name, PoolUID: pool.UID, NodeName: pool.NodeName,
 		VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", VolumeUID: "volume-uid", CopyID: "copy-id", Role: volume.RoleServing}
 	evidence, err := capacity.MeasurementEvidence(pool)
@@ -52,7 +63,7 @@ func measurementFixture(t *testing.T) (*measurementRepository, measurementOption
 		t.Fatal(err)
 	}
 	return &measurementRepository{pool: pool, state: volumeapi.State{UID: copy.VolumeUID, OwnerNode: copy.NodeName, Phase: volumeapi.PhaseMoving, CurrentCopy: &copy}},
-		measurementOptions{pool: pool, root: t.TempDir(), evidence: evidence, volumeID: copy.VolumeID, copy: &copy}
+		measurementOptions{pool: pool, root: t.TempDir(), evidence: evidence, volumeID: copy.VolumeID, copy: &copy, now: func() time.Time { return now }}
 }
 
 func TestMeasurementRejectsContradictionsBeforeReading(t *testing.T) {
@@ -107,7 +118,7 @@ func TestMeasurementDiscardsResultWhenAuthorityChangesDuringRead(t *testing.T) {
 			output, err := measureWithAuthority(context.Background(), repo, options, verifyMount, func(string, volume.CopyIdentity) error { return nil }, func(context.Context) (string, error) {
 				switch scenario {
 				case "Pool":
-					repo.pool.Generation++
+					repo.pool.PoolGroup = "changed-group"
 				case "copy":
 					copy := *repo.state.CurrentCopy
 					copy.CopyID = "replacement-copy"
@@ -170,6 +181,9 @@ func TestMeasurementRegistryRejectsChangedUsageProofBeforeAndAfterRead(t *testin
 			}
 			t.Run(name, func(t *testing.T) {
 				registry, client, options := measurementRegistryFixture(t)
+				// Generation/time-only staleness waits without publishing the du
+				// result. Bound that wait here; dedicated tests refresh the proof.
+				options.wait = func(context.Context) error { return context.DeadlineExceeded }
 				change := func() {
 					resource, objectName := volumeapi.PoolResource, options.pool.Name
 					if scenario == "copy" || scenario == "published" {
@@ -273,6 +287,7 @@ func measurementRegistryFixture(t *testing.T) (*volumeapi.Registry, *dynamicfake
 	}, objects...)
 	registry := &volumeapi.Registry{Client: client, Now: func() time.Time { return now }, PoolReadinessStaleAfter: time.Minute}
 	options.pool = pool
+	options.now, options.staleAfter = registry.Now, registry.PoolReadinessStaleAfter
 	options.evidence, err = capacity.MeasurementEvidence(pool)
 	if err != nil {
 		t.Fatal(err)

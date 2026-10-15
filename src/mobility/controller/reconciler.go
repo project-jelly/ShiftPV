@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -48,17 +49,23 @@ type Repository interface {
 	GetMove(context.Context, string) (volumeapi.Move, error)
 	SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error
 	CompareAndSetMoveStatus(context.Context, volumeapi.Move, volumeapi.MoveStatus) (volumeapi.Move, error)
+	RecordSourceUsage(context.Context, volumeapi.Move, volume.CopyIdentity, int64) (volumeapi.Move, error)
 }
 
 type CapacityProbe interface {
 	StatFSForPool(context.Context, volumeapi.Pool) (poolcapacity.Filesystem, error)
-	VolumeUsageForCopy(context.Context, volume.CopyIdentity) (int64, error)
+}
+
+type SourceUsage interface {
+	AdvanceSourceUsage(context.Context, volumeapi.Move, volume.CopyIdentity) (int64, bool, error)
+	FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error)
 }
 
 type Reconciler struct {
 	Client                     kubernetes.Interface
 	Repository                 Repository
 	CapacityProbe              CapacityProbe
+	SourceUsage                SourceUsage
 	PoolLocks                  *poolcapacity.Locker
 	Namespace                  string
 	HelperImage                string
@@ -100,7 +107,9 @@ func (r *Reconciler) reconcilePersistedMove(ctx context.Context, move volumeapi.
 	}
 	phase := fsm.Phase(move.Status.Phase)
 	if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {
-		return r.reconcileRecovery(ctx, move)
+		// A read-only measurement must not delay restoring source authority.
+		_, cleanupErr := r.finalizeSourceUsage(ctx, move)
+		return errors.Join(r.reconcileRecovery(ctx, move), cleanupErr)
 	}
 	if phase == fsm.PhaseSucceeded || (phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered) {
 		// Finish a terminal journal's destructive operation before releasing
@@ -114,7 +123,8 @@ func (r *Reconciler) reconcilePersistedMove(ctx context.Context, move volumeapi.
 		return r.reconcileTerminalMove(ctx, move)
 	}
 	if phase == fsm.PhaseBlocked {
-		return nil
+		_, err := r.finalizeSourceUsage(ctx, move)
+		return err
 	}
 	return r.reconcileMove(ctx, move)
 }
@@ -128,6 +138,9 @@ func supportedMoveProtocol(move volumeapi.Move) bool {
 }
 
 func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.Move) error {
+	if done, err := r.finalizeSourceUsage(ctx, move); err != nil || !done {
+		return err
+	}
 	if slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer) {
 		return r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID)
 	}
@@ -163,7 +176,7 @@ func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.M
 }
 
 func (r *Reconciler) validate() error {
-	if r == nil || r.Client == nil || r.Repository == nil || r.Namespace == "" || r.HelperImage == "" {
+	if r == nil || r.Client == nil || r.Repository == nil || r.SourceUsage == nil || r.Namespace == "" || r.HelperImage == "" {
 		return fmt.Errorf("mobility reconciler is not configured")
 	}
 	return nil

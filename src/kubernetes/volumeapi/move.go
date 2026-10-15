@@ -366,6 +366,9 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 }
 
 func preserveMoveIdentity(current, next MoveStatus) error {
+	if next.SourceBytes < 0 || (current.SourceBytes > 0 && current.SourceBytes != next.SourceBytes) {
+		return fmt.Errorf("%w: recorded Move sourceBytes is immutable", ErrStateConflict)
+	}
 	if next.RollbackRequiredGeneration < 0 || (current.RollbackRequiredGeneration > 0 && current.RollbackRequiredGeneration != next.RollbackRequiredGeneration) {
 		return fmt.Errorf("%w: Move rollbackRequiredGeneration is immutable", ErrStateConflict)
 	}

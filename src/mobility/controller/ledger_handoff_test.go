@@ -327,7 +327,7 @@ func newLedgerHandoffFixture(t *testing.T, approved bool) *ledgerHandoffFixture 
 	}, objects...)
 	f.registry = &volumeapi.Registry{Client: f.client}
 	f.reconciler = &Reconciler{Client: fake.NewSimpleClientset(), Namespace: "system", HelperImage: "helper", Repository: f.registry,
-		PoolLocks: &poolcapacity.Locker{}, CapacityProbe: fakeMoveCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
+		SourceUsage: fakeMoveCapacityProbe{}, PoolLocks: &poolcapacity.Locker{}, CapacityProbe: fakeMoveCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
 		Cleanups: &cleanupapi.Store{Client: f.client}}
 	if approved {
 		f.move.Status.DestinationNode, f.move.Status.DestinationPoolUID = f.destinationPool.NodeName, f.destinationPool.UID

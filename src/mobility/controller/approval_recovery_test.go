@@ -41,6 +41,7 @@ func approvedBeforeCopyFixture(t *testing.T) (*Reconciler, *memoryRepository, *f
 	r.Now = func() time.Time { return now }
 	r.PoolLocks = &poolcapacity.Locker{}
 	r.CapacityProbe = fakeMoveCapacityProbe{usage: 1 << 20, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}}
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	if err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err != nil {
 		t.Fatal(err)
 	}

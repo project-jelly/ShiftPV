@@ -45,7 +45,7 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 		return r.requestPreparationCancellation(ctx, &move, decision.Reason)
 	}
 	if err := r.execute(ctx, &move, observed, decision); err != nil {
-		if errors.Is(err, errCleanupPending) {
+		if errors.Is(err, errCleanupPending) || errors.Is(err, errSourceUsagePending) {
 			return nil
 		}
 		if errors.Is(err, errCapacityApprovalPersistence) {

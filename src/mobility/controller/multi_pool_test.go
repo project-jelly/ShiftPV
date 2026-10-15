@@ -36,6 +36,7 @@ func TestMoveCapacitySelectsIndependentPoolOnDestinationNode(t *testing.T) {
 	repo.volumes["existing"] = volumeapi.State{OwnerNode: "destination", CapacityBytes: 128 << 20}
 	probe := &poolAwareCapacityProbe{}
 	r.CapacityProbe = probe
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	if err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +178,7 @@ func TestCapacityApprovalFailureIsNotReplayedByDiagnostics(t *testing.T) {
 			w.observeAndLock(t)
 			state := w.repository.volumes[w.volumeID]
 			state.CapacityBytes = 32 << 20
+			state.PublishedNodes = nil
 			w.repository.volumes[w.volumeID] = state
 			w.ensurePlacementOnDestination(t)
 			w.move.Status.Phase = string(fsm.PhaseWaitingForCapacity)
@@ -188,6 +190,7 @@ func TestCapacityApprovalFailureIsNotReplayedByDiagnostics(t *testing.T) {
 				w.repository.pools[i].CapacityLimit = "128Mi"
 			}
 			w.reconciler.CapacityProbe = fakeMoveCapacityProbe{usage: 1, stats: poolcapacity.Filesystem{AvailableBytes: 128 << 20}}
+			w.reconciler.SourceUsage = w.reconciler.CapacityProbe.(SourceUsage)
 			w.reconciler.PoolLocks = &poolcapacity.Locker{}
 			repository := &approvalFailureRepository{memoryRepository: w.repository, accepted: accepted}
 			w.reconciler.Repository = repository
@@ -209,4 +212,12 @@ func TestCapacityApprovalFailureIsNotReplayedByDiagnostics(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (p *poolAwareCapacityProbe) AdvanceSourceUsage(ctx context.Context, _ volumeapi.Move, copy volume.CopyIdentity) (int64, bool, error) {
+	measured, err := p.VolumeUsageForCopy(ctx, copy)
+	return measured, true, err
+}
+func (p *poolAwareCapacityProbe) FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error) {
+	return true, nil
 }

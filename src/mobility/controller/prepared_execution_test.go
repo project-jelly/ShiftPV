@@ -107,6 +107,7 @@ func TestPreparedExecutionCancelsBeforeDiskAuthority(t *testing.T) {
 			f, move := preparationAtCapacity(t)
 			if change == "physical space" {
 				f.reconciler.CapacityProbe = fakeMoveCapacityProbe{usage: 2 << 20, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 20}}
+				f.reconciler.SourceUsage = f.reconciler.CapacityProbe.(SourceUsage)
 				if err := f.reconciler.reconcileMove(f.ctx, move); err != nil {
 					t.Fatal(err)
 				}

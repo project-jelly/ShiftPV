@@ -7,7 +7,8 @@
 3단계 자기 backing 검증과 신규 할당 조건 분리 [PR #203](https://github.com/project-jelly/ShiftPV/pull/203) 머지.
 4단계 Move cleanup의 resident Node 실행 [PR #204](https://github.com/project-jelly/ShiftPV/pull/204) 머지.
 5A 단계 Volume별 queue와 Pool 잠금 경합 시 재시도 [PR #205](https://github.com/project-jelly/ShiftPV/pull/205) 머지.
-5B-1 단계 cleanup의 짧은 관측과 Job 정산 재진입 보강 진행 중.
+5B-1 단계 cleanup의 짧은 관측과 Job 정산 재진입 [PR #206](https://github.com/project-jelly/ShiftPV/pull/206) 머지.
+5B-2 단계 비동기 source 사용량 측정과 결과 저장 경계 검증 진행 중.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.
@@ -25,7 +26,8 @@ Pod 배치, 용량 예약과 cleanup이 같은 결론으로 수렴하게 한다.
 - 모순된 증거는 보존하고, 일시적인 실패는 현재 증거를 재관측해 복구한다.
 
 owner CAS, exact copy identity, checksum/fsync, API purge receipt와 그 이후 fresh absence
-조건을 유지한다. 영구 디스크 손실 복구와 모든 이동 도중 drain의 성공은 범위 밖이다.
+조건을 유지한다. SP-STAB-038은 `cordon → 이동 완료 → drain` 절차와 잘못 실행한 뒤
+원래 owner로 복구하는 경로를 검증한다. 영구 디스크 손실 복구와 drain-first 자동 이동은 범위 밖이다.
 
 ## 구현 순서와 완료 조건
 
@@ -65,9 +67,10 @@ Volume별 처리              동일 Volume 직렬화, 다른 Volume 진행 (5�
 Queue는 admission이나 외부 API 쓰기를 직렬화하지 않으므로, 현재 증거 재조회·CAS·
 NodePublish 권한 검사가 필요하다.
 
-5단계는 네 PR 단위로 나눈다. 5A는 Volume별 queue·제한된 worker와 Pool 잠금 경합의
+5단계는 다음 PR 단위로 나눈다. 5A는 Volume별 queue·제한된 worker와 Pool 잠금 경합의
 즉시 재시도로 진행을 격리한다. 5B-1은 cleanup, 5B-2는 source 사용량 측정을 관측 가능한
-짧은 단계로 바꿔 worker를 반환한다. 5C는 동일 이미지·workload의 copy 측정과
+짧은 단계로 바꿔 worker를 반환한다. 이어서 목적지 statfs의 대기 시간과 Volume별 API 시간 예산을 제한하고,
+legacy 상태 저장의 응답 유실 경계를 보강한다. 5C는 동일 이미지·workload의 copy 측정과
 중단·재시도·metadata 검증을 통과한 성능 변경만 채택한다.
 
 ## 준비 예약의 설계 조건

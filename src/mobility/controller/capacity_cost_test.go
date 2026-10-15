@@ -60,6 +60,7 @@ func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *tes
 			return poolcapacity.Filesystem{AvailableBytes: 128 << 20}, nil
 		},
 	}
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := r.ensureCapacity(ctx, &move, observation{DestinationNode: "destination"}); err != nil {
@@ -83,6 +84,7 @@ func TestCapacityRetryReusesPersistedSourceMeasurement(t *testing.T) {
 			return poolcapacity.Filesystem{AvailableBytes: 128 << 20}, nil
 		},
 	}
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	if err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err == nil {
 		t.Fatal("missing probe failure")
 	}
@@ -107,4 +109,12 @@ func capacityCostFixture() (*Reconciler, *memoryRepository, volumeapi.Move) {
 	r := newTestReconciler(fake.NewSimpleClientset(), repo)
 	r.PoolLocks = &poolcapacity.Locker{}
 	return r, repo, move
+}
+
+func (p measuredCapacityProbe) AdvanceSourceUsage(ctx context.Context, _ volumeapi.Move, copy volume.CopyIdentity) (int64, bool, error) {
+	measured, err := p.VolumeUsageForCopy(ctx, copy)
+	return measured, true, err
+}
+func (p measuredCapacityProbe) FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error) {
+	return true, nil
 }

@@ -413,6 +413,10 @@ func TestCompletionAfterVolumeDeletion(t *testing.T) {
 			action.GetNamespace() == metav1.NamespaceAll && list.GetListRestrictions().Labels.String() == admission.ManagedLabel+"=true" {
 			continue
 		}
+		if list, ok := action.(ktesting.ListAction); ok && action.Matches("list", "pods") && action.GetNamespace() == "system" &&
+			list.GetListRestrictions().Labels.String() == "" {
+			continue
+		}
 		if action.GetVerb() != "get" && action.GetVerb() != "delete" {
 			t.Fatalf("completion recreated or inspected disk resources: %+v", action)
 		}
