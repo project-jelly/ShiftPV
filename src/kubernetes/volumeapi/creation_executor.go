@@ -17,6 +17,9 @@ import (
 // NodeEffectsAnnotation advertises the resident execution contract on a Node Pod.
 const NodeEffectsAnnotation = "shiftpv.io/node-effects"
 
+// NodeMoveCleanupAnnotation advertises Move cleanup recovery after both intent watches sync.
+const NodeMoveCleanupAnnotation = "shiftpv.io/node-move-cleanup"
+
 // NodeExecutor pins execution to one incarnation of the resident Node Pod.
 type NodeExecutor struct {
 	Namespace string `json:"namespace"`

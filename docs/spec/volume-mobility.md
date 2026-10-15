@@ -17,7 +17,7 @@ permanent authoritative disk or node loss is outside this contract.
 | Partial copies | Incoming or incomplete copies never promote and never become owner. |
 | Publish proof | Destination actual-publish proof is required before source cleanup. |
 | Cleanup owner | The Move journal and finalizer own source and rollback cleanup decisions. |
-| Executors | Helper Jobs perform effects only; they own no truth. |
+| Executors | Helper Jobs copy, verify and promote. Resident Node executors or already-bound Jobs perform cleanup; the parent journals own truth. |
 | Identity contradiction | Move enters `Blocked`; cleanup subjournals may enter `NeedsReview`. |
 
 `activeMove` is the per-volume lock. The Move keeps it until source cleanup has

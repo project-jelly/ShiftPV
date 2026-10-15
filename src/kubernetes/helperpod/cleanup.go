@@ -94,13 +94,17 @@ func (r *Runner) runCleanupExecutor(ctx context.Context, cleanup cleanupapi.Clea
 
 // triageCleanup reports whether the durable phase already decides this
 // reconcile: a settled cleanup is returned as it stands, and one already under
-// review is an error no executor work may follow.
+// review is an error no executor work may follow. A resident Node binding also
+// ends helper work without changing the winning backend's journal.
 func triageCleanup(current cleanupapi.Cleanup) (bool, cleanupapi.Cleanup, error) {
 	switch current.Status.Phase {
 	case cleanupapi.PhaseCompleted, cleanupapi.PhaseConfirmingAbsence:
 		return true, current, nil
 	case cleanupapi.PhaseNeedsReview:
 		return true, cleanupapi.Cleanup{}, fmt.Errorf("cleanup %q needs review: %s", current.Name, current.Status.Reason)
+	}
+	if current.Status.Executor != nil && current.Status.Executor.Kind == cleanupapi.ExecutorNode {
+		return true, current, fmt.Errorf("%w: cleanup is bound to a resident Node", cleanupapi.ErrConflict)
 	}
 	return false, cleanupapi.Cleanup{}, nil
 }

@@ -63,7 +63,10 @@ func (r *Reconciler) ensureCleanupSpec(ctx context.Context, move *volumeapi.Move
 	if request.Status.Phase == cleanupapi.PhaseCompleted {
 		return nil
 	}
-	if request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
+	// A Job can persist its receipt before exiting. Re-entry must still
+	// observe its termination (or Job and Pod absence) before opening a scan.
+	jobVerifying := request.Status.Phase == cleanupapi.PhaseVerifying && request.Status.Executor != nil && request.Status.Executor.Kind == ""
+	if jobVerifying || request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
 		request, err = r.CleanupOperator.Reclaim(ctx, request, r.Cleanups)
 		if err != nil {
 			return err
@@ -93,7 +96,7 @@ func (r *Reconciler) cleanupContractComplete(move *volumeapi.Move, spec cleanupa
 func cleanupReceiptComplete(request cleanupapi.Cleanup, spec cleanupapi.Spec) bool {
 	return (request.Status.Phase == cleanupapi.PhaseVerifying || request.Status.Phase == cleanupapi.PhaseConfirmingAbsence) &&
 		request.Status.Receipt != nil && request.Status.Executor != nil &&
-		request.Status.Receipt.OperationID == spec.OperationID && request.Status.Receipt.ExecutorUID == request.Status.Executor.JobUID &&
+		request.Status.Receipt.OperationID == spec.OperationID && request.Status.Receipt.ExecutorUID == request.Status.Executor.ExecutionUID() &&
 		request.Status.Receipt.Retired && request.Status.Receipt.Purged
 }
 
@@ -189,6 +192,14 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return r.reviewCleanupJournal(ctx, current, "TerminalMoveCleanupIntentUnfinished",
 			fmt.Sprintf("terminal Move carries a cleanup intent still in phase %q with no purge receipt", current.Status.Phase))
 	}
+	observed, err := r.observeTerminalExecutor(ctx, current)
+	if err != nil {
+		if errors.Is(err, volumeapi.ErrPoolNotFound) {
+			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
+		}
+		return err
+	}
+	current = observed
 	if err := r.driveCleanupAbsence(ctx, current); err != nil {
 		if contradictedCleanup(err) {
 			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
@@ -196,6 +207,19 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return err
 	}
 	return nil
+}
+
+func (r *Reconciler) observeTerminalExecutor(ctx context.Context, current cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
+	if current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor == nil || current.Status.Executor.Kind != "" {
+		return current, nil
+	}
+	if r.CleanupOperator == nil {
+		return current, fmt.Errorf("cleanup executor settlement observer is not configured")
+	}
+	// Verifying cannot return to Pending/Running, and its receipt and executor
+	// are immutable in Store. Reclaim therefore only observes the bound Job's
+	// termination; it needs neither ActiveMove nor new execution authority.
+	return r.CleanupOperator.Reclaim(ctx, current, r.Cleanups)
 }
 
 // driveCleanupAbsence finishes a receipt-bearing journal through its Pool

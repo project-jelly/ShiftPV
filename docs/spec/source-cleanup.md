@@ -5,8 +5,8 @@ This describes the current implementation. Qualification requirements are in [Te
 Cleanup removes only exact non-authoritative ShiftPV copies. There is no
 standalone durable cleanup CR. Durable truth lives in `status.cleanup` on the
 parent `ShiftPVVolume` delete journal/finalizer or the parent `ShiftPVMove`
-rollback/source-cleanup journal/finalizer. Helper Jobs execute filesystem
-effects and own no truth.
+rollback/source-cleanup journal/finalizer. Resident Node executors and Helper
+Jobs execute filesystem effects and own no truth.
 
 ## Authority
 
@@ -14,7 +14,7 @@ effects and own no truth.
 |---|---|
 | Volume journal/finalizer | Delete the committed Volume copy during `DeleteVolume`. |
 | Move journal/finalizer | Delete rollback artifacts before commit and source copy after commit. |
-| Helper Job | Execute retire, purge, and local receipt effects for the parent journal. |
+| Resident Node or Helper Job | Execute retire, purge, and local receipt effects for the parent journal. |
 | Pool inventory | Report observations; never grants deletion authority by itself. |
 
 Every destructive operation must be derived from a durable exact parent intent.
@@ -105,6 +105,30 @@ absence is a contradiction, not proof; the cleanup subjournal enters
 
 Move cleanup is parent-owned by the Move journal and finalizer.
 
+An unbound Move cleanup selects a resident Node advertising
+`shiftpv.io/node-move-cleanup: v1`; otherwise it uses a Helper Job. An already
+bound Job, or an accepted suspended Job awaiting binding, stays on the Job
+path. Copy, verification and promotion continue to use Jobs.
+
+The Node advertises this capability only after both Volume and Move watches
+have synced. RPC and watch recovery share the same per-Volume execution gate.
+Every effect and receipt replay rechecks the exact Move UID, active Volume,
+target copy, executor Pod UID and current authority. Rollback uses the recorded
+incoming or destination copy, not the Volume's authoritative source copy.
+
+A Node-bound operation never falls back to a Job on timeout or replacement.
+After the old Pod is absent, another capable Node Pod on the same node may bind
+the same operation and replay its durable local receipt. The Node writes the
+API receipt; the controller still requests a later Pool scan and requires fresh
+absence before releasing the hold. A Job receipt additionally requires Job
+completion, or absence of both the Job and its owned Pods if the Job was lost.
+Controller re-entry preserves this check.
+
+Apply Node RBAC for Move get/list/watch/status updates before rolling out the new
+Node binary. Older Nodes can continue executing already-bound Jobs. Downgrading
+a Node-bound unfinished operation to a binary without Move cleanup support
+cannot make progress; finish these operations before downgrading.
+
 | Case | Rule |
 |---|---|
 | Precommit abort | Destination incoming or promoted non-owner copy may be purged only from exact Move intent. |
@@ -178,7 +202,9 @@ capacity hold.
 | Failure point | Recovery rule |
 |---|---|
 | Node down before cleanup | Wait; resume when the node returns. |
-| Helper Job lost before effect | Recreate from parent journal after live authority recheck. |
+| Resident Node Pod replaced | After old Pod absence, bind a capable replacement to the same journal; recheck authority and replay the exact local receipt. |
+| Unbound Helper Job lost | May recreate before binding after live authority recheck. |
+| Bound Helper Job lost without receipt | Cleanup enters `NeedsReview`; do not replace its Job UID. |
 | Helper Job lost after retire | Same Job UID may rebind a new Pod and continue if exact; a different Job UID enters cleanup `NeedsReview`. |
 | Unlink succeeds, receipt lost | Reconstruct result only with prior exact intent and local effect evidence, then request the post-receipt absence fence. |
 | API timeout recording receipt | Read back receipt; retry idempotently if absent. |

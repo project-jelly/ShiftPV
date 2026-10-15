@@ -54,6 +54,10 @@ spec:
   policyName: ${POLICY}
   validationActions: [Deny]
 EOF
+# This case deliberately removes the completed Job during CSI deletion. Keep
+# that legacy backend contract while other cases exercise resident cleanup.
+MOVE_CLEANUP_CAPABILITY=$(suspend_move_cleanup_capability "${SOURCE}")
+trap 'if [[ -n "${MOVE_CLEANUP_CAPABILITY:-}" ]]; then restore_move_cleanup_capability "${MOVE_CLEANUP_CAPABILITY}"; fi' EXIT
 kubectl cordon "${SOURCE}"
 deadline=$((SECONDS + 180))
 MOVE=""
@@ -63,6 +67,9 @@ while ((SECONDS < deadline)); do
 	sleep 1
 done
 test -n "${MOVE}"
+wait_for_cleanup_job_binding "shiftpvmove/${MOVE}"
+restore_move_cleanup_capability "${MOVE_CLEANUP_CAPABILITY}"
+MOVE_CLEANUP_CAPABILITY=""
 kubectl wait "shiftpvmove/${MOVE}" --for=jsonpath='{.status.phase}'=Completing --timeout=300s
 deadline=$((SECONDS + 120))
 while ((SECONDS < deadline)); do

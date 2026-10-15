@@ -37,10 +37,13 @@ func (n *Node) executeLocked(ctx context.Context, name string) error {
 	if state.Phase == volumeapi.PhaseNodeCreating && state.CreationExecutor != nil && *state.CreationExecutor == n.Identity && state.CreationReceipt == nil {
 		return n.create(ctx, state)
 	}
-	if state.Phase != volumeapi.PhaseDeleting {
+	if state.Phase != volumeapi.PhaseDeleting && state.ActiveMove == "" {
 		return nil
 	}
-	approved, err := n.Cleanups.Get(ctx, cleanupapi.Authority{Kind: "ShiftPVVolume", Name: name, UID: state.UID})
+	approved, err := n.resolveCleanup(ctx, name, state)
+	if errors.Is(err, cleanupapi.ErrNoJournal) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -48,6 +51,30 @@ func (n *Node) executeLocked(ctx context.Context, name string) error {
 		return nil
 	}
 	return n.reclaim(ctx, approved)
+}
+
+// The Volume's current ActiveMove selects a journal; names or queued events
+// alone never authorize cleanup of a former Move's artifact.
+func (n *Node) resolveCleanup(ctx context.Context, volumeID string, state volumeapi.State) (cleanupapi.Cleanup, error) {
+	authority := cleanupapi.Authority{Kind: "ShiftPVVolume", Name: volumeID, UID: state.UID}
+	if state.ActiveMove != "" {
+		move, err := n.Volumes.GetMove(ctx, state.ActiveMove)
+		if err != nil {
+			return cleanupapi.Cleanup{}, err
+		}
+		if move.Name != state.ActiveMove || move.UID == "" || move.Spec.VolumeID != volumeID {
+			return cleanupapi.Cleanup{}, volumeapi.ErrStateConflict
+		}
+		authority = cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID}
+	}
+	approved, err := n.Cleanups.Get(ctx, authority)
+	if err != nil {
+		return cleanupapi.Cleanup{}, err
+	}
+	if approved.Spec.Target.VolumeID != volumeID || approved.Spec.Target.VolumeUID != state.UID {
+		return cleanupapi.Cleanup{}, volumeapi.ErrStateConflict
+	}
+	return approved, nil
 }
 func (n *Node) poolRoot(ctx context.Context, copy volume.CopyIdentity) (string, error) {
 	if copy.Validate() != nil || copy.NodeName != n.Identity.NodeName || !filepath.IsAbs(n.HostRoot) {

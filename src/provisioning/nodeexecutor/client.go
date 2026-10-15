@@ -92,8 +92,8 @@ func (c *Client) Reclaim(ctx context.Context, expected cleanupapi.Cleanup, store
 	if err != nil {
 		return current, err
 	}
-	if current.Spec != expected.Spec || current.UID != expected.UID {
-		return current, cleanupapi.ErrConflict
+	if done, err := cleanupDone(expected, current); done || err != nil {
+		return current, err
 	}
 	legacy, err := c.legacyCleanup(ctx, current)
 	if err != nil {
@@ -102,27 +102,29 @@ func (c *Client) Reclaim(ctx context.Context, expected cleanupapi.Cleanup, store
 	if legacy {
 		return c.Fallback.Reclaim(ctx, current, store)
 	}
-	if current.Status.Phase == cleanupapi.PhaseNeedsReview {
-		return current, cleanupapi.ErrConflict
-	}
-	if current.Status.Receipt != nil {
-		return current, nil
-	}
 	if _, err := c.Volumes.CleanupPoolForIdentity(ctx, current.Spec.Target.PoolName, current.Spec.Target.PoolUID, current.Spec.Target.NodeName); err != nil {
 		return current, err
 	}
+	wasNodeBound := current.Status.Executor != nil
 	if err := c.bindCleanup(ctx, current, store); err != nil {
 		return current, err
 	}
-	// An unbound operation on an older Node uses the legacy suspended Job path.
+	// Binding and discovery may race a legacy helper or completion. Adopt only
+	// a fresh observation of the same journal before choosing the effect path.
 	current, err = store.Get(ctx, expected.Spec.Authority)
 	if err != nil {
 		return current, err
 	}
-	if current.Status.Executor == nil {
+	if wasNodeBound && (current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode) {
+		return current, cleanupapi.ErrConflict
+	}
+	if done, err := cleanupDone(expected, current); done || err != nil {
+		return current, err
+	}
+	if current.Status.Executor == nil || current.Status.Executor.Kind == "" {
 		return c.Fallback.Reclaim(ctx, current, store)
 	}
-	direct, err := c.invoke(ctx, nodeBinding(*current.Status.Executor), protocol.Operation_RECLAIM, &protocol.EffectRequest{ExecutorUid: current.Status.Executor.PodUID, NodeName: current.Spec.Target.NodeName, VolumeName: current.Spec.Authority.Name, VolumeUid: current.Spec.Authority.UID, OperationId: current.Spec.OperationID})
+	direct, err := c.invoke(ctx, nodeBinding(*current.Status.Executor), protocol.Operation_RECLAIM, cleanupRequest(current))
 	if err != nil {
 		return current, err
 	}
@@ -138,13 +140,10 @@ func (c *Client) awaitCleanup(ctx context.Context, expected cleanupapi.Cleanup, 
 		if err != nil {
 			return false, err
 		}
-		if current.Spec != expected.Spec || current.UID != expected.UID || current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode {
+		if current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode {
 			return false, cleanupapi.ErrConflict
 		}
-		if current.Status.Phase == cleanupapi.PhaseNeedsReview {
-			return false, cleanupapi.ErrConflict
-		}
-		return current.Status.Phase == cleanupapi.PhaseVerifying && current.Status.Receipt != nil, nil
+		return cleanupDone(expected, current)
 	})
 	return current, err
 }
@@ -153,12 +152,19 @@ func nodeBinding(e cleanupapi.Executor) volumeapi.NodeExecutor {
 }
 func (c *Client) bindCleanup(ctx context.Context, current cleanupapi.Cleanup, store helperpod.CleanupJournal) error {
 	if current.Status.Executor != nil {
+		if current.Status.Phase != cleanupapi.PhaseRunning || current.Status.Executor.Kind != cleanupapi.ExecutorNode || !current.Status.Executor.Valid() {
+			return cleanupapi.ErrConflict
+		}
 		retired, err := c.Discovery.Retired(ctx, nodeBinding(*current.Status.Executor))
 		if err != nil || !retired {
 			return err
 		}
 	}
-	executor, err := c.Discovery.Find(ctx, current.Spec.Target.NodeName)
+	find := c.Discovery.Find
+	if current.Spec.Authority.Kind == "ShiftPVMove" {
+		find = c.Discovery.FindMoveCleanup
+	}
+	executor, err := find(ctx, current.Spec.Target.NodeName)
 	if err != nil {
 		return err
 	}
@@ -175,13 +181,49 @@ func (c *Client) bindCleanup(ctx context.Context, current cleanupapi.Cleanup, st
 }
 
 func (c *Client) legacyCleanup(ctx context.Context, current cleanupapi.Cleanup) (bool, error) {
-	if current.Spec.Reason != "VolumeDelete" {
-		return true, nil
-	}
 	if current.Status.Executor != nil {
 		return current.Status.Executor.Kind != cleanupapi.ExecutorNode, nil
 	}
 	return c.Fallback.CleanupExists(ctx, current)
+}
+
+// cleanupDone validates the re-read journal before any executor action. A
+// stored receipt remains usable after the Move has released Volume.ActiveMove.
+func cleanupDone(expected, current cleanupapi.Cleanup) (bool, error) {
+	if current.UID == "" || current.UID != expected.UID || current.Name != expected.Name || current.Spec != expected.Spec || current.Spec.Validate() != nil {
+		return false, cleanupapi.ErrConflict
+	}
+	switch current.Status.Phase {
+	case cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence, cleanupapi.PhaseCompleted:
+		if !cleanupReceiptValid(current) {
+			return false, cleanupapi.ErrConflict
+		}
+		// A Job receipt precedes process termination; the helper still has to
+		// observe that bound Job finish before handing back Verifying.
+		return current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor.Kind == cleanupapi.ExecutorNode, nil
+	case "", cleanupapi.PhasePending:
+		if current.Status.Receipt != nil || current.Status.Executor != nil {
+			return false, cleanupapi.ErrConflict
+		}
+	case cleanupapi.PhaseRunning:
+		if current.Status.Receipt != nil || current.Status.Executor == nil || !current.Status.Executor.Valid() || current.Status.Executor.NodeName != current.Spec.Target.NodeName {
+			return false, cleanupapi.ErrConflict
+		}
+	default:
+		return false, cleanupapi.ErrConflict
+	}
+	return false, nil
+}
+
+func cleanupReceiptValid(current cleanupapi.Cleanup) bool {
+	executor, receipt := current.Status.Executor, current.Status.Receipt
+	return executor != nil && executor.Valid() && executor.NodeName == current.Spec.Target.NodeName && receipt != nil &&
+		receipt.OperationID == current.Spec.OperationID && receipt.ExecutorUID == executor.ExecutionUID() && receipt.Retired && receipt.Purged
+}
+
+func cleanupRequest(current cleanupapi.Cleanup) *protocol.EffectRequest {
+	return &protocol.EffectRequest{ExecutorUid: current.Status.Executor.PodUID, NodeName: current.Spec.Target.NodeName,
+		VolumeName: current.Spec.Target.VolumeID, VolumeUid: current.Spec.Target.VolumeUID, OperationId: current.Spec.OperationID}
 }
 
 func (c *Client) prepareCreation(ctx context.Context, state volumeapi.State, copy volume.CopyIdentity) (bool, error) {
