@@ -12,7 +12,10 @@
 5B-3 단계 legacy 상태 저장의 응답 유실 시 진단 재쓰기 방지 [PR #208](https://github.com/project-jelly/ShiftPV/pull/208) 머지.
 5B-4 단계 이동 전용 resident 용량 조회와 중단 전 확인 [PR #209](https://github.com/project-jelly/ShiftPV/pull/209) 머지.
 5B-5 단계 Volume별 API 시간 예산과 만료 후 재관측 [PR #210](https://github.com/project-jelly/ShiftPV/pull/210) 머지.
-5C 단계 copy 압축 후보와 실제 이미지의 metadata·중단·재시도 검증 진행 중.
+5C 단계 copy 압축과 실제 이미지의 metadata·중단·재시도 검증 [PR #211](https://github.com/project-jelly/ShiftPV/pull/211) 머지.
+최종 단계는 038 drain 순서·복구와 039 VMI-owner TC, 통합 구조·업그레이드 검토다.
+이 변경의 필수 CI 통과 후 머지까지가 소스 작업 완료 조건이다. 검증 결과와 남은 운영 범위는
+[릴리즈 준비 판정](mobility-release-readiness.md)에 기록한다.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.
