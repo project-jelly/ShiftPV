@@ -109,6 +109,8 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | `csi/controller`: `TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode`, `TestConcurrentAdmissionToSamePoolCannotOversubscribe` | 실제 Pool Locker + capacity probe 지연 + durable hold |
 | `csi/controller`: `TestCreateInitializationRecoversAPIWriteBoundaries`, `TestLegacyInitializationsReadmitWithoutBlockingEachOther` | 실제 Registry/ledger + Create·status 실패/응답 유실 + 재시작 + 다른 Pool 진행 |
 | `csi/controller`: `placement_progress_test.go`, `TestMissingPoolUsesPlacementAuthority` | 등록 부재·일시 NotReady·소비자 배치 권한을 구분하고 원래 생성 intent·예약을 보존 |
+| `pool/readiness`: `backing_boundary_test.go`; `volumeapi`: `pool_backing_test.go` | 실제 Registry·Probe DI로 승인된 peer 유실/복구, 신규 등록 경쟁, own 실패·세대·구버전 condition 호환을 검증 |
+| `node/executor`: `peer_backing_progress_linux_test.go`; `csi/node`, `node/observation`, `mobility/controller`: `backing_test.go` | peer 장애 중 기존 작업·실제 create/purge 진행, 실행 전후 own identity 변경 거절, receipt 이후 fresh absence 전 hold 유지 |
 | `mobility/controller`: `preparation_boundary_test.go`, `prepared_execution_test.go`, `prepared_cancellation_test.go` | 실제 Registry/RV CAS + 5Gi에 2Gi 4개 요청, hold 전환·응답 유실·지연 claim/Moving PUT·binding 부재·placement NotFound와 취소 정산 |
 | `e2e/kind/mobility/preparation.sh`, `legacy-upgrade.sh` (preparation) | 실제 scheduler/API admission + 2개 hold/4개 원본 유지, restart, 2개 완료/2개 원본 유지; 구버전 controller의 in-flight legacy Move를 candidate가 같은 UID로 완료 |
 | `e2e/kind/mobility-node-restarts.sh` (source/destination) | 실행 승인 전 노드 장애 → 취소·같은 held Pod 복구; test-owned placement finalizer로 삭제 대기 중 hold 유지와 NotFound 후 정산을 검증. source에 쓴 PVC별 고유 데이터로 재생성 없는 보존 확인 |
@@ -168,6 +170,8 @@ Volume delete gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 �
 3. 공유 filesystem·겹치는 backing·thin 구성은 쓰기 probe와 inventory 전에 거부한다.
 4. mount 유실·교체와 Pool 재생성 시 새 배치·게시가 거부된다.
 5. 삭제·이동 hold가 해당 Pool UID에 남고 기존 단일 directory Pool도 동작한다.
+6. 승인된 B의 mount 유실 중 정상 A의 기존 copy 게시·승인된 실행·정리는 진행하고 새 할당은 보류한다.
+   B 복구 후 신규 할당이 재개된다. DI 회귀시험은 실제 LVM·disk의 이 검증을 대신하지 않는다.
 
 ## Real-node qualification
 

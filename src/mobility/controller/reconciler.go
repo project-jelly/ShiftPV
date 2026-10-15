@@ -40,6 +40,7 @@ type Repository interface {
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	ReadyPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
+	InventoryPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	CreateMove(context.Context, string, volumeapi.MoveSpec) (volumeapi.Move, error)
 	AddMoveFinalizer(context.Context, string, string) error
 	RemoveMoveFinalizer(context.Context, string, string) error

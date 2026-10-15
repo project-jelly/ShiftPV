@@ -84,7 +84,11 @@ func installApprovedBacking(t *testing.T, node *Node, api *dynamicfake.FakeDynam
 	_ = unstructured.SetNestedMap(object.Object, encoded, "status", "capacityUnit")
 	_ = unstructured.SetNestedField(object.Object, true, "status", "registrationApproved")
 	conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
-	conditions = append(conditions, map[string]any{"type": volumeapi.PoolConditionCapacityIndependent, "status": "True", "observedGeneration": int64(1), "reason": "OK"})
+	// Keep the legacy capacity condition to cover upgrade fallback, while
+	// supplying the own-directory observations a real successful probe records.
+	for _, kind := range []string{volumeapi.PoolConditionCapacityIndependent, volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable} {
+		conditions = append(conditions, map[string]any{"type": kind, "status": "True", "observedGeneration": int64(1), "reason": "OK"})
+	}
 	_ = unstructured.SetNestedSlice(object.Object, conditions, "status", "conditions")
 	// Model another operation's scan request after approval. No fresh scan is
 	// supplied by the test before creation executes.

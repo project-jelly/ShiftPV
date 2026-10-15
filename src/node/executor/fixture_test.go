@@ -34,6 +34,11 @@ func fixture(t *testing.T) (*Client, *Node, *dynamicfake.FakeDynamicClient, *kub
 	_ = unstructured.SetNestedMap(parent.Object, encoded, "status", "currentCopy")
 	identity := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "kube-system", "uid": "installation"}}}
 	pool := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool", "metadata": map[string]any{"name": "pool-a", "uid": "pool-uid", "generation": int64(1), "finalizers": []any{volumeapi.PoolProtectionFinalizer}}, "spec": map[string]any{"nodeName": "worker-a", "mountPath": "/mnt/pool", "capacity": map[string]any{"limit": "1Gi"}}, "status": map[string]any{"observedGeneration": int64(1), "inventory": map[string]any{"valid": true, "observedAt": time.Now().UTC().Format(time.RFC3339Nano)}, "conditions": []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": int64(1), "lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano), "reason": "PoolReady"}}, "lastProbeTime": time.Now().UTC().Format(time.RFC3339Nano)}}}
+	conditions, _, _ := unstructured.NestedSlice(pool.Object, "status", "conditions")
+	for _, kind := range []string{volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable} {
+		conditions = append(conditions, map[string]any{"type": kind, "status": "True", "observedGeneration": int64(1), "lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano), "reason": "ProbeSucceeded"})
+	}
+	_ = unstructured.SetNestedSlice(pool.Object, conditions, "status", "conditions")
 	dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.PoolResource: "ShiftPVPoolList", volumeapi.MoveResource: "ShiftPVMoveList"}, parent, pool, identity)
 	controller := true
 	ds := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Namespace: "shiftpv", Name: "shiftpv-node", UID: "ds-uid"}, Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{ServiceAccountName: "node"}}}}

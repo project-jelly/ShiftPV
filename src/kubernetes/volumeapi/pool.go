@@ -332,6 +332,20 @@ func (r *Registry) CleanupPoolForIdentity(ctx context.Context, name, uid, nodeNa
 	return pool, nil
 }
 
+// InventoryPoolForIdentity proves current backing and complete scanner evidence
+// for an exact existing Pool. It does not authorize new allocation.
+func (r *Registry) InventoryPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
+	pool, err := r.PoolForIdentity(ctx, name, uid, nodeName)
+	if err != nil {
+		return Pool{}, err
+	}
+	now, staleAfter := r.readiness()
+	if ready, reason := pool.InventoryReadyAt(now, staleAfter); !ready {
+		return Pool{}, fmt.Errorf("%w: inventory Pool %q: %s", ErrPoolNotReady, pool.Name, reason)
+	}
+	return pool, nil
+}
+
 func (r *Registry) ReadyPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
 	if _, err := r.PoolForIdentity(ctx, name, uid, nodeName); err != nil {
 		return Pool{}, err
@@ -401,7 +415,7 @@ func poolInventoryReadyAt(pool Pool, now time.Time, staleAfter time.Duration) (b
 	if inventory == nil {
 		return false, "InventoryMissing"
 	}
-	if !inventory.Valid {
+	if !inventory.Valid || inventory.Message != "" {
 		return false, "InventoryInvalid"
 	}
 	if inventory.Truncated {
@@ -605,11 +619,25 @@ func (p Pool) mountReady(generation int64) (bool, string) {
 	return true, ""
 }
 
-// CleanupReadyAt keeps exact, already-approved cleanup executable while a Pool
-// is terminating or has invalid placement settings. Both require fresh backing
-// and directory observations independently of placement Ready.
+// CleanupReadyAt keeps exact, already-approved cleanup executable independently
+// of placement eligibility, using fresh current backing and directory evidence.
 func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 	return p.cleanupReadyAt(now, staleAfter, p.Generation)
+}
+
+// InventoryReadyAt requires protected, current backing and a complete fresh scan
+// for existing-copy evidence, never a new allocation decision.
+func (p Pool) InventoryReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	if ready, reason := p.CleanupReadyAt(now, staleAfter); !ready {
+		return false, reason
+	}
+	if ready, reason := poolInventoryReadyAt(p, now, staleAfter); !ready {
+		return false, reason
+	}
+	if !slices.Contains(p.Finalizers, PoolProtectionFinalizer) {
+		return false, "PoolProtectionMissing"
+	}
+	return true, "PoolInventoryReady"
 }
 
 // ExecutionReadyAt is only for exact, already-approved native effects that also
@@ -625,9 +653,6 @@ func (p Pool) ExecutionReadyAt(now time.Time, staleAfter time.Duration) (bool, s
 }
 
 func (p Pool) cleanupReadyAt(now time.Time, staleAfter time.Duration, generation int64) (bool, string) {
-	if p.DeletionTimestamp == nil && p.ConfigurationCheck().OK {
-		return p.readyAt(now, staleAfter, generation)
-	}
 	if check := p.BackingConfigurationCheck(); !check.OK {
 		return false, check.Reason
 	}
@@ -637,7 +662,7 @@ func (p Pool) cleanupReadyAt(now time.Time, staleAfter time.Duration, generation
 	if p.Status.ObservedGeneration != generation {
 		return false, "ProbeOutdated"
 	}
-	if ready, reason := p.capacityReadyAt(generation); !ready {
+	if ready, reason := p.capacityBackingReadyAt(generation); !ready {
 		return false, reason
 	}
 	conditionTypes := []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable}

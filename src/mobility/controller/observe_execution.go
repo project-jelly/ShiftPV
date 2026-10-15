@@ -54,7 +54,7 @@ func (r *Reconciler) observeJobs(ctx context.Context, move volumeapi.Move, repai
 }
 
 func observeDestinationPublish(move volumeapi.Move, pools poolIndex, result *observation) {
-	destinationPool, destinationReady := indexedCopyPool(pools.ready, move.Status.DestinationCopy)
+	destinationPool, destinationReady := indexedCopyPool(pools.existing, move.Status.DestinationCopy)
 	result.FSM.PublishedOnDestination = result.DestinationNode != "" &&
 		slices.Contains(result.Volume.PublishedNodes, result.DestinationNode) &&
 		destinationReady &&

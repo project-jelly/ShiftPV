@@ -137,25 +137,26 @@ func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]alloca
 		}
 		observed := allocationObservation{}
 		if check := pool.BackingConfigurationCheck(); !check.OK {
-			observed.check = check
+			observed.backing = check
 		} else if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
-			observed.unit, observed.check = r.Inspector.InspectCapacityUnit(pool)
+			observed.unit, observed.backing = r.Inspector.InspectCapacityUnit(pool)
 		}
+		observed.independent = observed.backing
 		results[pool.UID] = observed
 		allocations = append(allocations, registration.Allocation{
 			UID: pool.UID, NodeName: pool.NodeName, MountPath: pool.MountPath,
 			Policy: pool.CapacityPolicy, Approved: pool.RegistrationApproved(), Deleting: pool.DeletionTimestamp != nil,
-			Unit: observed.unit, Evidence: observed.check,
+			Unit: observed.unit, Evidence: observed.backing,
 		})
 	}
 	for _, target := range allocations {
 		observed := results[target.UID]
-		if observed.check.Reason != "" && !observed.check.OK {
+		if observed.independent.Reason != "" && !observed.independent.OK {
 			continue
 		}
 		check := registration.Independent(target, allocations)
 		if target.Policy != "" || !check.OK {
-			observed.check = check
+			observed.independent = check
 		}
 		results[target.UID] = observed
 	}
@@ -163,8 +164,9 @@ func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]alloca
 }
 
 type allocationObservation struct {
-	unit  *volumeapi.PoolCapacityUnit
-	check Check
+	unit        *volumeapi.PoolCapacityUnit
+	backing     Check
+	independent Check
 }
 
 func verifyCapacityObservation(pool volumeapi.Pool) error {

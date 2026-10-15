@@ -170,7 +170,8 @@ Node는 설정·backing·쓰기 검사와 complete inventory를 확인한 뒤
 `status.registrationApproved: true`를 기록한다. 승인 이력은 이후 검사 실패에도 유지한다.
 설정 누락, 경로 중복 또는 backing 중복으로 거부된 신규 후보는 기존 승인 Pool의
 Ready를 내리지 않는다. 승인된 Pool의 backing이 바뀌거나 증거가 없어지면 해당 Pool과
-같은 node의 승인 Pool 배치를 보류한다. 함께 등록한 후보끼리 충돌하면 모두 거부한다.
+같은 node의 승인 Pool 신규 배치를 보류한다. 정상 Pool의 자기 backing 검증·inventory와 기존 copy
+사용·정리는 계속한다. 함께 등록한 후보끼리 충돌하면 모두 거부한다.
 승인 직전 등록 목록과 backing을 다시 확인하며 외부 mount 변경을 원자적으로 막지는 않는다.
 승인된 Pool의 `capacity.limit` 오류는 해당 Pool의 신규 배치를 막지만 backing 검증과
 정리용 inventory는 계속 수행한다. 한도는 양수의 정수 바이트로 정확히 변환 가능해야 한다.
@@ -231,8 +232,9 @@ Node는 sysfs와 device-mapper table에서 backing 구간을 확인한다. 같�
 변경하려면 신규 배치를 중단하고 Volume·Move·cleanup을 정상 종료한 뒤 Pool을 삭제한다.
 삭제 완료 후 backing을 변경하고 새 Pool로 등록한다.
 
-`CapacityIndependent=True`와 `status.capacityUnit`, generation과 fresh·complete inventory를
-함께 확인한다. 증거가 없거나 backing이 변경되면 Ready가 내려가고 신규 배치를 보류한다.
+신규 배치에는 `CapacityBackingVerified=True`, `CapacityIndependent=True`, `status.capacityUnit`,
+generation과 fresh·complete inventory를 함께 확인한다. `Ready=False/CapacityPeerUnproven`이어도
+자기 backing이 정상인 Pool의 기존 작업은 가능하다. 자기 backing 유실·변경은 해당 작업도 차단한다.
 최초 capacity identity는 status 갱신으로 교체하거나 지우지 않는다. `capacity.limit`는
 논리 예약 한도이며 hard quota가 아니다. 외부 사용량은 filesystem 여유에서 차감된다.
 측정 검증은 [StorageClass contract](../../docs/spec/storage-class.md#measurement-verification),
@@ -392,7 +394,7 @@ resourceVersion을 `test`하는 JSON Patch로 만들고 `kubectl patch --dry-run
 
 계획 이동 전 다음을 확인한다.
 
-- source와 destination node/Pool이 Ready이고 inventory가 fresh·complete다.
+- 두 node가 Ready이고 source의 자기 backing·inventory가 정상이며 destination은 신규 할당 가능하다.
 - workload selector, required affinity, taint/toleration이 destination을 허용한다.
 - PDB가 consumer 중단과 replacement scheduling을 허용한다.
 - Volume이 Ready이고 active Move나 deletionTimestamp가 없다.

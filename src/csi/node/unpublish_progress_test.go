@@ -92,8 +92,8 @@ func TestNodeUnpublishProgressDuringSiblingDeletionScan(t *testing.T) {
 				if registry.reconcileCalls.Load() != 1 || registry.published != remaining || binder.unpublished != request.TargetPath {
 					t.Fatalf("unpublish did not reconcile actual targets: calls=%d published=%v", registry.reconcileCalls.Load(), registry.published)
 				}
-				if _, err := s.NodePublishVolume(context.Background(), validPublishRequest()); err == nil || binder.publishedTarget != "" {
-					t.Fatalf("stale capacity observation admitted a new publish: %v", err)
+				if _, err := s.NodePublishVolume(context.Background(), validPublishRequest()); err != nil || binder.publishedTarget == "" {
+					t.Fatalf("sibling scan blocked an existing copy's publish: %v", err)
 				}
 			})
 		}

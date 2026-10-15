@@ -35,7 +35,7 @@ func approvedBeforeCopyFixture(t *testing.T) (*Reconciler, *memoryRepository, *f
 	pool.CapacityLimit, pool.Generation = "32Mi", 1
 	pool.Status = volumeapi.PoolStatus{
 		ObservedGeneration: 1, LastProbeTime: metav1.NewTime(now),
-		Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+		Conditions: testBackingConditions(1),
 		Inventory:  &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Valid: true},
 	}
 	r.Now = func() time.Time { return now }

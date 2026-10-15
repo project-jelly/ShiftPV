@@ -724,5 +724,10 @@ func readyCleanupPool(pool volumeapi.Pool) volumeapi.Pool {
 			ObservedGeneration: 1, LastTransitionTime: now, Reason: "PoolReady",
 		}},
 	}
+	for _, kind := range []string{volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable} {
+		pool.Status.Conditions = append(pool.Status.Conditions, metav1.Condition{
+			Type: kind, Status: metav1.ConditionTrue, ObservedGeneration: 1, LastTransitionTime: now, Reason: "OK",
+		})
+	}
 	return pool
 }

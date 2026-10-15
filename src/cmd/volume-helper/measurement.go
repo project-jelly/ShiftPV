@@ -30,6 +30,7 @@ type measurementOptions struct {
 
 type measurementRegistry interface {
 	ReadyPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
+	InventoryPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	Get(context.Context, string) (volumeapi.State, error)
 	InstallationID(context.Context) (string, error)
 }
@@ -129,7 +130,12 @@ func measureWithAuthority(ctx context.Context, registry measurementRegistry, opt
 }
 
 func measurementAuthority(ctx context.Context, registry measurementRegistry, options measurementOptions, verifyMount func(string, volumeapi.Pool) error, verifyCopy func(string, volume.CopyIdentity) error) (*volume.CopyIdentity, error) {
-	pool, err := registry.ReadyPoolForIdentity(ctx, options.pool.Name, options.pool.UID, options.pool.NodeName)
+	resolve := registry.ReadyPoolForIdentity
+	if options.volumeID != "" {
+		// Usage measures an existing quiesced copy; statfs serves new allocation.
+		resolve = registry.InventoryPoolForIdentity
+	}
+	pool, err := resolve(ctx, options.pool.Name, options.pool.UID, options.pool.NodeName)
 	if err != nil {
 		return nil, fmt.Errorf("read measurement Pool: %w", err)
 	}
