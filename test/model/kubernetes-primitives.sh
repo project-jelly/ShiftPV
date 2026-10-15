@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "${ROOT_DIR}"
+# shellcheck source=test/e2e/kind/lib/cluster.sh
+source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
+
+for command in docker kind kubectl jq; do
+  command -v "${command}" >/dev/null || {
+    echo "required command not found: ${command}" >&2
+    exit 1
+  }
+done
+
 cluster_name="${CLUSTER_NAME:-shiftpv-v04-primitives-$$}"
+node_image="${NODE_IMAGE:-$(kind_node_image)}"
 keep_cluster="${KEEP_CLUSTER:-0}"
 cluster_creation_started=0
 probe_dir="$(mktemp -d)"
@@ -25,7 +38,7 @@ if kind get clusters | grep -Fxq "${cluster_name}"; then
 fi
 
 cluster_creation_started=1
-kind create cluster --name "${cluster_name}" --kubeconfig "${probe_kubeconfig}" --wait 120s >/dev/null
+kind create cluster --name "${cluster_name}" --image "${node_image}" --kubeconfig "${probe_kubeconfig}" --wait 120s >/dev/null
 
 server_version="$(kubectl --kubeconfig "${probe_kubeconfig}" get --raw /version | sed -n 's/.*"gitVersion": "\([^"]*\)".*/\1/p')"
 echo "Kubernetes API server: ${server_version}"
@@ -83,6 +96,8 @@ if [[ "${owner_pod_uid}" != "${held_pod_uid}" || "${owner_pod_gates}" != "exampl
   exit 1
 fi
 echo "Gated Pod owner-placement Update passed; user gate retained"
+
+bash test/model/move-preparation-primitives.sh "${probe_kubeconfig}" "${probe_dir}"
 
 kubectl --kubeconfig "${probe_kubeconfig}" apply \
   -f charts/shiftpv/crds/shiftpv.io_shiftpvpools.yaml \

@@ -42,6 +42,8 @@ spec:
           x-kubernetes-validations:
             - rule: '!has(self.spec.recovery) || (has(self.status) && has(self.status.phase) && self.status.phase == "Blocked")'
               message: recovery may only be requested on a Blocked move
+            - rule: '!has(self.status) || !has(self.status.preparation) || self.status.preparation == null || (has(self.spec.protocolVersion) && self.spec.protocolVersion == "prepared-v1")'
+              message: preparation requires the prepared-v1 protocol
           properties:
             spec:
               type: object
@@ -49,7 +51,12 @@ spec:
               x-kubernetes-validations:
                 - rule: '!has(oldSelf.recovery) || (has(self.recovery) && self.recovery == oldSelf.recovery)'
                   message: recovery cannot be removed or changed once requested
+                - rule: 'has(self.protocolVersion) == has(oldSelf.protocolVersion) && (!has(self.protocolVersion) || self.protocolVersion == oldSelf.protocolVersion)'
+                  message: protocolVersion presence and value are immutable
               properties:
+                protocolVersion:
+                  type: string
+                  enum: [prepared-v1]
                 volumeID:
                   type: string
                   pattern: ^shiftpv-[a-f0-9]{32}$
@@ -67,10 +74,34 @@ spec:
                   enum: [ResumeOwner]
             status:
               type: object
+              x-kubernetes-validations:
+                - rule: '!has(self.preparation) || self.preparation == null || ((!has(self.capacityApproved) || !self.capacityApproved) && !has(self.incomingCopy) && !has(self.destinationCopy) && (!has(self.copyOperationID) || self.copyOperationID == "") && (!has(self.promotionOperationID) || self.promotionOperationID == "") && (!has(self.copyJobName) || self.copyJobName == "") && (!has(self.promotionJobName) || self.promotionJobName == "") && !has(self.cleanup) && !has(self.rollbackRequiredGeneration))'
+                  message: preparation cannot coexist with destination execution authority
+                - rule: '!has(self.preparation) || self.preparation == null || (has(self.sourceCopy) && has(self.persistentVolumeName) && self.persistentVolumeName != "" && has(self.persistentVolumeUID) && has(self.persistentVolumeClaimNamespace) && self.persistentVolumeClaimNamespace != "" && has(self.persistentVolumeClaimName) && self.persistentVolumeClaimName != "" && has(self.persistentVolumeClaimUID) && has(self.consumerName) && self.consumerName != "" && has(self.consumerUID) && self.consumerUID != "" && has(self.placementPodUID))'
+                  message: preparation requires the exact source copy, binding, consumer and placement identities
               properties:
+                preparation:
+                  type: object
+                  nullable: true
+                  required: [pool, nodeName, reservedBytes]
+                  properties:
+                    pool:
+                      type: object
+                      required: [name, uid]
+                      properties:
+                        name: {type: string, minLength: 1}
+                        uid: {type: string, minLength: 1}
+                    nodeName: {type: string, minLength: 1}
+                    reservedBytes:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                persistentVolumeUID: {type: string, minLength: 1}
+                persistentVolumeClaimUID: {type: string, minLength: 1}
+                placementPodUID: {type: string, minLength: 1}
                 phase:
                   type: string
-                  enum: [Pending, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, WaitingForCapacity, Copying, Promoting, Committing, ReleasingDestination, WaitingForDestinationPublish, CleaningSource, Completing, Blocked, Succeeded]
+                  enum: [Pending, Preparing, StartingDisruption, Canceling, Cancelled, Locking, Evicting, WaitingForUnpublish, WaitingForReplacement, WaitingForDestination, WaitingForCapacity, Copying, Promoting, Committing, ReleasingDestination, WaitingForDestinationPublish, CleaningSource, Completing, Blocked, Succeeded]
                 recoveryPhase:
                   type: string
                   enum: ['', Quiescing, Verifying, Retiring, Resuming, Completing, Recovered]

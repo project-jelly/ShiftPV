@@ -30,6 +30,20 @@ Destination approval records the Pool, incoming/destination copy identities,
 operation IDs and planned copy Job name in one status write. An interruption
 after approval therefore retains both the capacity hold and its recovery plan.
 
+### Preparation storage contract
+
+The CRD also accepts the immutable `spec.protocolVersion: prepared-v1` and a
+`status.preparation` logical reservation identified by Pool name/UID, node and
+requested bytes. The shared capacity ledger counts it once; it protects its Pool
+from deletion and never authorizes a disk effect. Updates use exact Move UID and
+resourceVersion CAS, preserving the embedded cleanup journal.
+
+Execution of this protocol is not enabled yet. Discovery still creates legacy
+Moves without a protocol field. Versioned records are retained without legacy
+execution, recovery, gate release or journal collection. Upgrade the CRD before
+using the new writer, and do not run an older controller while versioned records
+remain. The activation plan is in [mobility stabilization](../development/mobility-stabilization-plan.md).
+
 ## Flow
 
 ```text

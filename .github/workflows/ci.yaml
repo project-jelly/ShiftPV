@@ -201,6 +201,28 @@ jobs:
           fi
           echo "candidate=${IMAGE}:${{ steps.candidate.outputs.tag }}@${DIGEST}" >>"${GITHUB_STEP_SUMMARY}"
 
+  kubernetes-primitives:
+    name: kubernetes-primitives
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CLUSTER_NAME: shiftpv-primitives-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Kubernetes tools
+        uses: ./.github/actions/install-k8s-tools
+        with:
+          helm: "false"
+
+      - name: Verify CRD upgrades and Kubernetes API contracts
+        run: make v04-kubernetes-primitives
+
+      - name: Delete isolated kind cluster
+        if: always()
+        run: kind delete cluster --name "${CLUSTER_NAME}"
+
   linux-mount:
     name: linux-mount
     runs-on: ubuntu-24.04

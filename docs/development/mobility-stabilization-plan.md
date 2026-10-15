@@ -1,6 +1,7 @@
 # Mobility stabilization plan
 
-상태: 2026-10-15 단계별 구현 시작. 아래 후속 설계는 아직 제품 동작이 아니다.
+상태: 2026-10-15 1단계 [PR #199](https://github.com/project-jelly/ShiftPV/pull/199) 머지.
+2단계 기반 구현 중이며, 아래 후속 설계는 아직 제품 동작이 아니다.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.
@@ -12,7 +13,7 @@
 지원하는 planned cold mobility에서 조건 변경·응답 유실·재시작 후에도 데이터 권한,
 Pod 배치, 용량 예약과 cleanup이 같은 결론으로 수렴하게 한다.
 
-- 목적지 준비 실패로 기존 서비스를 먼저 중단하지 않는다.
+- 목적지의 논리 용량 예약을 얻기 전에는 기존 consumer를 중단하지 않는다.
 - gate·예약·실행 기록마다 유지, 재시도, 취소, 완료를 판정하는 책임이 있다.
 - 한 Pool 또는 Volume의 대기가 독립 작업의 진행을 막지 않는다.
 - 모순된 증거는 보존하고, 일시적인 실패는 현재 증거를 재관측해 복구한다.
@@ -62,6 +63,18 @@ Volume별 처리              동일 Volume 직렬화, 다른 Volume 진행 (5�
 
 2단계는 단순 사전 용량 조회로 끝내지 않는다.
 
+두 PR로 나눠 순서대로 검증한다.
+
+1. **2A 저장 계약**: immutable `prepared-v1` protocol, 정확한 UID/resourceVersion CAS,
+   준비 hold의 공통 용량 계상과 Pool 삭제 보호, 실제 API 서버에서 CRD 검증.
+   이 단계는 새 protocol을 생성하거나 실행하지 않으며, 발견한 기록도 기존 실행·복구·GC 경로로 넘기지 않는다.
+2. **2B 실행 연결**: 준비 → 예약 → 중단 → 실행 승인 전환과 구간별 취소를 연결한다.
+   034의 consumer 유지 회귀·장애 주입·통합 시험과 035 복구 절차까지 완료해야 2단계가 끝난다.
+
+2B의 활성화 조건에는 ledger의 혼합 snapshot 회귀도 포함한다. `ListVolumes`가 commit 전
+원본 owner를 읽고 `ListMoves`가 cleanup 후 완료를 읽으면 목적지 예약을 놓칠 수 있다.
+실제 admission 잠금과 owner commit·정산을 연결한 장애 주입 테스트로 이 경계를 닫는다.
+
 - 준비 중 Volume은 `Ready + activeMove`로 원본 서비스를 유지한다.
 - Pool UID 잠금 안에서 최신 ledger를 읽고 durable logical hold를 저장한다.
 - scheduler 배치와 hold를 확인한 뒤 중단 시작 단계를 먼저 기록하고 `Moving`/eviction을 수행한다.
@@ -71,7 +84,10 @@ Volume별 처리              동일 Volume 직렬화, 다른 Volume 진행 (5�
 - 새 상태 전이는 예상 단계·Move/Volume/Pool identity를 비교한다. 새 CRD 필드와 legacy Move 호환을 함께 처리한다.
 
 logical hold는 외부 writer의 공간 소비까지 막는 hard quota가 아니다.
-새 준비 hold가 남은 상태의 구버전 downgrade는 별도 정산 절차 없이 허용하지 않는다.
+원본 사용량 증가·목적지 장애·외부 writer의 공간 소비는 중단 후 재검증에서도 실패할 수 있다.
+적용 순서는 CRD → 새 protocol을 이해하는 controller → 새 protocol 활성화다.
+protocol이 없는 기존 Move는 기존 경로로 정산한다. 새 protocol 기록이 남아 있는 동안에는
+이를 이해하지 못하는 controller와의 동시 실행이나 구버전 downgrade를 허용하지 않는다.
 
 ## 검증과 완료 판정
 

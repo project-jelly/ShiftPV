@@ -86,7 +86,7 @@ func (r *Reconciler) reconcileOwnerPlacement(ctx context.Context, observed *core
 		}
 		for _, move := range moves {
 			journalUnsettled := move.Status.CleanupPhase != "" && move.Status.CleanupPhase != cleanupapi.PhaseCompleted
-			if move.Spec.VolumeID == identity.copy.VolumeID && (journalUnsettled || !volumeapi.MoveCleanupSettled(move)) {
+			if move.Spec.VolumeID == identity.copy.VolumeID && (!legacyMoveProtocol(move) || journalUnsettled || !volumeapi.MoveCleanupSettled(move)) {
 				return nil
 			}
 		}

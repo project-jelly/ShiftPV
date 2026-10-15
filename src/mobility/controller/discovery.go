@@ -53,6 +53,10 @@ func (r *Reconciler) discoverMoves(ctx context.Context) (discoveryErr error) {
 func activeMoveVolumes(moves []volumeapi.Move, volumes map[string]volumeapi.State) map[string]bool {
 	activeByVolume := make(map[string]bool)
 	for _, move := range moves {
+		if !legacyMoveProtocol(move) {
+			activeByVolume[move.Spec.VolumeID] = true
+			continue
+		}
 		if move.Status.RecoveryPhase == recoveryRecovered {
 			continue
 		}
