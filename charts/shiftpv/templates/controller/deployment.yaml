@@ -115,9 +115,24 @@ spec:
             - --timeout=2m
             - --retry-interval-start={{ .Values.sidecars.provisioner.retryIntervalStart }}
             - --retry-interval-max={{ .Values.sidecars.provisioner.retryIntervalMax }}
+            {{- if .Values.capacityTracking.enabled }}
+            - --enable-capacity=true
+            - --capacity-ownerref-level=2
+            - --capacity-poll-interval={{ .Values.capacityTracking.pollInterval }}
+            {{- end }}
             - --v={{ .Values.controller.logLevel }}
           env:
             {{- include "shiftpv.podNamespaceEnv" . | nindent 12 }}
+            {{- if .Values.capacityTracking.enabled }}
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
           securityContext:
             {{- include "shiftpv.containerSecurityContext" (dict "runAsNonRoot" true "runAsUser" 65532) | nindent 12 }}
           volumeMounts:

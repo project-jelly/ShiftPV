@@ -41,15 +41,17 @@ type PoolStatus struct {
 	RegistrationApproved   bool                     `json:"registrationApproved,omitempty"`
 	CapacityProbeSupported bool                     `json:"capacityProbeSupported,omitempty"`
 	CapacityProbe          *PoolCapacityProbeResult `json:"capacityProbe,omitempty"`
-	// FilesystemTotalBytes is a node observation for rejection classification,
-	// never a substitute for live free-space admission.
-	FilesystemTotalBytes int64              `json:"filesystemTotalBytes,omitempty"`
-	ObservedGeneration   int64              `json:"observedGeneration,omitempty"`
-	LastProbeTime        metav1.Time        `json:"lastProbeTime,omitempty"`
-	CapacityUnit         *PoolCapacityUnit  `json:"capacityUnit,omitempty"`
-	MountIdentity        *PoolMountIdentity `json:"mountIdentity,omitempty"`
-	Conditions           []metav1.Condition `json:"conditions,omitempty"`
-	Inventory            *PoolInventory     `json:"inventory,omitempty"`
+	// Filesystem observations share ObservedGeneration and LastProbeTime.
+	// They never replace live admission; nil availability means unobserved.
+	FilesystemTotalBytes      int64              `json:"filesystemTotalBytes,omitempty"`
+	FilesystemAvailableBytes  *int64             `json:"filesystemAvailableBytes,omitempty"`
+	FilesystemAvailableInodes *int64             `json:"filesystemAvailableInodes,omitempty"`
+	ObservedGeneration        int64              `json:"observedGeneration,omitempty"`
+	LastProbeTime             metav1.Time        `json:"lastProbeTime,omitempty"`
+	CapacityUnit              *PoolCapacityUnit  `json:"capacityUnit,omitempty"`
+	MountIdentity             *PoolMountIdentity `json:"mountIdentity,omitempty"`
+	Conditions                []metav1.Condition `json:"conditions,omitempty"`
+	Inventory                 *PoolInventory     `json:"inventory,omitempty"`
 }
 
 // PoolCapacityProbeResult answers one causally requested read. A result from a
@@ -140,13 +142,15 @@ func (r *Registry) ListPoolRegistrations(ctx context.Context) ([]Pool, error) {
 }
 
 // PoolSnapshot keeps registration and placement readiness on the same API read.
+// An empty snapshot is valid: capacity publication must withdraw old capacity
+// after the final Pool is removed.
 type PoolSnapshot struct {
 	Registered []Pool
 	Ready      []Pool
 }
 
 func (r *Registry) ObservePools(ctx context.Context) (PoolSnapshot, error) {
-	pools, err := r.Pools(ctx)
+	pools, err := r.ListPools(ctx)
 	if err != nil {
 		return PoolSnapshot{}, err
 	}
@@ -165,6 +169,9 @@ func (r *Registry) ObservePools(ctx context.Context) (PoolSnapshot, error) {
 
 func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
 	snapshot, err := r.ObservePools(ctx)
+	if err == nil && len(snapshot.Registered) == 0 {
+		return nil, fmt.Errorf("%w: no ShiftPVPool nodes are registered", ErrPoolConfiguration)
+	}
 	return snapshot.Ready, err
 }
 

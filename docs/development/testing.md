@@ -60,6 +60,11 @@ git diff --check
 
 ## Required protocol tests
 
+`CAPACITY_TRACKING_ONLY=1 ./test/e2e/kind/run.sh`는 실제 scheduler에서 꽉 찬 선호 노드 우회,
+고정 노드의 공간 반환 후 진행, 다른 노드에만 있는 그룹 배치, 게시 재시작·0 반환·롤백과
+uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러 Pool의 합계와 단일 볼륨
+최대값, 초기 생성·이동 hold, 관측 누락·오류 및 조회의 무변경 계약을 DI로 검사한다.
+
 | Contract | 최소 fault boundary |
 |---|---|
 | Node creation | copy intent·stage mkdir·placement marker·rename·API receipt 경계의 중단 상태를 실제 Pool reconcile·승인 검사에 연결; inventory 수동 보정 없이 동일 작업으로 복구 |

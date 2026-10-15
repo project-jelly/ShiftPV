@@ -86,7 +86,7 @@ install_shiftpv() {
 }
 
 assert_shiftpv_release_removed() {
-	local namespaced cluster_scoped deadline
+	local namespaced cluster_scoped capacities deadline
 	deadline=$((SECONDS + 60))
 	while true; do
 		namespaced=$(kubectl -n shiftpv-system get \
@@ -97,7 +97,9 @@ assert_shiftpv_release_removed() {
 			clusterroles,clusterrolebindings,storageclasses,csidrivers \
 			-l app.kubernetes.io/instance=shiftpv \
 			-o name)
-		if [[ -z "${namespaced}" && -z "${cluster_scoped}" ]]; then
+		capacities=$(kubectl -n shiftpv-system get csistoragecapacities \
+			-l csi.storage.k8s.io/drivername=csi.shiftpv.io -o name)
+		if [[ -z "${namespaced}" && -z "${cluster_scoped}" && -z "${capacities}" ]]; then
 			break
 		fi
 		if ((SECONDS >= deadline)); then
@@ -106,9 +108,9 @@ assert_shiftpv_release_removed() {
 		sleep 1
 	done
 
-	if [[ -n "${namespaced}" || -n "${cluster_scoped}" ]]; then
+	if [[ -n "${namespaced}" || -n "${cluster_scoped}" || -n "${capacities}" ]]; then
 		echo "Helm uninstall left ShiftPV release resources:" >&2
-		printf '%s\n%s\n' "${namespaced}" "${cluster_scoped}" | sed '/^$/d' >&2
+		printf '%s\n%s\n%s\n' "${namespaced}" "${cluster_scoped}" "${capacities}" | sed '/^$/d' >&2
 		exit 1
 	fi
 	for resource in \
@@ -168,6 +170,11 @@ run_pool_capacity() {
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/pool-capacity.sh"
 }
 
+run_capacity_tracking() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
+		bash "${ROOT_DIR}/test/e2e/kind/capacity-tracking.sh"
+}
+
 run_directory_pool() {
 	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
 		"${ROOT_DIR}/test/e2e/kind/directory-pool.sh"
@@ -207,6 +214,14 @@ if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
 	exit 0
 fi
 
+if [[ "${CAPACITY_TRACKING_ONLY:-0}" == "1" ]]; then
+	run_capacity_tracking
+	helm uninstall shiftpv --namespace shiftpv-system --wait --timeout=2m
+	assert_shiftpv_release_removed
+	echo "ShiftPV focused capacity tracking E2E passed"
+	exit 0
+fi
+
 if [[ "${ORPHAN_CLEANUP_ONLY:-0}" == "1" ]]; then
 	run_orphan_preservation
 	echo "ShiftPV focused unknown-orphan preservation during Pool deregistration E2E passed"
@@ -241,7 +256,7 @@ fi
 # included, and only reuses orderings the focused entry points already prove:
 #
 #   g1  directory-pool (262 s) + metrics (10 s) + retain-reclaim (~70 s)
-#       + pool-capacity (138 s)
+#       + pool-capacity (138 s) + capacity-tracking
 #       The metrics assertions count the CSI calls, the observed Copying move
 #       and the settled reserved-byte gauge that directory-pool produces, and
 #       require exactly the two base Pools, so those two stay adjacent and in
@@ -291,6 +306,7 @@ fi
 if group_selected g1; then
 	run_retain_reclaim
 	run_pool_capacity
+	run_capacity_tracking
 fi
 if group_selected g3; then
 	run_orphan_preservation

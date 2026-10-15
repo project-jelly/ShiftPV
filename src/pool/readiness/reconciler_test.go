@@ -344,15 +344,16 @@ func TestReconcilerObserverReceivesExistingProbeAndErrors(t *testing.T) {
 func TestCapacityObservationClearedWhenProbeFails(t *testing.T) {
 	r := &Reconciler{}
 	pool := volumeapi.Pool{Status: volumeapi.PoolStatus{FilesystemTotalBytes: 123}}
-	result := Result{CapacityReadable: Check{OK: true, Known: true}, Filesystem: poolcapacity.Filesystem{TotalBytes: 456}}
+	result := Result{CapacityReadable: Check{OK: true, Known: true}, Filesystem: poolcapacity.Filesystem{TotalBytes: 456, AvailableBytes: 123, AvailableInodes: 8}}
 	status, _ := r.observedStatus(context.Background(), pool, result, testTime)
-	if status.FilesystemTotalBytes != 456 {
+	if status.FilesystemTotalBytes != 456 || status.FilesystemAvailableBytes == nil || *status.FilesystemAvailableBytes != 123 ||
+		status.FilesystemAvailableInodes == nil || *status.FilesystemAvailableInodes != 8 {
 		t.Fatal("successful capacity observation missing")
 	}
 	pool.Status = status
 	result.CapacityReadable = Check{Known: true}
 	status, _ = r.observedStatus(context.Background(), pool, result, testTime)
-	if status.FilesystemTotalBytes != 0 {
+	if status.FilesystemTotalBytes != 0 || status.FilesystemAvailableBytes != nil || status.FilesystemAvailableInodes != nil {
 		t.Fatal("failed probe retained old capacity observation")
 	}
 }

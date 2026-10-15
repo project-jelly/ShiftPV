@@ -74,6 +74,11 @@ poolReadiness:
   interval: 1m
   staleAfter: 3m
 
+capacityTracking:
+  # Requires controller images with CSI GetCapacity support.
+  enabled: false
+  pollInterval: 1m
+
 lifecycle:
   # Use argocd when Argo CD owns this release so a blocked Application deletion
   # stays pending and completes automatically after storage dependencies are removed.

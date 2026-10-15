@@ -113,6 +113,14 @@ spec:
                   type: integer
                   format: int64
                   minimum: 0
+                filesystemAvailableBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                filesystemAvailableInodes:
+                  type: integer
+                  format: int64
+                  minimum: 0
                 capacityProbeSupported:
                   type: boolean
                 capacityProbe:
