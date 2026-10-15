@@ -19,7 +19,7 @@ import (
 
 func preparedMoveFixture() Move {
 	return Move{
-		Name: "move", UID: "move-uid", ResourceVersion: "7",
+		Name: "move", UID: "move-uid", ResourceVersion: "7", Finalizers: []string{MoveProtectionFinalizer},
 		Spec: MoveSpec{ProtocolVersion: MoveProtocolPreparedV1, VolumeID: "shiftpv-0123456789abcdef0123456789abcdef", SourceNode: "source"},
 		Status: MoveStatus{
 			Phase: "Preparing", PersistentVolumeName: "pv", PersistentVolumeUID: "pv-uid",
@@ -38,11 +38,46 @@ func preparedMoveObject(move Move) *unstructured.Unstructured {
 		"metadata": map[string]any{"name": move.Name, "uid": move.UID, "resourceVersion": move.ResourceVersion},
 		"spec":     map[string]any{"volumeID": move.Spec.VolumeID, "sourceNode": move.Spec.SourceNode},
 	}}
+	object.SetFinalizers(move.Finalizers)
 	if move.Spec.ProtocolVersion != "" {
 		object.Object["spec"].(map[string]any)["protocolVersion"] = move.Spec.ProtocolVersion
 	}
 	setMoveStatus(object, move.Status)
 	return object
+}
+
+func TestPreparedCapacityRequiresProtectionAndCancellationNoJournal(t *testing.T) {
+	for _, boundary := range []string{"preparation without finalizer", "approval without finalizer", "cancel with empty journal"} {
+		t.Run(boundary, func(t *testing.T) {
+			move := preparedMoveFixture()
+			move.Finalizers = nil
+			next := move.Status
+			switch boundary {
+			case "preparation without finalizer":
+				move.Status.Preparation = nil
+			case "approval without finalizer":
+				move.Status.Phase = "WaitingForCapacity"
+				next = approvedPreparation(move)
+			case "cancel with empty journal":
+				move.Status.Phase = "Canceling"
+				next.Phase, next.Preparation = "Cancelled", nil
+			}
+			object := preparedMoveObject(move)
+			if boundary == "cancel with empty journal" {
+				object.Object["status"].(map[string]any)["cleanup"] = map[string]any{}
+			}
+			client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+			registry := &Registry{Client: client}
+			if _, err := registry.CompareAndSetMoveStatus(context.Background(), move, next); !errors.Is(err, ErrStateConflict) {
+				t.Fatalf("unprotected authority change accepted: %v", err)
+			}
+			for _, action := range client.Actions() {
+				if action.GetVerb() == "update" {
+					t.Fatal("unsafe status was written")
+				}
+			}
+		})
+	}
 }
 
 func TestPreparedMoveCodecAndLegacyShape(t *testing.T) {

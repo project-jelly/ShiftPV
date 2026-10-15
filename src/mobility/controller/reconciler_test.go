@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ type memoryRepository struct {
 	readyPools           []volumeapi.Pool
 	readyPoolsConfigured bool
 	moves                []volumeapi.Move
+	moveSequence         int
 	// journalParents, when set, is the dynamic fake that carries the cleanup
 	// journal parents so Move finalizer changes stay visible to the store.
 	journalParents dynamic.Interface
@@ -96,6 +98,24 @@ func (m *memoryRepository) CompareAndSetState(_ context.Context, id, phase, acti
 	m.volumes[id] = next
 	return nil
 }
+
+func (m *memoryRepository) CompareAndSetSourceState(ctx context.Context, id string, expected, next volumeapi.State) error {
+	current, err := m.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	copy := expected.CurrentCopy
+	if copy == nil || copy.Validate() != nil || copy.Role != volume.RoleServing || copy.VolumeID != id || copy.VolumeUID != expected.UID ||
+		current.CurrentCopy == nil || *current.CurrentCopy != *copy || next.UID != expected.UID || next.OwnerNode != expected.OwnerNode ||
+		(next.CurrentCopy != nil && *next.CurrentCopy != *copy) {
+		return volumeapi.ErrStateConflict
+	}
+	if expected.ActiveMove == "" && next.ActiveMove != "" && (current.Deleting || current.HasCleanup) {
+		return volumeapi.ErrStateConflict
+	}
+	next.CurrentCopy = copy
+	return m.CompareAndSetState(ctx, id, expected.Phase, expected.ActiveMove, expected.OwnerNode, next)
+}
 func (m *memoryRepository) Pools(context.Context) ([]volumeapi.Pool, error) {
 	return identifiedTestPools(m.pools), nil
 }
@@ -138,8 +158,11 @@ func (m *memoryRepository) ReadyPoolForIdentity(ctx context.Context, name, uid, 
 	}
 	return volumeapi.Pool{}, volumeapi.ErrPoolNotReady
 }
-func (m *memoryRepository) CreateMove(_ context.Context, _ string, spec volumeapi.MoveSpec) (volumeapi.Move, error) {
-	move := volumeapi.Move{Name: "move-generated", UID: "uid", Spec: spec}
+func (m *memoryRepository) CreateMove(_ context.Context, prefix string, spec volumeapi.MoveSpec) (volumeapi.Move, error) {
+	m.moveSequence++
+	name := fmt.Sprintf("%s%d", prefix, m.moveSequence)
+	move := volumeapi.Move{Name: name, UID: name + "-uid", ResourceVersion: "1", Spec: spec,
+		Finalizers: []string{volumeapi.MoveProtectionFinalizer}}
 	m.moves = append(m.moves, move)
 	return move, nil
 }
@@ -160,6 +183,7 @@ func (m *memoryRepository) AddMoveFinalizer(ctx context.Context, name, uid strin
 		}
 		if !slices.Contains(m.moves[index].Finalizers, volumeapi.MoveProtectionFinalizer) {
 			m.moves[index].Finalizers = append(m.moves[index].Finalizers, volumeapi.MoveProtectionFinalizer)
+			advanceTestMoveVersion(&m.moves[index])
 		}
 		return m.mirrorMoveFinalizer(ctx, name, true)
 	}
@@ -180,6 +204,7 @@ func (m *memoryRepository) RemoveMoveFinalizer(ctx context.Context, name, uid st
 			}
 		}
 		m.moves[index].Finalizers = filtered
+		advanceTestMoveVersion(&m.moves[index])
 		return m.mirrorMoveFinalizer(ctx, name, false)
 	}
 	return nil
@@ -260,10 +285,36 @@ func (m *memoryRepository) SetMoveStatus(_ context.Context, name, uid string, st
 				return volumeapi.ErrStateConflict
 			}
 			m.moves[index].Status = status
+			advanceTestMoveVersion(&m.moves[index])
 			return nil
 		}
 	}
 	return fmt.Errorf("move not found")
+}
+
+// Contract tests for prepared transitions use the real Registry. This small
+// compatibility fake only supplies identity/version fencing to existing tests.
+func (m *memoryRepository) CompareAndSetMoveStatus(_ context.Context, expected volumeapi.Move, next volumeapi.MoveStatus) (volumeapi.Move, error) {
+	for index := range m.moves {
+		current := &m.moves[index]
+		if current.Name != expected.Name {
+			continue
+		}
+		if expected.UID == "" || expected.ResourceVersion == "" || current.UID != expected.UID || current.ResourceVersion != expected.ResourceVersion ||
+			current.Spec != expected.Spec || current.Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 {
+			return volumeapi.Move{}, volumeapi.ErrStateConflict
+		}
+		next.CleanupPhase = current.Status.CleanupPhase
+		current.Status = next
+		advanceTestMoveVersion(current)
+		return *current, nil
+	}
+	return volumeapi.Move{}, apierrors.NewNotFound(volumeapi.MoveResource.GroupResource(), expected.Name)
+}
+
+func advanceTestMoveVersion(move *volumeapi.Move) {
+	version, _ := strconv.ParseUint(move.ResourceVersion, 10, 64)
+	move.ResourceVersion = strconv.FormatUint(version+1, 10)
 }
 
 func identifiedTestPools(pools []volumeapi.Pool) []volumeapi.Pool {
@@ -1229,7 +1280,7 @@ func newMobilityFixture(volumeID string) *mobilityFixture {
 		Namespace:       &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "workload", Labels: map[string]string{admissionNamespaceLabel: "enabled"}}},
 		SourceNode:      readyNode("source", true),
 		DestinationNode: readyNode("destination", false),
-		PV: &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}, Spec: corev1.PersistentVolumeSpec{
+		PV: &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv", UID: "pv-uid"}, Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "csi.shiftpv.io", VolumeHandle: volumeID}},
 			ClaimRef:               &corev1.ObjectReference{Name: "claim", Namespace: "workload", UID: "claim-uid"},
 		}},

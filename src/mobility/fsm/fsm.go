@@ -6,6 +6,10 @@ type Phase string
 
 const (
 	PhasePending                      Phase = "Pending"
+	PhasePreparing                    Phase = "Preparing"
+	PhaseStartingDisruption           Phase = "StartingDisruption"
+	PhaseCanceling                    Phase = "Canceling"
+	PhaseCancelled                    Phase = "Cancelled"
 	PhaseLocking                      Phase = "Locking"
 	PhaseEvicting                     Phase = "Evicting"
 	PhaseWaitingForUnpublish          Phase = "WaitingForUnpublish"

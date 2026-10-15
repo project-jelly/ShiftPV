@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -17,6 +18,14 @@ var errCapacityApprovalPersistence = errors.New("capacity approval persistence f
 func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	if observed.DestinationNode == "" || r.CapacityProbe == nil || r.PoolLocks == nil {
 		return fmt.Errorf("destination capacity admission is not configured")
+	}
+	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && move.Status.Preparation != nil {
+		// The legacy FSM may ask for capacity while entering this stage. The
+		// prepared CAS converts only an already observed WaitingForCapacity.
+		if move.Status.Phase != string(fsm.PhaseWaitingForCapacity) {
+			return nil
+		}
+		return r.convertPreparation(ctx, move)
 	}
 	if err := r.measureSourceCopy(ctx, move); err != nil {
 		return err
@@ -61,6 +70,9 @@ func (r *Reconciler) measureSourceCopy(ctx context.Context, move *volumeapi.Move
 	}
 	if move.Status.SourceCopy != nil && *move.Status.SourceCopy != *copy {
 		return fmt.Errorf("source copy identity changed before capacity admission")
+	}
+	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && len(state.PublishedNodes) != 0 {
+		return fmt.Errorf("prepared source must be unpublished before physical measurement")
 	}
 	previous := move.Status
 	if move.Status.SourceCopy == nil {
@@ -176,28 +188,39 @@ func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current vol
 		return 0, 0, 0, 0, fmt.Errorf("volume %q has invalid capacity", current.Spec.VolumeID)
 	}
 	requested = state.CapacityBytes
+	if current.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && current.Status.Preparation != nil {
+		if err := preparedCapacitySnapshot(current, state, moves, pool); err != nil {
+			return 0, 0, 0, 0, err
+		}
+	}
 	logicalReserved, err = poolcapacity.ReservedBytesForPool(volumes, moves, pool.UID)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
+	physicalPending, err = pendingPhysicalBytes(current, pool, volumes, moves)
+	return requested, logicalReserved, physicalPending, limit, err
+}
+
+func pendingPhysicalBytes(current volumeapi.Move, pool volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move) (int64, error) {
+	var physicalPending int64
 	for _, move := range moves {
 		if move.Name == current.Name || volumeapi.MoveCleanupSettled(move) || !move.Status.CapacityApproved || move.Status.DestinationPoolUID != pool.UID {
 			continue
 		}
 		state, exists := volumes[move.Spec.VolumeID]
 		if !exists {
-			return 0, 0, 0, 0, fmt.Errorf("approved move %q has no volume state", move.Name)
+			return 0, fmt.Errorf("approved move %q has no volume state", move.Name)
 		}
 		if state.CurrentCopy != nil && state.CurrentCopy.PoolUID == pool.UID {
 			continue
 		}
 		if state.CapacityBytes <= 0 || move.Status.SourceBytes < 0 {
-			return 0, 0, 0, 0, fmt.Errorf("approved move %q has invalid capacity state", move.Name)
+			return 0, fmt.Errorf("approved move %q has invalid capacity state", move.Name)
 		}
 		if move.Status.SourceBytes > math.MaxInt64-physicalPending {
-			return 0, 0, 0, 0, fmt.Errorf("destination physical pending total overflows int64")
+			return 0, fmt.Errorf("destination physical pending total overflows int64")
 		}
 		physicalPending += move.Status.SourceBytes
 	}
-	return requested, logicalReserved, physicalPending, limit, nil
+	return physicalPending, nil
 }

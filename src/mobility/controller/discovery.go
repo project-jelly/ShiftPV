@@ -54,7 +54,10 @@ func activeMoveVolumes(moves []volumeapi.Move, volumes map[string]volumeapi.Stat
 	activeByVolume := make(map[string]bool)
 	for _, move := range moves {
 		if !legacyMoveProtocol(move) {
-			activeByVolume[move.Spec.VolumeID] = true
+			state := volumes[move.Spec.VolumeID]
+			if !supportedMoveProtocol(move) || !volumeapi.MoveCleanupSettled(move) || state.ActiveMove == move.Name {
+				activeByVolume[move.Spec.VolumeID] = true
+			}
 			continue
 		}
 		if move.Status.RecoveryPhase == recoveryRecovered {
@@ -102,7 +105,7 @@ func (r *Reconciler) discoverVolumeMove(ctx context.Context, volumeID string, st
 		klog.V(2).Infof("deferred ShiftPV mobility for volume %s: %s", volumeID, reason)
 		return false, nil
 	}
-	move, err := r.Repository.CreateMove(ctx, moveGenerateName(volumeID), volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: state.OwnerNode})
+	move, err := r.Repository.CreateMove(ctx, moveGenerateName(volumeID), volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: state.OwnerNode, ProtocolVersion: volumeapi.MoveProtocolPreparedV1})
 	if err != nil {
 		return false, err
 	}

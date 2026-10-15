@@ -16,7 +16,7 @@ import (
 
 // A status-write fence is too late: the legacy executor can evict, lock or
 // delete before writing status. Exercise the public pass with all writes wired.
-func TestPreparedProtocolRetainsEveryLegacyEffectBoundary(t *testing.T) {
+func TestUnknownProtocolRetainsEveryLegacyEffectBoundary(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		status volumeapi.MoveStatus
@@ -33,15 +33,15 @@ func TestPreparedProtocolRetainsEveryLegacyEffectBoundary(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			r, repo, client := preflightFixture()
 			repo.moves = []volumeapi.Move{{Name: "prepared", UID: "prepared-uid", Finalizers: []string{volumeapi.MoveProtectionFinalizer},
-				Spec:   volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source", ProtocolVersion: volumeapi.MoveProtocolPreparedV1, Recovery: "ResumeOwner"},
+				Spec:   volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source", ProtocolVersion: "future-v2", Recovery: "ResumeOwner"},
 				Status: test.status}}
 			writes := &forbidPreparedEffects{Repository: repo}
 			cleanup := &recordingCleanupOperator{}
 			r.Repository, r.CleanupOperator = writes, cleanup
 			for range 2 { // Relisting must not silently downgrade the record.
 				err := r.ReconcileAll(context.Background())
-				if err == nil || !strings.Contains(err.Error(), "execution is not enabled") {
-					t.Fatalf("expected inactive protocol diagnostic, got %v", err)
+				if err == nil || !strings.Contains(err.Error(), "unsupported protocol") {
+					t.Fatalf("expected unsupported protocol diagnostic, got %v", err)
 				}
 			}
 			if writes.calls != 0 || cleanup.reclaims != 0 {
@@ -56,7 +56,7 @@ func TestPreparedProtocolRetainsEveryLegacyEffectBoundary(t *testing.T) {
 	}
 }
 
-func TestInactiveMoveProtocolDoesNotBlockIndependentLegacyMove(t *testing.T) {
+func TestUnknownMoveProtocolDoesNotBlockIndependentLegacyMove(t *testing.T) {
 	r, repo, _ := preflightFixture()
 	repo.moves = []volumeapi.Move{
 		{Name: "future", UID: "future-uid", Spec: volumeapi.MoveSpec{VolumeID: "future-volume", ProtocolVersion: "future-v2"}},
@@ -70,12 +70,12 @@ func TestInactiveMoveProtocolDoesNotBlockIndependentLegacyMove(t *testing.T) {
 	}
 }
 
-func TestInactiveProtocolBlocksDiscoveryAndOwnerReleaseOnlyForItsVolume(t *testing.T) {
+func TestUnsettledOrUnknownProtocolBlocksOnlyItsVolume(t *testing.T) {
 	for _, test := range []struct {
 		name, protocol string
 		preparation    *volumeapi.MovePreparation
 	}{
-		{name: "prepared", protocol: volumeapi.MoveProtocolPreparedV1},
+		{name: "preparing", protocol: volumeapi.MoveProtocolPreparedV1},
 		{name: "future", protocol: "future-v2"},
 		{name: "hold without protocol", preparation: &volumeapi.MovePreparation{}},
 	} {
@@ -85,16 +85,19 @@ func TestInactiveProtocolBlocksDiscoveryAndOwnerReleaseOnlyForItsVolume(t *testi
 				Spec: volumeapi.MoveSpec{VolumeID: ownerPlacementVolumeID, SourceNode: "source", ProtocolVersion: test.protocol},
 				Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked), RecoveryPhase: recoveryRecovered,
 					CapacityReason: "RecoverySettled", Preparation: test.preparation}}
+			if test.protocol == volumeapi.MoveProtocolPreparedV1 {
+				move.Status = volumeapi.MoveStatus{Phase: string(fsm.PhasePreparing)}
+			}
 			repo.moves = []volumeapi.Move{move}
 			if !activeMoveVolumes(repo.moves, repo.volumes)[ownerPlacementVolumeID] {
-				t.Fatal("discovery may create a second legacy Move over inactive protocol")
+				t.Fatal("discovery may create a second Move over an unsettled or unsupported protocol")
 			}
 			if err := r.reconcileOwnerPlacements(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			stored, err := client.CoreV1().Pods(pod.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
 			if err != nil || !hasPlacementHold(stored) {
-				t.Fatalf("inactive protocol released placement: pod=%+v err=%v", stored, err)
+				t.Fatalf("unsettled or unsupported protocol released placement: pod=%+v err=%v", stored, err)
 			}
 			repo.moves[0].Spec.VolumeID = "independent-volume"
 			if err := r.reconcileOwnerPlacements(context.Background()); err != nil {
@@ -139,6 +142,12 @@ func (r *forbidPreparedEffects) reject() error {
 }
 func (r *forbidPreparedEffects) CompareAndSetState(context.Context, string, string, string, string, volumeapi.State) error {
 	return r.reject()
+}
+func (r *forbidPreparedEffects) CompareAndSetSourceState(context.Context, string, volumeapi.State, volumeapi.State) error {
+	return r.reject()
+}
+func (r *forbidPreparedEffects) CompareAndSetMoveStatus(context.Context, volumeapi.Move, volumeapi.MoveStatus) (volumeapi.Move, error) {
+	return volumeapi.Move{}, r.reject()
 }
 func (r *forbidPreparedEffects) RequestPoolScan(context.Context, volume.CopyIdentity) (int64, error) {
 	return 0, r.reject()

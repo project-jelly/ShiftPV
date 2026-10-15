@@ -29,6 +29,17 @@ func preflightFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 	return newTestReconciler(client, repo), repo, client
 }
 
+// Upgrade compatibility: persisted legacy Moves keep their original
+// lock-before-eviction protocol even though discovery now writes prepared-v1.
+func legacyPreflightFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
+	r, repo, client := preflightFixture()
+	repo.moves = []volumeapi.Move{{Name: "legacy-move", UID: "legacy-move-uid", ResourceVersion: "1",
+		Finalizers: []string{volumeapi.MoveProtectionFinalizer},
+		Spec:       volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"},
+		Status:     volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}}
+	return r, repo, client
+}
+
 func TestPreflightDefersWithoutLockOrEviction(t *testing.T) {
 	for _, test := range []struct {
 		name, reason string
@@ -149,11 +160,8 @@ func TestPreflightRecognizesInjectedPinAndToleratedDestination(t *testing.T) {
 func TestPreflightPDBRecheckedBeforeLockAndEviction(t *testing.T) {
 	for _, phase := range []fsm.Phase{fsm.PhasePending, fsm.PhaseLocking, fsm.PhaseEvicting} {
 		t.Run(string(phase), func(t *testing.T) {
-			r, repo, client := preflightFixture()
+			r, repo, client := legacyPreflightFixture()
 			ctx := context.Background()
-			if err := r.discoverMoves(ctx); err != nil {
-				t.Fatal(err)
-			}
 			move := &repo.moves[0]
 			move.Status.Phase = string(phase)
 			if phase != fsm.PhasePending {
@@ -340,10 +348,7 @@ func TestPreflightPDBSelectorAndOverlap(t *testing.T) {
 
 func TestPreflightLateSecondConsumerWaitsAndResumes(t *testing.T) {
 	ctx := context.Background()
-	r, repo, client := preflightFixture()
-	if err := r.discoverMoves(ctx); err != nil {
-		t.Fatal(err)
-	}
+	r, repo, client := legacyPreflightFixture()
 	pod, _ := client.CoreV1().Pods("workload").Get(ctx, "consumer", metav1.GetOptions{})
 	pod.Name, pod.UID = "second-consumer", "second-uid"
 	if _, err := client.CoreV1().Pods("workload").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
@@ -394,10 +399,7 @@ func TestPendingEligibilityLossWaitsAndResumes(t *testing.T) {
 	for _, condition := range []string{"namespace opt-out", "consumer missing"} {
 		t.Run(condition, func(t *testing.T) {
 			ctx := context.Background()
-			r, repo, client := preflightFixture()
-			if err := r.discoverMoves(ctx); err != nil {
-				t.Fatal(err)
-			}
+			r, repo, client := legacyPreflightFixture()
 			pod, _ := client.CoreV1().Pods("workload").Get(ctx, "consumer", metav1.GetOptions{})
 			ns, _ := client.CoreV1().Namespaces().Get(ctx, "workload", metav1.GetOptions{})
 			if condition == "namespace opt-out" {
@@ -431,7 +433,7 @@ func TestPendingEligibilityLossWaitsAndResumes(t *testing.T) {
 
 func TestPreflightLateSecondConsumerAfterLockDoesNotEvict(t *testing.T) {
 	ctx := context.Background()
-	r, repo, client := preflightFixture()
+	r, repo, client := legacyPreflightFixture()
 	if err := r.ReconcileAll(ctx); err != nil {
 		t.Fatal(err)
 	}

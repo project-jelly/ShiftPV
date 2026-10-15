@@ -93,6 +93,14 @@ func MoveCleanupSettled(move Move) bool {
 	if move.Status.Preparation != nil || (move.Spec.ProtocolVersion != "" && move.Spec.ProtocolVersion != MoveProtocolPreparedV1) {
 		return false
 	}
+	if move.Spec.ProtocolVersion == MoveProtocolPreparedV1 {
+		if move.Status.Phase == "Cancelled" {
+			return !move.Status.CapacityApproved && !hasMoveDestinationIntent(move.Status)
+		}
+		if validatePreparedPlan(move) != nil {
+			return false
+		}
+	}
 	if move.Status.Phase == "Succeeded" {
 		return move.Status.CleanupPhase == "Completed"
 	}

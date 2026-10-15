@@ -346,6 +346,13 @@ kubectl wait --for=delete shiftpvvolume/<volume-id> --timeout=10m
 
 ## Planned mobility
 
+The chart installs `<fullname>-placement`, a value-0, non-default PriorityClass
+with `preemptionPolicy: Never`. Preparation reservations use this class instead
+of the workload's priority, so they wait for free resources without preempting
+other Pods. Higher-priority workloads may therefore wait longer for preparation.
+Without Helm, provision the same class contract and pass its name using
+`--mobility-placement-priority-class` (default `shiftpv-placement`).
+
 Settled terminal `ShiftPVMove` metadata is retained for seven days by default
 and then removed with a UID precondition. Configure whole-hour retention with
 `mobility.journalRetention`. This policy never deletes copy data and never
@@ -388,7 +395,14 @@ resourceVersion을 `test`하는 JSON Patch로 만들고 `kubectl patch --dry-run
 - Volume이 Ready이고 active Move나 deletionTimestamp가 없다.
 - source data backup 또는 workload 수준 복구 절차가 준비돼 있다.
 
-Source cordon 뒤 Controller가 cold move를 시작한다. 진행은 parent resource만으로 판정한다.
+Source cordon 뒤 Controller가 목적지 배치와 논리 용량을 먼저 예약한다. 예약을 받지 못한
+Volume의 원본 Pod는 계속 실행된다. `StartingDisruption`을 저장한 뒤 원본을 중단하고, 실제
+여유 공간을 확인해 복사 실행을 승인한다. 준비 예약은 디스크 quota가 아니므로 외부 writer의
+공간 사용까지 막지는 않는다.
+
+운영 순서는 **cordon → 이동·cleanup 완료와 destination Pod Ready 확인 → drain**이다.
+먼저 drain하면 source consumer가 사라져 자동 이동을 시작하지 못할 수 있다.
+진행은 parent resource로 판정한다.
 
 ```bash
 kubectl get shiftpvvolumes
@@ -399,6 +413,7 @@ kubectl get shiftpvpools -o yaml
 
 | 판정 | 의미 |
 |---|---|
+| `Preparing` / `Canceling` | 원본 권한 유지; 예약 준비 또는 디스크 승인 전 취소 정산 |
 | commit 전 대기/실패 | source owner와 data를 보존하고 resume 또는 abort |
 | owner CAS 확인 | commit 완료; destination만 authoritative |
 | destination 실제 publish 확인 | `publishedNodes`와 destination Pool inventory의 actual mount proof가 모두 맞으면 source cleanup을 시작할 수 있음 |
@@ -407,6 +422,10 @@ kubectl get shiftpvpools -o yaml
 
 Node outage 중에는 관련 journal/finalizer를 제거하지 않는다. Node가 같은 identity로 돌아오면 동일
 transaction을 재개한다. 영구 authoritative disk/node 손실은 제품 복구 범위 밖이다.
+
+실행 승인 뒤 `Blocked` 복구는 [복구 절차](../../docs/spec/volume-mobility.md#operator-procedure)를
+따른다. PV/PVC와 workload를 보존하고 실패 전제조건을 복구한 뒤 `spec.recovery=ResumeOwner`를
+요청한다. PVC 재생성은 UID를 바꾸므로 원래 binding의 복구가 되지 않는다.
 
 ## GC and review
 
