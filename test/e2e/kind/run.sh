@@ -523,14 +523,23 @@ if group_selected g2; then
 	kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-coexistence --timeout=2m
 	COEXISTENCE_PV=$(kubectl get pvc shiftpv-coexistence -o jsonpath='{.spec.volumeName}')
 	COEXISTENCE_DRIVER=$(kubectl get "pv/${COEXISTENCE_PV}" -o jsonpath='{.spec.csi.driver}')
+	COEXISTENCE_VOLUME=$(kubectl get "pv/${COEXISTENCE_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 	if [[ "${COEXISTENCE_DRIVER}" != "csi.shiftpv.io" ]]; then
 		echo "explicit ShiftPV PVC used unexpected driver: ${COEXISTENCE_DRIVER}" >&2
+		exit 1
+	fi
+	if [[ -z "${COEXISTENCE_VOLUME}" ]]; then
+		echo "explicit ShiftPV PV has no volume handle: ${COEXISTENCE_PV}" >&2
 		exit 1
 	fi
 	kubectl exec shiftpv-coexistence -- grep -Fx 'ShiftPV StorageClass coexistence' /data/payload
 
 	kubectl delete pod shiftpv-coexistence --wait=true
 	kubectl delete pvc shiftpv-coexistence --wait=true
+	# Settle this fixture's cleanup before overmounting the fault Pool; the
+	# shiftpv-e2e baseline remains retained.
+	kubectl wait --for=delete "pv/${COEXISTENCE_PV}" --timeout=5m
+	kubectl wait --for=delete "shiftpvvolume/${COEXISTENCE_VOLUME}" --timeout=2m
 	CLUSTER_NAME="${CLUSTER_NAME}" WORKER_B_POOL="${WORKER_B_POOL}" \
 	  "${ROOT_DIR}/test/e2e/kind/filesystem-faults.sh"
 fi
