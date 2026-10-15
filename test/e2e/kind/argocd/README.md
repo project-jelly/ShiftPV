@@ -25,3 +25,14 @@ Run from the repository root:
 The suite has its own cluster name, temporary kubeconfig, worker directory, and
 image tag. It can therefore run alongside the base and mobility kind suites.
 Set `KEEP_CLUSTER=1` only for failure diagnosis.
+
+The bootstrap verifies the upstream Argo manifest checksum, pulls Redis from
+Docker Hub by the same immutable digest as the upstream ECR mirror, and preloads
+it into every kind node. Only Redis uses a local image alias and `IfNotPresent`;
+host and node image IDs must match before Argo starts. This avoids depending on
+the ECR mirror during Redis startup without changing Redis content. The original
+manifest, rendered overlay, and image identity report are copied before teardown
+to `.tmp/ci-argocd-diagnostics/redis-bootstrap/<run-directory>/`. The existing CI
+failure artifact includes these three files; kubeconfig, credentials and workload
+data are excluded. Missing files during an early failure are not fabricated, and
+failure to preserve an existing evidence file fails the test while cleanup continues.
