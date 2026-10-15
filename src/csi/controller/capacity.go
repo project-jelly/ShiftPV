@@ -19,7 +19,7 @@ import (
 const selectedNodeAnnotation = consumer.SelectedNode
 
 type PoolCapacityRegistry interface {
-	ReadyPools(context.Context) ([]volumeapi.Pool, error)
+	ObservePools(context.Context) (volumeapi.PoolSnapshot, error)
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	ListMoves(context.Context) ([]volumeapi.Move, error)
@@ -91,7 +91,7 @@ func poolSelectionError(err error) error {
 
 func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string, initializingUID string) (volumeapi.State, error) {
 	poolsDone := s.observeStep("create_pool_list", id)
-	pools, err := s.CapacityPools.ReadyPools(ctx)
+	snapshot, err := s.CapacityPools.ObservePools(ctx)
 	poolsDone()
 	if err != nil {
 		if errors.Is(err, volumeapi.ErrPoolNotReady) {
@@ -99,6 +99,7 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 		}
 		return volumeapi.State{}, poolSelectionError(err)
 	}
+	pools := snapshot.Ready
 	group := requestedPoolGroup(parameters)
 	for _, pool := range pools {
 		if pool.NodeName == nodeName && poolGroup(pool) == group && volumeapi.PoolHasServingVolume(pool, id) {
@@ -127,8 +128,7 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 		}
 	}
 	if !found {
-		s.waitForPoolObservation(parameters, requestName, nodeName, volumeapi.Pool{})
-		return volumeapi.State{}, status.Errorf(codes.FailedPrecondition, "node %q has no Ready Pool in group %q", nodeName, group)
+		return volumeapi.State{}, s.noReadyPool(ctx, parameters, requestName, nodeName, snapshot.Registered)
 	}
 	return volumeapi.State{}, denied
 }
@@ -206,15 +206,9 @@ func (s *Service) waitForPoolObservation(parameters map[string]string, requestNa
 // claim may release its selected node; fixed or unknown placement must retry.
 func (s *Service) capacityDenied(ctx context.Context, parameters map[string]string, id, requestName string, pool volumeapi.Pool, requestedBytes, limitBytes int64, stats *poolcapacity.Filesystem, format string, args ...any) error {
 	message := fmt.Sprintf(format, args...)
-	if s.ConsumerPlacement == nil {
-		return status.Error(codes.Unavailable, "consumer placement inspection is not configured")
-	}
-	placement, err := s.ConsumerPlacement.Inspect(ctx, consumer.Request{Namespace: parameters[PVCNamespaceKey], Name: parameters[PVCNameKey], UID: strings.TrimPrefix(requestName, "pvc-"), Node: pool.NodeName})
-	if errors.Is(err, consumer.ErrIdentity) {
-		return status.Errorf(codes.FailedPrecondition, "%s; %v", message, err)
-	}
+	placement, err := s.inspectConsumerPlacement(ctx, parameters, requestName, pool.NodeName, message)
 	if err != nil {
-		return status.Errorf(codes.Unavailable, "%s; inspect PVC consumer: %v", message, err)
+		return err
 	}
 	if placement.Placement != consumer.Reschedulable {
 		if requestedBytes > limitBytes {

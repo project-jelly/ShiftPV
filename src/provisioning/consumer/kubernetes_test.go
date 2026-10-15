@@ -17,7 +17,7 @@ func TestKubernetesReaderScopesConsumerObservation(t *testing.T) {
 	client := fake.NewClientset(r.claims[req.Name], &foreign)
 	inspection := Inspector{Reader: KubernetesReader{Client: client}}
 	result, err := inspection.Inspect(context.Background(), req)
-	if err != nil || result.Placement != Reschedulable {
+	if err != nil || result.Placement != Unknown {
 		t.Fatalf("another namespace affected placement: %+v %v", result, err)
 	}
 	local := consumerPod("node")

@@ -72,20 +72,30 @@ func TestConsumerPlacementPatterns(t *testing.T) {
 		want     Placement
 		identity bool
 	}{
-		{name: "ordinary PVC before scheduling", want: Reschedulable},
+		{name: "PVC before consumer creation", want: Unknown},
 		{name: "ordinary unscheduled consumer", change: func(r *memoryReader, _ *Request) { r.pods = []corev1.Pod{consumerPod("")} }, want: Reschedulable},
 		{name: "scheduled consumer without Pod ownership", change: func(r *memoryReader, _ *Request) { r.pods = []corev1.Pod{consumerPod("node")} }, want: Fixed},
 		{name: "consumer on another node", change: func(r *memoryReader, _ *Request) { r.pods = []corev1.Pod{consumerPod("other")} }, want: Unknown},
-		{name: "terminal consumer", change: func(r *memoryReader, _ *Request) {
+		{name: "succeeded consumer", change: func(r *memoryReader, _ *Request) {
 			pod := consumerPod("node")
 			pod.Status.Phase = corev1.PodSucceeded
 			r.pods = []corev1.Pod{pod}
-		}, want: Reschedulable},
+		}, want: Unknown},
+		{name: "failed unassigned consumer", change: func(r *memoryReader, _ *Request) {
+			pod := consumerPod("")
+			pod.Status.Phase = corev1.PodFailed
+			r.pods = []corev1.Pod{pod}
+		}, want: Unknown},
 		{name: "unrelated scheduled Pod", change: func(r *memoryReader, _ *Request) {
 			pod := consumerPod("node")
 			pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other"
 			r.pods = []corev1.Pod{pod}
-		}, want: Reschedulable},
+		}, want: Unknown},
+		{name: "unrelated unassigned Pod", change: func(r *memoryReader, _ *Request) {
+			pod := consumerPod("")
+			pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other"
+			r.pods = []corev1.Pod{pod}
+		}, want: Unknown},
 		{name: "missing owner Pod", change: func(r *memoryReader, q *Request) {
 			r.claims[q.Name].OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: "missing", UID: "missing"}}
 		}, want: Unknown},
@@ -115,6 +125,59 @@ func TestConsumerPlacementPatterns(t *testing.T) {
 			}
 			if err != nil || result.Placement != tc.want {
 				t.Fatalf("result=%+v err=%v want=%v", result, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestConsumerCreationOrderPreservesPlacement(t *testing.T) {
+	for _, first := range []string{"PVC", "Pod"} {
+		t.Run(first+" first", func(t *testing.T) {
+			r, q := fixture()
+			pvc := r.claims[q.Name]
+			if first == "Pod" {
+				r.pods = []corev1.Pod{consumerPod(q.Node)}
+				delete(r.claims, q.Name)
+			}
+			inspector := Inspector{Reader: r}
+			got, err := inspector.Inspect(context.Background(), q)
+			if err != nil || got.Placement != Unknown {
+				t.Fatalf("incomplete consumer observation authorized rescheduling: %+v %v", got, err)
+			}
+			r.claims[q.Name] = pvc
+			r.pods = []corev1.Pod{consumerPod(q.Node)}
+			got, err = inspector.Inspect(context.Background(), q)
+			if err != nil || got.Placement != Fixed {
+				t.Fatalf("fixed consumer lost placement after creation: %+v %v", got, err)
+			}
+			r.pods = nil
+			got, err = inspector.Inspect(context.Background(), q)
+			if err != nil || got.Placement != Unknown {
+				t.Fatalf("consumer disappearance authorized rescheduling: %+v %v", got, err)
+			}
+			r.pods = []corev1.Pod{consumerPod("")}
+			got, err = inspector.Inspect(context.Background(), q)
+			if err != nil || got.Placement != Reschedulable {
+				t.Fatalf("replacement scheduler-managed consumer cannot reschedule: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestTerminatingConsumerKeepsExistingPlacementPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		node string
+		want Placement
+	}{{"", Reschedulable}, {"node", Fixed}, {"other", Unknown}} {
+		t.Run(tc.node, func(t *testing.T) {
+			r, q := fixture()
+			pod := consumerPod(tc.node)
+			now := metav1.Now()
+			pod.DeletionTimestamp = &now
+			r.pods = []corev1.Pod{pod}
+			got, err := (Inspector{Reader: r}).Inspect(context.Background(), q)
+			if err != nil || got.Placement != tc.want {
+				t.Fatalf("terminating consumer policy changed: %+v %v want=%v", got, err, tc.want)
 			}
 		})
 	}
@@ -186,16 +249,31 @@ func TestObservationErrorsCannotAuthorizeRescheduling(t *testing.T) {
 	}
 }
 
-func TestConflictingConsumersCannotAuthorizeRescheduling(t *testing.T) {
-	for _, reverse := range []bool{false, true} {
-		a, b := consumerPod("node"), consumerPod("other")
-		pods := []corev1.Pod{a, b}
-		if reverse {
-			pods = []corev1.Pod{b, a}
-		}
-		if got := placementForPods(pods, "claim", "node"); got.Placement != Unknown {
-			t.Fatalf("ordering hid conflict: %+v", got)
-		}
+func TestConsumerOrderingPreservesPlacementPriority(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nodes []string
+		want  Placement
+	}{
+		{"fixed and unassigned", []string{"node", ""}, Fixed},
+		{"conflicting and unassigned", []string{"other", ""}, Unknown},
+		{"fixed and conflicting", []string{"node", "other"}, Unknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, reverse := range []bool{false, true} {
+				r, q := fixture()
+				a, b := consumerPod(tc.nodes[0]), consumerPod(tc.nodes[1])
+				b.Name, b.UID = "second", "second-uid"
+				r.pods = []corev1.Pod{a, b}
+				if reverse {
+					r.pods = []corev1.Pod{b, a}
+				}
+				got, err := (Inspector{Reader: r}).Inspect(context.Background(), q)
+				if err != nil || got.Placement != tc.want {
+					t.Fatalf("reverse=%v changed placement: %+v %v want=%v", reverse, got, err, tc.want)
+				}
+			}
+		})
 	}
 }
 func TestOwnerIdentityRemainsUncertain(t *testing.T) {

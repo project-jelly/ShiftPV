@@ -98,7 +98,7 @@ Helper는 host device 권한을 갖지 않는다. `FixedBlock` Pool은 노드가
 inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경을 원자적으로 차단하지는 않으므로
 [Pool 변경 절차](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.
 
-### Capacity denial
+### Placement and capacity denial
 
 용량 부족의 원인과 PVC 재배치 가능 여부를 별도로 판정한다.
 
@@ -107,11 +107,19 @@ CSI는 topology 내 생성 불가에 `ResourceExhausted`를 지정한다. ShiftP
 호환성 정책이다. 다른 CSI orchestrator에 동일한 재시도 동작을 보장하지 않는다.
 
 - 일반 미배치 consumer는 `ResourceExhausted`로 다른 노드 선택을 허용한다.
+- 선택한 노드에 요청 그룹의 Pool이 없을 때도 같은 consumer 검사를 거쳐 재선택을 허용한다.
+  등록된 Pool이 있지만 Ready가 아니면 `Unavailable`로 관찰 회복을 기다린다.
 - 배치된 consumer와 CDI prime·scratch는 `Unavailable`로 노드 지정을 유지한다.
   prime은 원본 PVC의 UID·selected-node·populator 종류를 확인하므로 Pod 생성 전에도 보호한다.
+- 실제 미배치 consumer가 관찰되지 않으면 재배치를 허가하지 않는다. PVC가 Pod보다 먼저
+  만들어진 경우에는 노드를 유지하고 다음 요청에서 consumer를 다시 확인한다.
 - 조회 실패·불명확한 배치 계약은 재시도한다. PVC UID·노드 변경은 `FailedPrecondition`이다.
 - 고정된 요청이 개별 Pool 한도나 filesystem 전체 크기를 초과해도 노드를 지우지 않는다.
   이 경우 공간 반환만으로 해결되지 않으며 Pool 설정 또는 요청 크기 변경이 필요하다.
+
+기록된 생성 의도는 위 재선택보다 우선하며 원래 노드·Pool UID를 유지한다.
+현재 scheduler는 그룹별 가용 용량을 알지 못하므로 재선택 후 같은 노드를 다시 고를 수 있다.
+일부 노드에만 존재하는 그룹의 StorageClass에는 해당 노드의 `allowedTopologies`를 지정한다.
 
 이미 selected-node가 지워진 CDI PVC는 이 수정으로 자동 보정되지 않는다. 원본 PVC·prime·
 consumer의 identity를 확인하고 CDI 운영 절차로 작업 Pod를 재생성해야 한다. ShiftPV는
