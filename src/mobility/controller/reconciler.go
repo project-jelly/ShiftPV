@@ -142,6 +142,10 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("move %s: %w", move.Name, err))
 		}
 	}
+	// Admission may have created a hold before discovery created any Move.
+	// Keep its recovery in this serial pass, and isolate individual Pod errors
+	// from the transactions above.
+	reconcileErrors = append(reconcileErrors, r.reconcileOwnerPlacements(ctx))
 	return errors.Join(reconcileErrors...)
 }
 

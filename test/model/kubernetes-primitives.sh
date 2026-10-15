@@ -3,12 +3,13 @@ set -euo pipefail
 
 cluster_name="${CLUSTER_NAME:-shiftpv-v04-primitives-$$}"
 keep_cluster="${KEEP_CLUSTER:-0}"
+cluster_creation_started=0
 probe_dir="$(mktemp -d)"
 probe_kubeconfig="${probe_dir}/kubeconfig"
 
 cleanup() {
   result_code=$?
-  if [[ "${keep_cluster}" != "1" ]]; then
+  if [[ "${keep_cluster}" != "1" && "${cluster_creation_started}" == "1" ]]; then
     kind delete cluster --name "${cluster_name}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${probe_dir}" && -d "${probe_dir}" ]]; then
@@ -23,7 +24,65 @@ if kind get clusters | grep -Fxq "${cluster_name}"; then
   exit 1
 fi
 
+cluster_creation_started=1
 kind create cluster --name "${cluster_name}" --kubeconfig "${probe_kubeconfig}" --wait 120s >/dev/null
+
+server_version="$(kubectl --kubeconfig "${probe_kubeconfig}" get --raw /version | sed -n 's/.*"gitVersion": "\([^"]*\)".*/\1/p')"
+echo "Kubernetes API server: ${server_version}"
+
+# Owner-placement recovery uses Pod Update: add an owner selector and remove
+# only our scheduling gate. Keep the user's gate so this probe cannot run.
+kubectl --kubeconfig "${probe_kubeconfig}" create -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: held-owner-placement
+  namespace: default
+  annotations:
+    shiftpv.io/placement: held
+spec:
+  schedulingGates:
+    - name: example.test/hold
+    - name: shiftpv.io/placement-hold
+  nodeSelector:
+    kubernetes.io/os: linux
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values: [linux]
+  containers:
+    - name: probe
+      image: registry.k8s.io/pause:3.10.1
+YAML
+
+held_pod_uid="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.metadata.uid}')"
+held_pod_affinity="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.spec.affinity}')"
+owner_node="$(kubectl --kubeconfig "${probe_kubeconfig}" get nodes -o jsonpath='{.items[0].metadata.name}')"
+kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o json >"${probe_dir}/held-pod.json"
+kubectl --kubeconfig "${probe_kubeconfig}" patch --local -f "${probe_dir}/held-pod.json" --type=json \
+  -p "$(printf '[{"op":"test","path":"/spec/schedulingGates/1/name","value":"shiftpv.io/placement-hold"},{"op":"remove","path":"/spec/schedulingGates/1"},{"op":"add","path":"/spec/nodeSelector/kubernetes.io~1hostname","value":"%s"},{"op":"replace","path":"/metadata/annotations/shiftpv.io~1placement","value":"owner"}]' "${owner_node}")" \
+  -o json >"${probe_dir}/owner-pod.json"
+kubectl --kubeconfig "${probe_kubeconfig}" replace -f "${probe_dir}/owner-pod.json" >/dev/null
+
+owner_pod_uid="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.metadata.uid}')"
+owner_pod_gates="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{range .spec.schedulingGates[*]}{.name}{"\n"}{end}')"
+owner_pod_selector="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.spec.nodeSelector.kubernetes\.io/hostname}')"
+owner_pod_os="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.spec.nodeSelector.kubernetes\.io/os}')"
+owner_pod_affinity="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.spec.affinity}')"
+owner_pod_annotation="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.metadata.annotations.shiftpv\.io/placement}')"
+owner_pod_node="$(kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o jsonpath='{.spec.nodeName}')"
+if [[ "${owner_pod_uid}" != "${held_pod_uid}" || "${owner_pod_gates}" != "example.test/hold" ||
+  "${owner_pod_selector}" != "${owner_node}" || "${owner_pod_os}" != "linux" ||
+  "${owner_pod_affinity}" != "${held_pod_affinity}" || "${owner_pod_annotation}" != "owner" || -n "${owner_pod_node}" ]]; then
+  echo "gated Pod Update did not preserve identity and user constraints while restoring owner placement" >&2
+  kubectl --kubeconfig "${probe_kubeconfig}" get pod held-owner-placement -o yaml >&2
+  exit 1
+fi
+echo "Gated Pod owner-placement Update passed; user gate retained"
 
 kubectl --kubeconfig "${probe_kubeconfig}" apply \
   -f charts/shiftpv/crds/shiftpv.io_shiftpvpools.yaml \

@@ -17,6 +17,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 )
 
@@ -406,6 +407,12 @@ func TestCompletionAfterVolumeDeletion(t *testing.T) {
 		t.Fatalf("deleted Volume did not finish metadata-only: %+v", repository.moves[0])
 	}
 	for _, action := range client.Actions() {
+		// ReconcileAll also observes orphan workload holds, without examining
+		// this deleted Volume's disk or helper resources.
+		if list, ok := action.(ktesting.ListAction); ok && action.Matches("list", "pods") && action.GetResource().Group == "" &&
+			action.GetNamespace() == metav1.NamespaceAll && list.GetListRestrictions().Labels.String() == admission.ManagedLabel+"=true" {
+			continue
+		}
 		if action.GetVerb() != "get" && action.GetVerb() != "delete" {
 			t.Fatalf("completion recreated or inspected disk resources: %+v", action)
 		}
