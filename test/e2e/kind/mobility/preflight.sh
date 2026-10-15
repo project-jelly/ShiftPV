@@ -2,15 +2,55 @@
 # Sourced by run.sh. All resources belong to its isolated Kind cluster.
 PREFLIGHT_RETAINED_VOLUMES=()
 PREFLIGHT_EXPECTED_MOVES=()
+PREFLIGHT_EXPECTED_MOVE_UIDS=()
+
+retained_volume_settled() {
+	local state=$1 moves=$2 expected=$3 expected_uid=$4
+	jq -en --argjson state "${state}" --argjson moves "${moves}" \
+		--arg expected "${expected}" --arg expected_uid "${expected_uid}" '
+		def harmless_cancellation:
+			.spec.protocolVersion == "prepared-v1" and
+			.spec.sourceNode == $state.status.ownerNode and
+			.status.phase == "Cancelled" and .status.reason == "SourceNotCordoned" and
+			.status.capacityReason == "PreparationCancelled" and
+			.metadata.deletionTimestamp == null and ((.metadata.finalizers // []) | length) == 0 and
+			.status.preparation == null and .status.capacityApproved == false and
+			.status.evictionRequested == false and .status.incomingCopy == null and
+			.status.destinationCopy == null and .status.cleanup == null and
+			.status.sourceCopy == null and .status.sourceBytes == 0 and
+			((.status.rollbackRequiredGeneration // 0) == 0) and
+			all(.status | [.copyOperationID, .promotionOperationID, .copyJobName,
+				.promotionJobName, .cleanupPhase, .recoveryPhase, .recoveryOwner,
+				.placementPodUID, .destinationNode, .destinationPoolUID,
+				.persistentVolumeName, .persistentVolumeUID, .persistentVolumeClaimName,
+				.persistentVolumeClaimNamespace, .persistentVolumeClaimUID,
+				.consumerName, .consumerUID, .replacementName, .replacementUID][]; . == null or . == "");
+		$state.status.phase == "Ready" and ($state.status.activeMove // "") == "" and
+		($expected == "" or any($moves[]; .metadata.name == $expected)) and
+		all($moves[];
+			if $expected != "" and .metadata.name == $expected then
+				.metadata.uid == $expected_uid and .status.phase == "Succeeded" and
+				.status.preparation == null and .status.cleanup.status.phase == "Completed"
+			else harmless_cancellation end)
+	' >/dev/null
+}
 
 assert_retained_volumes_unchanged() {
-	local i volume moves
+	local i volume state moves deadline
 	for i in "${!PREFLIGHT_RETAINED_VOLUMES[@]}"; do
 		volume=${PREFLIGHT_RETAINED_VOLUMES[i]}
-		moves=$(kubectl get shiftpvmoves -o jsonpath="{.items[?(@.spec.volumeID=='${volume}')].metadata.name}")
-		test "${moves}" = "${PREFLIGHT_EXPECTED_MOVES[i]}"
-		test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.phase}')" = Ready
-		test -z "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.activeMove}')"
+		deadline=$((SECONDS + 60))
+		while :; do
+			state=$(kubectl get "shiftpvvolume/${volume}" -o json)
+			moves=$(kubectl get shiftpvmoves -o json | jq --arg volume "${volume}" '[.items[] | select(.spec.volumeID == $volume)]')
+			if retained_volume_settled "${state}" "${moves}" "${PREFLIGHT_EXPECTED_MOVES[i]}" "${PREFLIGHT_EXPECTED_MOVE_UIDS[i]}"; then break; fi
+			if ((SECONDS >= deadline)); then
+				echo "retained volume did not settle without new execution: ${volume}" >&2
+				jq -n --argjson volume "${state}" --argjson moves "${moves}" '{volume: $volume, moves: $moves}' >&2
+				return 1
+			fi
+			sleep 1
+		done
 	done
 }
 
@@ -103,9 +143,11 @@ EOF
 }
 
 test_preflight() {
-	local scenario pod uid pv volume checksum patch controller_pod move
+	local scenario pod uid pv volume checksum patch controller_pod move move_uid
+	command -v jq >/dev/null
 	for scenario in selector affinity taint pdb; do
 		move=""
+		move_uid=""
 		# Choose the initial owner without persisting a workload node pin.
 		kubectl cordon "${CLUSTER_NAME}-worker2"
 		sed -e "s|__SOURCE_NODE__|${CLUSTER_NAME}-worker|g" \
@@ -152,6 +194,7 @@ test_preflight() {
 			done
 			test -n "${move}"
 			kubectl wait "shiftpvmove/${move}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=480s
+			move_uid=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.metadata.uid}')
 			assert_move_diagnostics "${move}" Succeeded '' MobilitySucceeded
 			kubectl -n shiftpv-mobility-blocked rollout status deployment/source-only --timeout=180s
 			pod=$(kubectl -n shiftpv-mobility-blocked get pod -l app=shiftpv-mobility-source-only -o jsonpath='{.items[0].metadata.name}')
@@ -162,8 +205,11 @@ test_preflight() {
 		kubectl uncordon "${CLUSTER_NAME}-worker"
 		if [[ "${scenario}" == taint ]]; then kubectl taint node "${CLUSTER_NAME}-worker2" shiftpv-e2e:NoSchedule-; fi
 		kubectl delete namespace shiftpv-mobility-blocked --wait=true --timeout=180s
+		# Discovery can read the source before uncordon and the destination after
+		# untaint. Its next pass cancels without execution and retains the journal.
 		PREFLIGHT_RETAINED_VOLUMES+=("${volume}")
 		PREFLIGHT_EXPECTED_MOVES+=("${move}")
+		PREFLIGHT_EXPECTED_MOVE_UIDS+=("${move_uid}")
 		assert_retained_volumes_unchanged
 		if [[ "${scenario}" == taint ]]; then
 			assert_obsolete_pending_move_cancelled "${volume}" "${CLUSTER_NAME}-worker"
