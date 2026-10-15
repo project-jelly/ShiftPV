@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 
@@ -49,7 +50,7 @@ func (r *Reconciler) ensurePreparedPlacement(ctx context.Context, move volumeapi
 	stale := placement.Spec.NodeName != "" && !slices.Contains(candidates, placement.Spec.NodeName)
 	if placement.Spec.NodeName == "" {
 		stale = !reflect.DeepEqual(placement.Spec.Affinity, desired.Spec.Affinity) ||
-			!reflect.DeepEqual(placement.Spec.NodeSelector, desired.Spec.NodeSelector)
+			!maps.Equal(placement.Spec.NodeSelector, desired.Spec.NodeSelector)
 	}
 	if stale {
 		return nil, "", r.deletePlacement(ctx, move)
