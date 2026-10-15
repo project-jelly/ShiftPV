@@ -9,15 +9,13 @@ fi
 if [[ ${1:-} == --private ]]; then
   binary=$2
   scratch=$3
-  # shellcheck disable=SC2329 # Invoked by the private namespace's EXIT trap.
-  cleanup() {
+  trap '
     for mode in inodes blocks; do
       if mountpoint -q "$scratch/$mode"; then
         umount "$scratch/$mode"
       fi
     done
-  }
-  trap cleanup EXIT
+  ' EXIT
   for mode in blocks inodes; do
     mkdir "$scratch/$mode"
     truncate -s 64M "$scratch/$mode.img"
