@@ -152,6 +152,9 @@ func (r *Reconciler) volumeWorker(ctx context.Context, d *volumeDispatcher, obse
 // ReconcileAll uses the same per-Volume path as Run, with one synchronous pass
 // for callers that need its combined result. Do not run it alongside Run.
 func (r *Reconciler) reconcileVolumePass(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	observations := newDiscoveryObservations(r.ObserveDiscovery)
 	hints, scanErr := r.scanVolumeWork(ctx, nil, observations)
 	ids := make([]string, 0, len(hints))
@@ -161,20 +164,29 @@ func (r *Reconciler) reconcileVolumePass(ctx context.Context) error {
 	sort.Strings(ids)
 	failures := []error{scanErr}
 	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
+		}
 		result, err := r.advanceVolume(ctx, hints[id])
 		observations.record(id, result)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("volume %s: %w", id, err))
 		}
 	}
-	return errors.Join(failures...)
+	return errors.Join(append(failures, ctx.Err())...)
 }
 
 func (r *Reconciler) advanceVolume(ctx context.Context, work volumeWork) (discoveryResult, error) {
+	timeout := r.ReconcileTimeout
+	if timeout <= 0 {
+		timeout = DefaultReconcileTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var result discoveryResult
 	var failures []error
 	var pending error
-	if work.discover {
+	if work.discover && ctx.Err() == nil {
 		created, observed, err := r.discoverVolume(ctx, work.volumeID)
 		result = observed
 		if result.uid == "" && err != nil {
@@ -186,6 +198,9 @@ func (r *Reconciler) advanceVolume(ctx context.Context, work volumeWork) (discov
 		}
 	}
 	for _, ref := range work.moves {
+		if ctx.Err() != nil {
+			break
+		}
 		err := r.advanceMoveReference(ctx, work.volumeID, ref)
 		if errors.Is(err, errPoolBusy) || errors.Is(err, ErrCapacityProbePending) {
 			pending = err
@@ -194,10 +209,16 @@ func (r *Reconciler) advanceVolume(ctx context.Context, work volumeWork) (discov
 		}
 	}
 	for _, ref := range work.ownerPods {
+		if ctx.Err() != nil {
+			break
+		}
 		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ref.namespace, Name: ref.name, UID: ref.uid}}
 		if err := r.reconcileOwnerPlacementInVolume(ctx, work.volumeID, pod); err != nil {
 			failures = append(failures, fmt.Errorf("restore Pod %s/%s owner placement: %w", ref.namespace, ref.name, err))
 		}
+	}
+	if ctx.Err() != nil {
+		return result, errors.Join(append(failures, pending, ctx.Err())...)
 	}
 	if err := errors.Join(failures...); err != nil {
 		return result, err

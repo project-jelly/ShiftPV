@@ -128,8 +128,14 @@ recovery to a queue keyed by Volume ID. Two workers process different Volumes;
 one Volume has at most one worker. Routing hints are advisory: the worker reads
 the current object and verifies its UID and Volume binding before acting.
 Startup relists persisted work, so queue contents are not durable authority.
+Each Volume pass shares a 30-second default context across discovery, Move and
+held-Pod work; an earlier caller deadline wins. Expiry stops subsequent references
+and status diagnostics, preserving accepted writes for a fresh read on retry. It
+does not cancel a Move or release its holds. Context-aware API calls return the
+worker; this is not a hard deadline for arbitrary code or conflict-retry sleeps.
 Bulk API lists remain a shared discovery boundary: their delay can postpone new
-queue entries while already queued work continues.
+queue entries while already queued work continues. The budget also does not
+guarantee fairness between multiple historical Moves within the same Volume.
 
 When another operation holds the destination Pool UID lock, mobility yields and
 retries without cancelling placement or releasing a hold. Capacity measurement,
@@ -151,7 +157,7 @@ Destination statfs uses a separate resident RPC/API probe with one four-second
 budget covering discovery, reads and response validation. It has no helper-Pod
 fallback; private lock contention returns immediately. Temporary unavailability
 preserves the current phase, placement and hold for a fresh retry. CSI keeps its
-existing helper fallback. Other per-Volume API work is not yet time-bounded.
+existing helper fallback. The probe budget fits inside the Volume pass budget.
 
 New preparation candidates must advertise resident capacity probing. Immediately
 before changing a Ready source to Moving, a fresh nonce probe verifies that the
