@@ -203,7 +203,8 @@ capacity hold.
 |---|---|
 | Node down before cleanup | Wait; resume when the node returns. |
 | Resident Node Pod replaced | After old Pod absence, bind a capable replacement to the same journal; recheck authority and replay the exact local receipt. |
-| Helper Job lost before effect | Recreate from parent journal after live authority recheck. |
+| Unbound Helper Job lost | May recreate before binding after live authority recheck. |
+| Bound Helper Job lost without receipt | Cleanup enters `NeedsReview`; do not replace its Job UID. |
 | Helper Job lost after retire | Same Job UID may rebind a new Pod and continue if exact; a different Job UID enters cleanup `NeedsReview`. |
 | Unlink succeeds, receipt lost | Reconstruct result only with prior exact intent and local effect evidence, then request the post-receipt absence fence. |
 | API timeout recording receipt | Read back receipt; retry idempotently if absent. |

@@ -192,6 +192,10 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return r.reviewCleanupJournal(ctx, current, "TerminalMoveCleanupIntentUnfinished",
 			fmt.Sprintf("terminal Move carries a cleanup intent still in phase %q with no purge receipt", current.Status.Phase))
 	}
+	current, err = r.observeTerminalExecutor(ctx, current)
+	if err != nil {
+		return err
+	}
 	if err := r.driveCleanupAbsence(ctx, current); err != nil {
 		if contradictedCleanup(err) {
 			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
@@ -199,6 +203,19 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return err
 	}
 	return nil
+}
+
+func (r *Reconciler) observeTerminalExecutor(ctx context.Context, current cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
+	if current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor == nil || current.Status.Executor.Kind != "" {
+		return current, nil
+	}
+	if r.CleanupOperator == nil {
+		return current, fmt.Errorf("cleanup executor settlement observer is not configured")
+	}
+	// Verifying cannot return to Pending/Running, and its receipt and executor
+	// are immutable in Store. Reclaim therefore only observes the bound Job's
+	// termination; it needs neither ActiveMove nor new execution authority.
+	return r.CleanupOperator.Reclaim(ctx, current, r.Cleanups)
 }
 
 // driveCleanupAbsence finishes a receipt-bearing journal through its Pool
