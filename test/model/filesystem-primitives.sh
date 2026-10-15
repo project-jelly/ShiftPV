@@ -143,7 +143,9 @@ assert_member() {
   read -r state _parent observed_group session <<FIELDS
 ${member_fields}
 FIELDS
-  test "${state}" != Z && test "${observed_group}" = "$2" && test "${session}" = "$2" || fail "PID $1 is not live in verified PGID/SID $2"
+  if [ "${state}" = Z ] || [ "${observed_group}" != "$2" ] || [ "${session}" != "$2" ]; then
+    fail "PID $1 is not live in verified PGID/SID $2"
+  fi
 }
 
 assert_rsync_member() {
@@ -179,7 +181,7 @@ group_present() {
 run_session() {
   mode=$1 destination=$2 attempt_dir=$3
   daemon_pid='' receiver_pid=''
-  # shellcheck disable=SC2329 # Invoked by trap.
+  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
   session_cleanup() {
     rc=$?
     trap - EXIT HUP INT TERM
@@ -276,7 +278,7 @@ interrupt_partial() {
 
 run_cases() {
   active_group=
-  # shellcheck disable=SC2329 # Invoked by trap.
+  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
   cleanup_groups() {
     rc=$?
     trap - EXIT HUP INT TERM
