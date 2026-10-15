@@ -42,14 +42,18 @@ func withTestCleanups() func(*Reconciler) {
 	}
 }
 
-// recordingCleanupOperator counts executor requests without ever fabricating a
-// receipt. A path that must not start destructive work is proven by its zero
-// count, not by an empty Job list the fake would show anyway.
-type recordingCleanupOperator struct{ reclaims int }
+// recordingCleanupOperator counts new executor requests without fabricating a
+// receipt. Receipt-bearing fixture journals explicitly model a settled executor;
+// actual live Job/Pod settlement is covered by cleanup_job_reentry_test.go.
+type recordingCleanupOperator struct{ reclaims, observations int }
 
-func (o *recordingCleanupOperator) Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (o *recordingCleanupOperator) AdvanceReclaim(_ context.Context, current cleanupapi.Cleanup, _ helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+	if cleanupReceiptComplete(current, current.Spec) {
+		o.observations++
+		return current, true, nil
+	}
 	o.reclaims++
-	return cleanupapi.Cleanup{}, fmt.Errorf("cleanup executor was requested")
+	return cleanupapi.Cleanup{}, false, fmt.Errorf("cleanup executor was requested")
 }
 
 // withRecordingCleanupOperator replaces the receipt-fabricating stub so a test

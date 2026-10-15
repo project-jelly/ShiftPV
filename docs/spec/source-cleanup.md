@@ -46,7 +46,7 @@ Valid destructive authority requires all of the following:
 |---|---|---|
 | `Pending` | Parent journal contains exact cleanup intent | Recheck live authority |
 | `Running` | Executor is known and authority still matches | Retire and purge the exact target |
-| `Verifying` | API receipt records the exact purged local effect | Request a post-receipt Pool scan |
+| `Verifying` | API receipt records the exact purged local effect | Confirm executor settlement, then request a post-receipt Pool scan |
 | `ConfirmingAbsence` | Post-receipt `scanEpoch` generation fence is recorded | Wait for fresh valid complete absence proof |
 | `Completed` | Receipt and absence proof match operation | Release parent finalizer and capacity hold |
 | `NeedsReview` | Identity contradiction or terminal executor failure | Preserve data; no destructive action |
@@ -56,6 +56,14 @@ operation's receipt and later absence fence; it is not a license to delete again
 If the exact copy reappears after settlement, it is a report-only anomaly for
 operator review; cleanup does not reopen or auto-delete from the completed
 operation.
+
+For Job executors, a receipt also requires Job completion, or absence of the
+exact Job, the receipt's executor Pod UID and any Job-owned Pods. Mutable labels
+do not prove executor absence. Both Volume deletion and Move cleanup enforce
+this on re-entry in `Verifying` and `ConfirmingAbsence`. Older records may already
+have a post-receipt scan fence; they retain that fence and require executor
+settlement before consuming its absence proof. No Job is recreated from these
+receipt-bearing phases. Completed history remains settled.
 
 ## Terminal Move Journal Retention
 
@@ -120,9 +128,9 @@ A Node-bound operation never falls back to a Job on timeout or replacement.
 After the old Pod is absent, another capable Node Pod on the same node may bind
 the same operation and replay its durable local receipt. The Node writes the
 API receipt; the controller still requests a later Pool scan and requires fresh
-absence before releasing the hold. A Job receipt additionally requires Job
-completion, or absence of both the Job and its owned Pods if the Job was lost.
-Controller re-entry preserves this check.
+absence before releasing the hold. Mobility observes cleanup once per reconcile
+and returns while the executor runs. Node work starts through its synchronized
+watch; CSI deletion retains the direct RPC and bounded wait path.
 
 Apply Node RBAC for Move get/list/watch/status updates before rolling out the new
 Node binary. Older Nodes can continue executing already-bound Jobs. Downgrading

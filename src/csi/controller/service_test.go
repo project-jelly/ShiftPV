@@ -329,6 +329,12 @@ func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi
 }
 
 func (o *verifyingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+	// This stub represents a terminated executor. Re-entry observes the same
+	// receipt; only an initial effect increments calls. Live Jobs use the real
+	// Runner/Client in cleanup_job_reentry_test.go.
+	if cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
+		return cleanup, nil
+	}
 	o.calls++
 	executor := &cleanupapi.Executor{JobName: "job", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
 	if err := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {

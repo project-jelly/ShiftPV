@@ -83,7 +83,9 @@ func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenc
 	if ensureErr != nil {
 		return kubernetesAPIError("record volume cleanup intent", ensureErr)
 	}
-	if cleanup.Status.Phase == cleanupapi.PhasePending || cleanup.Status.Phase == cleanupapi.PhaseRunning {
+	jobReceipt := cleanup.Status.Executor != nil && cleanup.Status.Executor.Kind == "" &&
+		(cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence)
+	if jobReceipt || cleanup.Status.Phase == cleanupapi.PhasePending || cleanup.Status.Phase == cleanupapi.PhaseRunning {
 		cleanup, ensureErr = s.CleanupOperator.Reclaim(ctx, cleanup, s.Cleanups)
 		if ensureErr != nil {
 			return directoryOperationError("reclaim identified volume copy", ensureErr)

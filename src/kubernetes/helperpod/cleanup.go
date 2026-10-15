@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -32,64 +31,116 @@ type CleanupJournal interface {
 	UpdateStatus(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error
 }
 
-// Reclaim drives one approved cleanup to its receipt. The parent journal is the
-// only durable truth, so the phase is re-read between steps and handed to
-// triageCleanup: a cleanup that settled or was sent to review elsewhere ends
-// this call wherever that is observed.
+// Reclaim preserves the synchronous CSI contract while sharing binding and
+// observation with the mobility controller's nonblocking advance operation.
 func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (cleanupapi.Cleanup, error) {
 	defer r.observeStep("reclaim_helper")()
+	current, job, done, err := r.prepareCleanup(ctx, cleanup, store)
+	if err != nil || done {
+		return current, err
+	}
+	if cleanupHasReceipt(current) {
+		return r.resumeVerifying(ctx, current, store, job)
+	}
+	return r.awaitReceipt(ctx, store, current, job)
+}
+
+// AdvanceReclaim starts or observes the exact bound Job once, without waiting
+// for it. A receipt is ready only after that Job and its owned Pods have settled.
+func (r *Runner) AdvanceReclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (result cleanupapi.Cleanup, ready bool, resultErr error) {
+	defer r.observeStep("reclaim_helper")()
+	defer func() {
+		if errors.Is(resultErr, context.DeadlineExceeded) {
+			resultErr = retryableError{err: resultErr}
+		}
+	}()
+	current, job, done, err := r.prepareCleanup(ctx, cleanup, store)
+	if err != nil || done {
+		return current, done && err == nil, err
+	}
+	if cleanupHasReceipt(current) {
+		return r.observeReceiptSettlement(ctx, current, store, job)
+	}
+	return r.observeReceipt(ctx, store, current, job)
+}
+
+// prepareCleanup re-reads the journal before any effect. Receipt-bearing
+// records, including historical absence fences, take the observe-only path.
+func (r *Runner) prepareCleanup(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (cleanupapi.Cleanup, *batchv1.Job, bool, error) {
 	if r == nil || r.Client == nil || r.Pools == nil || r.Namespace == "" || r.Image == "" || r.Timeout <= 0 || store == nil || cleanup.UID == "" || cleanup.Name == "" || cleanup.Spec.Validate() != nil {
-		return cleanupapi.Cleanup{}, fmt.Errorf("cleanup runner configuration is incomplete")
+		return cleanup, nil, false, fmt.Errorf("cleanup runner configuration is incomplete")
 	}
 	if done, result, err := triageCleanup(cleanup); done {
-		return result, err
+		return result, nil, done, err
 	}
 	pool, err := r.approvedPool(ctx, store, cleanup)
 	if err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanup, nil, false, err
 	}
-	cleanup, err = refreshCleanup(ctx, store, cleanup)
+	current, err := refreshCleanup(ctx, store, cleanup)
 	if err != nil {
-		return cleanupapi.Cleanup{}, err
+		return current, nil, false, err
 	}
-	if done, result, err := triageCleanup(cleanup); done {
-		return result, err
+	if done, result, err := triageCleanup(current); done {
+		return result, nil, done, err
 	}
-	if cleanup.Status.Phase != cleanupapi.PhaseVerifying {
-		if err := r.cleanupPoolReady(pool); err != nil {
-			return cleanupapi.Cleanup{}, err
-		}
+	job := r.cleanupJob(current, pool.MountPath)
+	if cleanupHasReceipt(current) {
+		return current, job, false, nil
 	}
-	job := r.cleanupJob(cleanup, pool.MountPath)
-	if cleanup.Status.Phase == cleanupapi.PhaseVerifying {
-		return r.resumeVerifying(ctx, cleanup, store, job)
+	if err := r.cleanupPoolReady(pool); err != nil {
+		return current, nil, false, err
 	}
-	return r.runCleanupExecutor(ctx, cleanup, store, job)
+	current, err = r.startCleanupExecutor(ctx, current, store, job)
+	return current, job, current.Status.Phase == cleanupapi.PhaseCompleted, err
 }
 
-// runCleanupExecutor resolves exactly one suspended executor, binds it to the
-// journal, starts it, and waits for its API receipt. The phase is re-read once
-// more before binding, so a cleanup settled elsewhere still ends this call.
-func (r *Runner) runCleanupExecutor(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, job *batchv1.Job) (cleanupapi.Cleanup, error) {
-	created, err := r.ensureJob(ctx, store, cleanup, job)
+// startCleanupExecutor binds exactly one suspended Job before starting it.
+// Running journals reuse their Job without submitting another create request.
+func (r *Runner) startCleanupExecutor(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, job *batchv1.Job) (cleanupapi.Cleanup, error) {
+	created, err := r.resolveCleanupJob(ctx, store, cleanup, job)
 	if err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanup, err
 	}
 	cleanup, err = refreshCleanup(ctx, store, cleanup)
 	if err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanup, err
 	}
 	if done, result, err := triageCleanup(cleanup); done {
 		return result, err
+	}
+	if cleanupHasReceipt(cleanup) {
+		return cleanup, nil
 	}
 	cleanup, err = r.bindExecutor(ctx, store, cleanup, created)
 	if err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanup, err
 	}
 	if err := r.startCleanupJob(ctx, store, cleanup, created, job); err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanup, err
 	}
-	return r.awaitReceipt(ctx, store, cleanup, created, job)
+	return cleanup, nil
+}
+
+func (r *Runner) resolveCleanupJob(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (*batchv1.Job, error) {
+	if cleanup.Status.Phase != cleanupapi.PhaseRunning {
+		return r.ensureJob(ctx, store, cleanup, expected)
+	}
+	job, err := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, expected.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, r.needsReview(ctx, store, cleanup, "ExecutorDisappeared", "bound cleanup Job disappeared before execution")
+	}
+	if err != nil {
+		return nil, classifyKubernetesAPIError(err)
+	}
+	if cleanup.Status.Executor == nil || string(job.UID) != cleanup.Status.Executor.JobUID || !sameCleanupJob(job, expected) {
+		return nil, r.needsReview(ctx, store, cleanup, "ExecutorIdentityChanged", "bound cleanup Job differs from the approved effect")
+	}
+	return job, nil
+}
+
+func cleanupHasReceipt(current cleanupapi.Cleanup) bool {
+	return current.Status.Phase == cleanupapi.PhaseVerifying || current.Status.Phase == cleanupapi.PhaseConfirmingAbsence
 }
 
 // triageCleanup reports whether the durable phase already decides this
@@ -98,7 +149,7 @@ func (r *Runner) runCleanupExecutor(ctx context.Context, cleanup cleanupapi.Clea
 // ends helper work without changing the winning backend's journal.
 func triageCleanup(current cleanupapi.Cleanup) (bool, cleanupapi.Cleanup, error) {
 	switch current.Status.Phase {
-	case cleanupapi.PhaseCompleted, cleanupapi.PhaseConfirmingAbsence:
+	case cleanupapi.PhaseCompleted:
 		return true, current, nil
 	case cleanupapi.PhaseNeedsReview:
 		return true, cleanupapi.Cleanup{}, fmt.Errorf("cleanup %q needs review: %s", current.Name, current.Status.Reason)
@@ -106,7 +157,7 @@ func triageCleanup(current cleanupapi.Cleanup) (bool, cleanupapi.Cleanup, error)
 	if current.Status.Executor != nil && current.Status.Executor.Kind == cleanupapi.ExecutorNode {
 		return true, current, fmt.Errorf("%w: cleanup is bound to a resident Node", cleanupapi.ErrConflict)
 	}
-	return false, cleanupapi.Cleanup{}, nil
+	return false, current, nil
 }
 
 // approvedPool resolves the registered Pool the approved cleanup targets. Pool
@@ -193,57 +244,58 @@ func (r *Runner) bindExecutor(ctx context.Context, store CleanupJournal, cleanup
 // awaitReceipt watches the bound executor until the journal carries its receipt.
 // The journal decides settlement; the Job is read only to detect an executor
 // that disappeared, changed or terminated without writing one.
-func (r *Runner) awaitReceipt(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, created, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
-	jobs := r.Client.BatchV1().Jobs(r.Namespace)
+func (r *Runner) awaitReceipt(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
 	result := cleanup
 	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
-		current, getErr := store.Get(pollCtx, cleanup.Spec.Authority)
-		if getErr != nil {
-			return false, getErr
-		}
-		if current.UID != cleanup.UID || current.Spec != cleanup.Spec {
-			return false, cleanupapi.ErrConflict
-		}
-		switch current.Status.Phase {
-		case cleanupapi.PhaseCompleted, cleanupapi.PhaseConfirmingAbsence:
-			result = current
-			return true, nil
-		case cleanupapi.PhaseNeedsReview:
-			return false, fmt.Errorf("cleanup needs review: %s", current.Status.Reason)
-		}
-		if current.Status.Executor == nil || current.Status.Executor.JobName != created.Name || current.Status.Executor.JobUID != string(created.UID) {
-			return false, r.needsReview(pollCtx, store, current, "ExecutorIdentityChanged", "cleanup executor differs from the durable cleanup status")
-		}
-		currentJob, jobErr := jobs.Get(pollCtx, created.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(jobErr) {
-			return false, r.needsReview(pollCtx, store, current, "ExecutorDisappeared", "cleanup Job disappeared before termination was acknowledged")
-		}
-		if jobErr != nil {
-			return false, classifyKubernetesAPIError(jobErr)
-		}
-		if currentJob.UID != created.UID || !sameCleanupJob(currentJob, expected) {
-			return false, r.needsReview(pollCtx, store, current, "ExecutorIdentityChanged", "cleanup Job changed before termination was acknowledged")
-		}
-		complete, failure, failed := cleanupJobOutcome(currentJob)
-		if failed {
-			return false, r.needsReview(pollCtx, store, current, "ExecutorFailed", fmt.Sprintf("cleanup Job failed: %s", failure))
-		}
-		if !complete {
-			return false, nil
-		}
-		if current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Receipt == nil {
-			return false, r.needsReview(pollCtx, store, current, "ReceiptMissing", "cleanup Job completed without a durable receipt")
-		}
+		current, ready, err := r.observeReceipt(pollCtx, store, cleanup, expected)
 		result = current
-		return true, nil
+		return ready, err
 	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = retryableError{err: err}
 		}
-		return cleanupapi.Cleanup{}, fmt.Errorf("wait for cleanup receipt: %w", err)
+		return result, fmt.Errorf("wait for cleanup receipt: %w", err)
 	}
 	return result, nil
+}
+
+func (r *Runner) observeReceipt(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (cleanupapi.Cleanup, bool, error) {
+	current, err := refreshCleanup(ctx, store, cleanup)
+	if err != nil {
+		return current, false, err
+	}
+	if done, result, err := triageCleanup(current); done {
+		return result, err == nil, err
+	}
+	if current.Status.Executor == nil || cleanup.Status.Executor == nil ||
+		current.Status.Executor.JobName != cleanup.Status.Executor.JobName || current.Status.Executor.JobUID != cleanup.Status.Executor.JobUID {
+		return current, false, r.needsReview(ctx, store, current, "ExecutorIdentityChanged", "cleanup executor differs from the durable cleanup status")
+	}
+	currentJob, err := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, expected.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		if cleanupHasReceipt(current) {
+			return r.observeReceiptSettlement(ctx, current, store, expected)
+		}
+		return current, false, r.needsReview(ctx, store, current, "ExecutorDisappeared", "cleanup Job disappeared before termination was acknowledged")
+	}
+	if err != nil {
+		return current, false, classifyKubernetesAPIError(err)
+	}
+	if string(currentJob.UID) != current.Status.Executor.JobUID || !sameCleanupJob(currentJob, expected) {
+		return current, false, r.needsReview(ctx, store, current, "ExecutorIdentityChanged", "cleanup Job changed before termination was acknowledged")
+	}
+	complete, failure, failed := cleanupJobOutcome(currentJob)
+	if failed {
+		return current, false, r.needsReview(ctx, store, current, "ExecutorFailed", fmt.Sprintf("cleanup Job failed: %s", failure))
+	}
+	if !complete {
+		return current, false, nil
+	}
+	if !cleanupHasReceipt(current) || !boundReceipt(current) {
+		return current, false, r.needsReview(ctx, store, current, "ReceiptMissing", "cleanup Job completed without a durable receipt")
+	}
+	return current, true, nil
 }
 
 // cleanupJobOutcome reads one Job's terminal conditions. A true Failed condition
@@ -262,25 +314,27 @@ func cleanupJobOutcome(job *batchv1.Job) (complete bool, failure string, failed 
 }
 
 func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
-	if !boundReceipt(cleanup) {
-		return cleanupapi.Cleanup{}, r.needsReview(ctx, store, cleanup, "ReceiptInvalid", "cleanup receipt does not match the durable executor and intent")
-	}
-	selector := labels.Set{cleanupNameLabel: cleanup.Name, cleanupUIDLabel: cleanup.UID}.AsSelector().String()
-	var result cleanupapi.Cleanup
+	result := cleanup
 	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
-		settled, current, pollErr := r.observeSettlement(pollCtx, cleanup, store, expected, selector)
-		if settled {
-			result = current
-		}
-		return settled, pollErr
+		current, ready, err := r.observeReceiptSettlement(pollCtx, cleanup, store, expected)
+		result = current
+		return ready, err
 	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = retryableError{err: err}
 		}
-		return cleanupapi.Cleanup{}, fmt.Errorf("wait for cleanup executor settlement: %w", err)
+		return result, fmt.Errorf("wait for cleanup executor settlement: %w", err)
 	}
 	return result, nil
+}
+
+func (r *Runner) observeReceiptSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (cleanupapi.Cleanup, bool, error) {
+	if !boundReceipt(cleanup) {
+		return cleanup, false, r.needsReview(ctx, store, cleanup, "ReceiptInvalid", "cleanup receipt does not match the durable executor and intent")
+	}
+	ready, current, err := r.observeSettlement(ctx, cleanup, store, expected)
+	return current, ready, err
 }
 
 // boundReceipt reports whether the durable receipt belongs to this intent's own
@@ -294,21 +348,21 @@ func boundReceipt(cleanup cleanupapi.Cleanup) bool {
 
 // observeSettlement performs one poll of a cleanup that already holds its API
 // receipt, reporting settlement together with the journal to return.
-func (r *Runner) observeSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job, selector string) (bool, cleanupapi.Cleanup, error) {
+func (r *Runner) observeSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (bool, cleanupapi.Cleanup, error) {
 	current, err := refreshCleanup(ctx, store, cleanup)
 	if err != nil {
 		return false, cleanupapi.Cleanup{}, err
 	}
-	if current.Status.Phase == cleanupapi.PhaseCompleted || current.Status.Phase == cleanupapi.PhaseConfirmingAbsence {
+	if current.Status.Phase == cleanupapi.PhaseCompleted {
 		return true, current, nil
 	}
-	if current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor == nil || current.Status.Receipt == nil ||
+	if !cleanupHasReceipt(current) || current.Status.Executor == nil || current.Status.Receipt == nil ||
 		!reflect.DeepEqual(current.Status.Executor, cleanup.Status.Executor) || !reflect.DeepEqual(current.Status.Receipt, cleanup.Status.Receipt) {
 		return false, cleanupapi.Cleanup{}, cleanupapi.ErrConflict
 	}
 	job, getErr := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, current.Status.Executor.JobName, metav1.GetOptions{})
 	if apierrors.IsNotFound(getErr) {
-		return r.settleWithoutExecutor(ctx, current, selector)
+		return r.settleWithoutExecutor(ctx, current)
 	}
 	if getErr != nil {
 		return false, cleanupapi.Cleanup{}, classifyKubernetesAPIError(getErr)
@@ -326,19 +380,20 @@ func (r *Runner) observeSettlement(ctx context.Context, cleanup cleanupapi.Clean
 			return true, current, nil
 		}
 	}
-	return false, cleanupapi.Cleanup{}, nil
+	return false, current, nil
 }
 
 // settleWithoutExecutor settles a cleanup whose Job is already gone, unless one
-// of that Job's own Pods is still around and could still write.
-func (r *Runner) settleWithoutExecutor(ctx context.Context, current cleanupapi.Cleanup, selector string) (bool, cleanupapi.Cleanup, error) {
-	pods, listErr := r.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+// of that Job's Pods or its receipt-writing Pod remains. Labels and owner refs
+// can be removed, so neither is sufficient evidence of Pod absence.
+func (r *Runner) settleWithoutExecutor(ctx context.Context, current cleanupapi.Cleanup) (bool, cleanupapi.Cleanup, error) {
+	pods, listErr := r.Client.CoreV1().Pods(r.Namespace).List(ctx, metav1.ListOptions{})
 	if listErr != nil {
 		return false, cleanupapi.Cleanup{}, classifyKubernetesAPIError(listErr)
 	}
 	for index := range pods.Items {
-		if ownedByJob(&pods.Items[index], types.UID(current.Status.Executor.JobUID)) {
-			return false, cleanupapi.Cleanup{}, nil
+		if string(pods.Items[index].UID) == current.Status.Executor.PodUID || ownedByJob(&pods.Items[index], types.UID(current.Status.Executor.JobUID)) {
+			return false, current, nil
 		}
 	}
 	return true, current, nil
@@ -388,10 +443,10 @@ func (r *Runner) startCleanupJob(ctx context.Context, store CleanupJournal, clea
 }
 
 func (r *Runner) needsReview(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, reason, message string) error {
-	if updateErr := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{
-		Phase: cleanupapi.PhaseNeedsReview, Reason: reason, Message: message,
-		Executor: cleanup.Status.Executor, Receipt: cleanup.Status.Receipt,
-	}); updateErr != nil {
+	next := cleanup.Status
+	next.Phase, next.Reason, next.Message = cleanupapi.PhaseNeedsReview, reason, message
+	next.LastTransitionTime = ""
+	if updateErr := store.UpdateStatus(ctx, cleanup, next); updateErr != nil {
 		return fmt.Errorf("mark cleanup for review after %s: %w", reason, updateErr)
 	}
 	return fmt.Errorf("cleanup needs review: %s: %s", reason, message)

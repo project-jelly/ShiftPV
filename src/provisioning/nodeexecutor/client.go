@@ -88,40 +88,11 @@ func (c *Client) FinalizeCreate(ctx context.Context, copy volume.CopyIdentity) e
 
 func (c *Client) Reclaim(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal) (result cleanupapi.Cleanup, resultErr error) {
 	defer func() { resultErr = classifyError(resultErr) }()
-	current, err := store.Get(ctx, expected.Spec.Authority)
-	if err != nil {
-		return current, err
-	}
-	if done, err := cleanupDone(expected, current); done || err != nil {
-		return current, err
-	}
-	legacy, err := c.legacyCleanup(ctx, current)
-	if err != nil {
+	current, legacy, ready, err := c.prepareCleanup(ctx, expected, store)
+	if err != nil || ready {
 		return current, err
 	}
 	if legacy {
-		return c.Fallback.Reclaim(ctx, current, store)
-	}
-	if _, err := c.Volumes.CleanupPoolForIdentity(ctx, current.Spec.Target.PoolName, current.Spec.Target.PoolUID, current.Spec.Target.NodeName); err != nil {
-		return current, err
-	}
-	wasNodeBound := current.Status.Executor != nil
-	if err := c.bindCleanup(ctx, current, store); err != nil {
-		return current, err
-	}
-	// Binding and discovery may race a legacy helper or completion. Adopt only
-	// a fresh observation of the same journal before choosing the effect path.
-	current, err = store.Get(ctx, expected.Spec.Authority)
-	if err != nil {
-		return current, err
-	}
-	if wasNodeBound && (current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode) {
-		return current, cleanupapi.ErrConflict
-	}
-	if done, err := cleanupDone(expected, current); done || err != nil {
-		return current, err
-	}
-	if current.Status.Executor == nil || current.Status.Executor.Kind == "" {
 		return c.Fallback.Reclaim(ctx, current, store)
 	}
 	direct, err := c.invoke(ctx, nodeBinding(*current.Status.Executor), protocol.Operation_RECLAIM, cleanupRequest(current))
@@ -133,6 +104,63 @@ func (c *Client) Reclaim(ctx context.Context, expected cleanupapi.Cleanup, store
 	}
 	return c.awaitCleanup(ctx, expected, store, current)
 }
+
+// AdvanceReclaim binds the executor and observes durable progress once. Resident
+// effects are driven by the Node watch; this path never waits for an RPC effect.
+func (c *Client) AdvanceReclaim(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal) (current cleanupapi.Cleanup, ready bool, resultErr error) {
+	defer func() { resultErr = classifyError(resultErr) }()
+	current, legacy, ready, err := c.prepareCleanup(ctx, expected, store)
+	if err != nil || ready {
+		return current, ready, err
+	}
+	if legacy {
+		return c.Fallback.AdvanceReclaim(ctx, current, store)
+	}
+	return current, false, nil
+}
+
+// prepareCleanup shares backend selection and binding with the synchronous API.
+// A stored Node binding is never replaced by a legacy fallback on retry.
+func (c *Client) prepareCleanup(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal) (current cleanupapi.Cleanup, legacy, ready bool, err error) {
+	current, err = store.Get(ctx, expected.Spec.Authority)
+	if err != nil {
+		return current, false, false, err
+	}
+	if done, err := cleanupDone(expected, current); done || err != nil {
+		return current, false, done, err
+	}
+	legacy, err = c.legacyCleanup(ctx, current)
+	if err != nil {
+		return current, false, false, err
+	}
+	if legacy {
+		return current, true, false, nil
+	}
+	if _, err := c.Volumes.CleanupPoolForIdentity(ctx, current.Spec.Target.PoolName, current.Spec.Target.PoolUID, current.Spec.Target.NodeName); err != nil {
+		return current, false, false, err
+	}
+	wasNodeBound := current.Status.Executor != nil
+	if err := c.bindCleanup(ctx, current, store); err != nil {
+		return current, false, false, err
+	}
+	// Binding and discovery may race a legacy helper or completion. Adopt only
+	// a fresh observation of the same journal before choosing the effect path.
+	current, err = store.Get(ctx, expected.Spec.Authority)
+	if err != nil {
+		return current, false, false, err
+	}
+	if wasNodeBound && (current.Status.Executor == nil || current.Status.Executor.Kind != cleanupapi.ExecutorNode) {
+		return current, false, false, cleanupapi.ErrConflict
+	}
+	if done, err := cleanupDone(expected, current); done || err != nil {
+		return current, false, done, err
+	}
+	if current.Status.Executor == nil || current.Status.Executor.Kind == "" {
+		return current, true, false, nil
+	}
+	return current, false, false, nil
+}
+
 func (c *Client) awaitCleanup(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal, current cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
 	var err error
 	err = wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, c.Timeout, true, func(ctx context.Context) (bool, error) {
@@ -199,8 +227,8 @@ func cleanupDone(expected, current cleanupapi.Cleanup) (bool, error) {
 			return false, cleanupapi.ErrConflict
 		}
 		// A Job receipt precedes process termination; the helper still has to
-		// observe that bound Job finish before handing back Verifying.
-		return current.Status.Phase != cleanupapi.PhaseVerifying || current.Status.Executor.Kind == cleanupapi.ExecutorNode, nil
+		// observe that bound Job finish, including records with an older fence.
+		return current.Status.Phase == cleanupapi.PhaseCompleted || current.Status.Executor.Kind == cleanupapi.ExecutorNode, nil
 	case "", cleanupapi.PhasePending:
 		if current.Status.Receipt != nil || current.Status.Executor != nil {
 			return false, cleanupapi.ErrConflict

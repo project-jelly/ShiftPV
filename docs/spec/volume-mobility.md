@@ -135,8 +135,10 @@ When another operation holds the destination Pool UID lock, mobility yields and
 retries without cancelling placement or releasing a hold. Capacity measurement,
 fresh ledger admission, and owner commit still use that shared lock. Admission
 and external writers remain outside the Volume queue and require the existing
-CAS and publication fences. Source usage measurement and cleanup can still wait
-inside a worker; two long-running operations can currently occupy both workers.
+CAS and publication fences. Cleanup binds an executor and observes its journal
+once, returning the worker while the Node watch or Job executes. Pending cleanup
+preserves the Move phase and holds. Source usage measurement can still wait
+inside a worker; two long measurements can currently occupy both workers.
 
 ## Copy Contract
 

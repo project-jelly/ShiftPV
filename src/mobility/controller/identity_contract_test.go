@@ -280,10 +280,13 @@ func TestMoveHelperContainersOmitPoolReadinessBudget(t *testing.T) {
 
 type receiptCleanupOperator struct{}
 
-func (receiptCleanupOperator) Reclaim(ctx context.Context, request cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (receiptCleanupOperator) AdvanceReclaim(ctx context.Context, request cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+	if request.Status.Phase == cleanupapi.PhaseVerifying || request.Status.Phase == cleanupapi.PhaseConfirmingAbsence || request.Status.Phase == cleanupapi.PhaseCompleted {
+		return request, true, nil
+	}
 	executor := &cleanupapi.Executor{JobName: request.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: request.Spec.Target.NodeName}
 	if err := store.UpdateStatus(ctx, request, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanupapi.Cleanup{}, false, err
 	}
 	receipt := &cleanupapi.Receipt{
 		OperationID: request.Spec.OperationID, ExecutorUID: executor.JobUID,
@@ -291,9 +294,10 @@ func (receiptCleanupOperator) Reclaim(ctx context.Context, request cleanupapi.Cl
 		LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 	if err := store.UpdateStatus(ctx, request, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanupapi.Cleanup{}, false, err
 	}
-	return store.Get(ctx, request.Spec.Authority)
+	current, err := store.Get(ctx, request.Spec.Authority)
+	return current, err == nil, err
 }
 
 func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) {
