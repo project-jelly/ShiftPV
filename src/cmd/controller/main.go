@@ -155,12 +155,14 @@ func main() {
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
 	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: csiOperator, Timeout: cfg.helperWait}
+	var mobilityRPC remotemeasurement.RPC
 	if cfg.nodeRPCTokenFile != "" {
 		// The outer RPC probe observes the complete call, including API fallback.
 		apiCapacityProbe.ObserveStep = nil
 		rpc := &connection.Client{TokenFile: cfg.nodeRPCTokenFile}
 		defer rpc.Close()
 		effects.RPC = rpc
+		mobilityRPC = rpc
 		capacityProbe = &remotemeasurement.Client{RPC: rpc, Discovery: effects.Discovery, Pools: probePools, Fallback: capacityProbe, ObserveStep: exporter.ObserveProvisioningStep}
 	}
 	controllerService.Operator, controllerService.CleanupOperator = effects, effects
@@ -186,7 +188,8 @@ func main() {
 	go func() { errCh <- certificateManager.Run(ctx) }()
 	stopMobility := startMobility(ctx, cfg, mobilityComponents{
 		client: client, dynamicClient: dynamicClient, volumes: volumeRegistry, operator: operator,
-		poolLocks: poolLocks, cleanups: cleanupStore, cleanupOperator: effects, exporter: exporter, errCh: errCh,
+		capacityProbe: newMobilityCapacityProbe(probePools, effects.Discovery, mobilityRPC, exporter.ObserveProvisioningStep),
+		poolLocks:     poolLocks, cleanups: cleanupStore, cleanupOperator: effects, exporter: exporter, errCh: errCh,
 	})
 	defer stopMobility()
 	webhookServer := newWebhookServer(cfg, client, admissionClient, volumeRegistry, lifecycleChecker, certificateManager)
@@ -314,6 +317,7 @@ type mobilityComponents struct {
 	dynamicClient   dynamic.Interface
 	volumes         *volumeapi.Registry
 	operator        *helperpod.Runner
+	capacityProbe   mobilitycontroller.CapacityProbe
 	poolLocks       *poolcapacity.Locker
 	cleanups        *cleanupapi.Store
 	cleanupOperator *nodeexecutor.Client
@@ -336,7 +340,7 @@ func startMobility(ctx context.Context, cfg config, components mobilityComponent
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: components.client.CoreV1().Events("")})
 	eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 	wake := mobilitycontroller.WatchEvents(ctx, components.client, components.dynamicClient, cfg.namespace)
-	reconciler := &mobilitycontroller.Reconciler{Client: components.client, Repository: components.volumes, CapacityProbe: components.operator, SourceUsage: components.operator, PoolLocks: components.poolLocks, Namespace: cfg.namespace, HelperImage: cfg.mobilityImage, PlacementPriorityClassName: cfg.mobilityPlacementPriorityClass, ServiceAccountName: cfg.helperServiceAccount, Cleanups: components.cleanups, CleanupOperator: components.cleanupOperator, Interval: cfg.mobilityInterval, MoveJournalRetention: cfg.moveJournalRetention, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
+	reconciler := &mobilitycontroller.Reconciler{Client: components.client, Repository: components.volumes, CapacityProbe: components.capacityProbe, SourceUsage: components.operator, PoolLocks: components.poolLocks, Namespace: cfg.namespace, HelperImage: cfg.mobilityImage, PlacementPriorityClassName: cfg.mobilityPlacementPriorityClass, ServiceAccountName: cfg.helperServiceAccount, Cleanups: components.cleanups, CleanupOperator: components.cleanupOperator, Interval: cfg.mobilityInterval, MoveJournalRetention: cfg.moveJournalRetention, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
 	if components.exporter != nil {
 		components.exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
 		reconciler.ObserveDiscovery = components.exporter.ObserveDiscovery

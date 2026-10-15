@@ -121,6 +121,7 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | `helperpod`, `nodeexecutor`: `cleanup_advance_test.go`; `mobility/controller`: `cleanup_pending_test.go`, `cleanup_dispatcher_test.go` | 공유 sync/advance 경계·Node RPC 미호출·Job 정산/재시도·라벨/소유 참조 유실; 실제 Registry에서 cleanup 대기 3개가 worker 2개를 점유하지 않고 독립 Move 계획 저장 |
 | `mobility/controller`: `source_usage_boundary_test.go`; `helperpod`: `source_usage_test.go`; `volumeapi`: `move_usage_test.go` | 실제 Registry·helper Pod 경로의 응답 유실·재시작·취소·terminal 잔여 Pod와 3개 측정 대기 중 독립 Volume 진행; 결과 CAS와 양수 사용량 불변성 |
 | `mobility/controller`: `legacy_recovery_response_loss_test.go` | 실제 Registry의 저장 후 EOF/API timeout과 저장 전 실패에서 진단 재쓰기 금지, 원래 오류 보존, fresh read 뒤 복구 재개 |
+| `cmd/controller`: `mobility_probe_test.go`; `pool/measurement` clients; `mobility/controller`: capacity probe tests | 실제 HTTP 지연을 포함한 resident 조회 전체 시간 예산, helper fallback 부재, fresh nonce, 중단 전 확인·pending 시 예약과 source 권한 유지 |
 | `volume-helper`: measurement tests; `pool/capacity`: measurement tests | scan generation 변경 중 du 1회 유지·최신 inventory/실제 backing 재확인·명시적 실패와 config/copy/publication 변경 시 결과 폐기 |
 | `e2e/kind/mobility/native-cleanup.sh` (node-cleanup) | 실제 API receipt 거절·commit 이후 drain·Node/controller 교체 뒤 같은 operation과 local receipt 재사용, fresh absence 후 완료·PVC/PV/checksum 보존 |
 | `mobility/controller`: `owner_placement_test.go`, `owner_placement_boundary_test.go` | 실제 admission patch → Move 생성 전 uncordon·controller 재시작 → 같은 Pod gate 회수, 충돌 뒤 UID/binding/owner 재검증, 사용자 제약 보존과 Pod별 오류 격리 |

@@ -160,6 +160,9 @@ func preparationPool(node, limit string) *unstructured.Unstructured {
 	pool.SetName(node + "-pool")
 	pool.SetUID(types.UID(node + "-pool-uid"))
 	pool.SetResourceVersion("1")
+	if err := unstructured.SetNestedField(pool.Object, true, "status", "capacityProbeSupported"); err != nil {
+		panic(err)
+	}
 	pool.Object["spec"] = map[string]any{"nodeName": node, "mountPath": "/" + node, "poolGroup": "default", "capacity": map[string]any{"limit": limit}}
 	return pool
 }

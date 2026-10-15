@@ -9,7 +9,8 @@
 5A 단계 Volume별 queue와 Pool 잠금 경합 시 재시도 [PR #205](https://github.com/project-jelly/ShiftPV/pull/205) 머지.
 5B-1 단계 cleanup의 짧은 관측과 Job 정산 재진입 [PR #206](https://github.com/project-jelly/ShiftPV/pull/206) 머지.
 5B-2 단계 비동기 source 사용량 측정과 결과 저장 경계 [PR #207](https://github.com/project-jelly/ShiftPV/pull/207) 머지.
-5B-3 단계 legacy 상태 저장의 응답 유실 시 진단 재쓰기 방지 진행 중.
+5B-3 단계 legacy 상태 저장의 응답 유실 시 진단 재쓰기 방지 [PR #208](https://github.com/project-jelly/ShiftPV/pull/208) 머지.
+5B-4 단계 이동 전용 resident 용량 조회의 시간 예산과 중단 전 확인 구현 중.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.
