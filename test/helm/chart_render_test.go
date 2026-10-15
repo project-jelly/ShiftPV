@@ -63,15 +63,28 @@ type renderedObject struct {
 		Name      string `json:"name"`
 		Namespace string `json:"namespace"`
 	} `json:"subjects"`
+	RoleRef struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	} `json:"roleRef"`
 	Spec struct {
-		Template struct {
+		StorageCapacity *bool `json:"storageCapacity"`
+		Template        struct {
 			Spec struct {
 				ServiceAccountName string `json:"serviceAccountName"`
 				Containers         []struct {
-					Name         string   `json:"name"`
-					Image        string   `json:"image"`
-					Command      []string `json:"command"`
-					Args         []string `json:"args"`
+					Name    string   `json:"name"`
+					Image   string   `json:"image"`
+					Command []string `json:"command"`
+					Args    []string `json:"args"`
+					Env     []struct {
+						Name      string `json:"name"`
+						ValueFrom struct {
+							FieldRef struct {
+								FieldPath string `json:"fieldPath"`
+							} `json:"fieldRef"`
+						} `json:"valueFrom"`
+					} `json:"env"`
 					VolumeMounts []struct {
 						Name             string `json:"name"`
 						MountPath        string `json:"mountPath"`

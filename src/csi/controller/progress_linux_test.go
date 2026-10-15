@@ -182,8 +182,11 @@ func TestSharedPoolCleanupFencesConvergeAfterObservationRace(t *testing.T) {
 	}
 	request := validCreateRequest("worker-a")
 	request.Name = "third"
-	if _, err := service.CreateVolume(ctx, request); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("stale Pool admitted a new volume: %v", err)
+	if _, err := service.CreateVolume(ctx, request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("stale registered Pool did not request an observation retry: %v", err)
+	}
+	if effects.creates != 2 {
+		t.Fatalf("stale Pool executed a new create: %d", effects.creates)
 	}
 	parsed, _ := parseCreateRequest(request)
 	if _, err := registry.Get(ctx, parsed.id); !apierrors.IsNotFound(err) {

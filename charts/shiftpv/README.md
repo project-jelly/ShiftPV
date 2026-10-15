@@ -34,6 +34,38 @@ Nodes over authenticated gRPC; older Nodes retain the API/helper read path.
 Deletion waits up to 5 seconds for its existing causal absence proof before
 returning a retry. No existing Pool or StorageClass settings need changing.
 
+## Scheduler capacity tracking
+
+이 기능을 지원하는 CRD·Controller·Node를 모두 갱신한 뒤 다음 설정을 켠다. 기본값은 비활성화다.
+구버전 Node 또는 CRD에 가용량 관측 필드가 없으면 해당 Pool의 게시 용량은 0이다.
+
+```yaml
+capacityTracking:
+  enabled: true
+  pollInterval: 1m
+```
+
+이 설정은 provisioner의 `CSIStorageCapacity` 게시와 scheduler의 용량 검사를 함께 켠다.
+최초 정보가 게시될 때까지 신규 PVC는 잠시 Pending일 수 있다. 기존 PV/PVC의 데이터나
+StorageClass 설정은 바뀌지 않는다. `pollInterval`은 양의 정수와 `s`, `m`, `h` 단위를 사용한다.
+짧은 간격은 조회와 Kubernetes API 부하를 늘린다. Node의 정기 관측 주기는 별도이며,
+GetCapacity가 추가 filesystem probe를 실행하지는 않는다.
+
+정보는 노드·StorageClass별로 게시하며 같은 Pool group을 가리키는 class들은 같은 공간을 공유한다.
+`capacity`는 사용 가능한 독립 Pool 여유의 합계, `maximumVolumeSize`는 한 Pool에서 수용할 수 있는
+최대 PVC 크기다. 한 PVC를 여러 Pool에 나누지 않으며 실제 생성은 기존 admission에서 다시 검증한다.
+관측 오류 때 provisioner가 이전 값을 유지할 수 있으므로 이 정보는 용량 예약을 보장하지 않는다.
+
+```bash
+kubectl -n shiftpv-system get csistoragecapacities \
+  -l csi.storage.k8s.io/drivername=csi.shiftpv.io -o yaml
+```
+
+소유자는 Controller Deployment이므로 Pod 교체 후에도 정보를 유지하고 Deployment 삭제 시 정리한다.
+`GetCapacity`를 지원하지 않는 이미지로 되돌리기 전에 현재 Chart에서 `capacityTracking.enabled=false`를
+적용해 scheduler 검사와 게시를 먼저 끈다. 이미 게시된 객체는 Deployment가 남아 있으면 유지될 수 있다.
+[upstream 설정 계약](https://github.com/kubernetes-csi/external-provisioner/blob/v6.3.0/README.md#capacity-support)을 따른다.
+
 ## Resident volume effects
 
 새 Volume 생성과 삭제는 상주 Node가 실행한다. Controller가 Pod UID를 durable intent에 기록하고,

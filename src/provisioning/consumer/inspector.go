@@ -106,7 +106,9 @@ func usesClaim(pod corev1.Pod, name string) bool {
 }
 
 func placementForPods(pods []corev1.Pod, name, node string) Result {
-	result := Result{Reschedulable, "consumer remains scheduler-managed"}
+	// A selected node can precede a fixed consumer. Its absence does not
+	// establish that the scheduler can choose another node.
+	result := Result{Unknown, "no active PVC consumer is observable"}
 	conflict := false
 	for _, pod := range pods {
 		if !usesClaim(pod, name) || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
@@ -114,6 +116,9 @@ func placementForPods(pods []corev1.Pod, name, node string) Result {
 		}
 		if pod.Spec.NodeName == node {
 			result = Result{Fixed, "consumer is assigned to selected node"}
+		}
+		if pod.Spec.NodeName == "" && result.Placement != Fixed {
+			result = Result{Reschedulable, "consumer remains scheduler-managed"}
 		}
 		if pod.Spec.NodeName != "" && pod.Spec.NodeName != node {
 			conflict = true

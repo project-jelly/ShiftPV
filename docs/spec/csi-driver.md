@@ -17,7 +17,7 @@
 | Mobility | source를 quiesce할 수 있는 planned cold copy |
 | Normal I/O | owner node의 directory를 kubelet target에 bind mount |
 
-Identity, Controller, Node 서비스는 provisioning, deletion, publish와 unpublish에 필요한 최소 CSI RPC만
+Identity, Controller, Node 서비스는 provisioning, deletion, capacity 조회, publish와 unpublish에 필요한 CSI RPC만
 광고한다. Attach, stage/unstage, expansion, snapshot, raw block, RWX와 live migration은 제품 범위 밖이다.
 
 ShiftPV가 정의하는 durable API는 정확히 세 개다.
@@ -91,7 +91,7 @@ Volume 생성과 함께 `spec.initialPool`에 Pool name/UID를 저장한다. 첫
 inode 검증은 유지한다. 전체 inventory 검사는 새 배치 승인에 계속 적용한다.
 
 Controller는 승인 기록 후 해당 Pod에 gRPC `CreateCopy`를 호출하고, 응답 뒤 API receipt를 검증한다.
-`GetCapacity`는 exact Pool UID·measurement evidence·nonce를 확인해 실시간 filesystem 용량을 반환한다.
+Node 내부 RPC `GetCapacity`는 exact Pool UID·measurement evidence·nonce를 확인해 실시간 filesystem 용량을 반환한다.
 요청에는 filesystem 경로를 받지 않는다. Node는 API에서 승인된 경로를 읽고 mount identity를 재검증한다.
 
 삭제도 Controller가 cleanup journal에 `executor.kind: Node`와 Pod UID를 기록한 뒤 Node가 실행한다.

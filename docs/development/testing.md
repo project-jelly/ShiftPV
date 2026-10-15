@@ -60,6 +60,11 @@ git diff --check
 
 ## Required protocol tests
 
+`CAPACITY_TRACKING_ONLY=1 ./test/e2e/kind/run.sh`는 실제 scheduler에서 꽉 찬 선호 노드 우회,
+고정 노드의 공간 반환 후 진행, 다른 노드에만 있는 그룹 배치, 게시 재시작·0 반환·롤백과
+uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러 Pool의 합계와 단일 볼륨
+최대값, 초기 생성·이동 hold, 관측 누락·오류 및 조회의 무변경 계약을 DI로 검사한다.
+
 | Contract | 최소 fault boundary |
 |---|---|
 | Node creation | copy intent·stage mkdir·placement marker·rename·API receipt 경계의 중단 상태를 실제 Pool reconcile·승인 검사에 연결; inventory 수동 보정 없이 동일 작업으로 복구 |
@@ -102,6 +107,7 @@ git diff --check
 | `csi/controller`: `TestDeleteWaitsForPublicationWithoutStartingCleanup` | CSI 응답 + 실제 Registry + cleanup effect 호출 여부 |
 | `csi/controller`: `TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode`, `TestConcurrentAdmissionToSamePoolCannotOversubscribe` | 실제 Pool Locker + capacity probe 지연 + durable hold |
 | `csi/controller`: `TestCreateInitializationRecoversAPIWriteBoundaries`, `TestLegacyInitializationsReadmitWithoutBlockingEachOther` | 실제 Registry/ledger + Create·status 실패/응답 유실 + 재시작 + 다른 Pool 진행 |
+| `csi/controller`: `placement_progress_test.go`, `TestMissingPoolUsesPlacementAuthority` | 등록 부재·일시 NotReady·소비자 배치 권한을 구분하고 원래 생성 intent·예약을 보존 |
 | `mobility/controller`: `approval_recovery_test.go` | 승인 직후 source 장애 + 원자적 copy 계획 + 구버전 승인·재시작·fresh absence 전 hold 유지 |
 | `node/ownership`: `pool_release_test.go` | 실제 marker lock + 중단된 임시 파일 회수 + symlink/hardlink/권한/소유자 불일치 보존 |
 | `cmd/node`: `TestNodeBackgroundBudgetDoesNotBlockForegroundRequests` | 실제 Collector/Registry/REST clients + 차단된 GC limiter + HTTP 서버 |

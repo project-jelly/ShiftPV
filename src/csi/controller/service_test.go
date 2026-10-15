@@ -1036,12 +1036,13 @@ func TestDeleteVolumeRejectsUnconfiguredController(t *testing.T) {
 	}
 }
 
-func TestControllerCapabilitiesAdvertiseCreateDeleteOnly(t *testing.T) {
+func TestControllerCapabilitiesAdvertiseCreateDeleteAndCapacity(t *testing.T) {
 	response, err := (&Service{}).ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Capabilities) != 1 || response.Capabilities[0].GetRpc().GetType() != csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME {
+	if len(response.Capabilities) != 2 || response.Capabilities[0].GetRpc().GetType() != csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME ||
+		response.Capabilities[1].GetRpc().GetType() != csi.ControllerServiceCapability_RPC_GET_CAPACITY {
 		t.Fatalf("unexpected capabilities: %#v", response.Capabilities)
 	}
 }

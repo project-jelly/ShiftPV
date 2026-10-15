@@ -44,6 +44,11 @@ func (f *fakePoolCapacityRegistry) ReadyPools(context.Context) ([]volumeapi.Pool
 	return []volumeapi.Pool{f.pool}, f.err
 }
 
+func (f *fakePoolCapacityRegistry) ObservePools(ctx context.Context) (volumeapi.PoolSnapshot, error) {
+	pools, err := f.ReadyPools(ctx)
+	return volumeapi.PoolSnapshot{Registered: pools, Ready: pools}, err
+}
+
 func (f *fakePoolCapacityRegistry) PoolForIdentity(_ context.Context, name, uid, nodeName string) (volumeapi.Pool, error) {
 	for _, pool := range append(append([]volumeapi.Pool(nil), f.pools...), f.pool) {
 		if pool.Name == name && pool.UID == uid && pool.NodeName == nodeName {

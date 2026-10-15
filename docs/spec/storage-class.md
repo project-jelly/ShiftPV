@@ -98,7 +98,7 @@ Helper는 host device 권한을 갖지 않는다. `FixedBlock` Pool은 노드가
 inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경을 원자적으로 차단하지는 않으므로
 [Pool 변경 절차](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.
 
-### Capacity denial
+### Placement and capacity denial
 
 용량 부족의 원인과 PVC 재배치 가능 여부를 별도로 판정한다.
 
@@ -107,15 +107,52 @@ CSI는 topology 내 생성 불가에 `ResourceExhausted`를 지정한다. ShiftP
 호환성 정책이다. 다른 CSI orchestrator에 동일한 재시도 동작을 보장하지 않는다.
 
 - 일반 미배치 consumer는 `ResourceExhausted`로 다른 노드 선택을 허용한다.
+- 선택한 노드에 요청 그룹의 Pool이 없을 때도 같은 consumer 검사를 거쳐 재선택을 허용한다.
+  등록된 Pool이 있지만 Ready가 아니면 `Unavailable`로 관찰 회복을 기다린다.
 - 배치된 consumer와 CDI prime·scratch는 `Unavailable`로 노드 지정을 유지한다.
   prime은 원본 PVC의 UID·selected-node·populator 종류를 확인하므로 Pod 생성 전에도 보호한다.
+- 실제 미배치 consumer가 관찰되지 않으면 재배치를 허가하지 않는다. PVC가 Pod보다 먼저
+  만들어진 경우에는 노드를 유지하고 다음 요청에서 consumer를 다시 확인한다.
 - 조회 실패·불명확한 배치 계약은 재시도한다. PVC UID·노드 변경은 `FailedPrecondition`이다.
 - 고정된 요청이 개별 Pool 한도나 filesystem 전체 크기를 초과해도 노드를 지우지 않는다.
   이 경우 공간 반환만으로 해결되지 않으며 Pool 설정 또는 요청 크기 변경이 필요하다.
 
+기록된 생성 의도는 위 재선택보다 우선하며 원래 노드·Pool UID를 유지한다.
+용량 게시가 꺼져 있으면 scheduler가 같은 노드를 다시 고를 수 있다. 일부 노드에만 존재하는
+그룹의 StorageClass에는 `allowedTopologies`를 지정하거나 아래 용량 게시를 활성화한다.
+
 이미 selected-node가 지워진 CDI PVC는 이 수정으로 자동 보정되지 않는다. 원본 PVC·prime·
 consumer의 identity를 확인하고 CDI 운영 절차로 작업 Pod를 재생성해야 한다. ShiftPV는
 노드 annotation을 임의 복원하거나 importer Pod를 삭제하지 않는다.
+
+### Scheduler capacity tracking
+
+`capacityTracking.enabled: true`로 기존 external-provisioner가 노드·StorageClass별
+`CSIStorageCapacity`를 게시하고 scheduler가 새 WFFC PVC 배치에 사용한다. 기본값은 false다.
+CRD·controller·node를 이 기능 지원 버전으로 갱신한 뒤 켠다. 최초 게시 전에는 새 PVC가 잠시
+Pending일 수 있다. 기존 Bound PV의 위치나 데이터는 바뀌지 않는다.
+
+CSI Controller `GetCapacity`는 기존 Pool readiness의 filesystem 가용 bytes·inodes 관측과
+Volume·Move 예약 장부를 읽는다. 추가 helper, 실시간 probe, 예약 또는 승인 잠금을 만들지 않는다.
+
+```text
+Pool 여유 = max(0, min(예약 한도 - 예약 합계, 관측된 filesystem 여유))
+노드·그룹 총 여유 = 각 Ready Pool 여유의 합
+PVC 하나의 최대 크기 = 각 Ready Pool 여유 중 최댓값
+```
+
+같은 그룹의 독립 Pool이 6Gi씩 남으면 총 여유는 12Gi지만 PVC 하나는 6Gi까지다.
+다른 StorageClass가 같은 그룹을 가리키면 같은 용량을 공유한다. Pool이 없거나 Ready가 아니거나
+가용 관측이 누락됐거나 inode가 없으면 그 Pool은 0으로 반영한다. 구버전 node의 누락 필드도
+0으로 처리한다. 초기 생성 예약, Retain, 삭제·이동 중 hold는 기존 장부대로 유지한다.
+
+기본 게시 주기는 1분이다. 관측·게시 사이의 지연과 동시 생성 때문에 게시값은 예약 보장이 아니다.
+API 조회나 장부 검증 실패 시 GetCapacity는 오류를 반환하며 provisioner의 이전 게시값이 남을 수 있다.
+최종 생성은 기존 Pool UID 잠금 안에서 장부와 실시간 여유를 다시 검증한다.
+설정·롤백은 [차트 사용법](../../charts/shiftpv/README.md#scheduler-capacity-tracking)을 따른다.
+
+계약 근거: [CSI GetCapacity](https://github.com/container-storage-interface/spec/blob/v1.12.0/spec.md#getcapacity),
+[external-provisioner capacity support](https://github.com/kubernetes-csi/external-provisioner/blob/v6.3.0/README.md#capacity-support).
 
 ### Create request compatibility
 

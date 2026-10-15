@@ -186,6 +186,15 @@
         "staleAfter": {"type": "string", "pattern": "^[1-9][0-9]*(s|m)$"}
       }
     },
+    "capacityTracking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "pollInterval"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "pollInterval": {"type": "string", "pattern": "^[1-9][0-9]*(s|m|h)$"}
+      }
+    },
     "lifecycle": {
       "type": "object",
       "additionalProperties": false,
