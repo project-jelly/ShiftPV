@@ -60,8 +60,10 @@ retiring the journal. Cancellation needs no surviving PVC or consumer. After
 `StartingDisruption`, an already submitted eviction can still complete for the
 original UID; cancellation restores source authority, not that Pod's lifetime.
 
-Upgrade the CRD before the controller. Moves without a protocol field keep their
-legacy path; unknown protocols retain their records without executing effects.
+Apply the CRDs separately before upgrading the chart and controller together.
+The new chart passes the preparation PriorityClass flag, which older controller
+binaries do not accept; pinning an old image under the new chart is not a CRD-only
+upgrade. Moves without a protocol field keep their legacy path; unknown protocols retain their records without executing effects.
 Do not run an older controller while prepared records remain. The implementation
 sequence is in [mobility stabilization](../development/mobility-stabilization-plan.md).
 

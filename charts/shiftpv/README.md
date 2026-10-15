@@ -351,7 +351,10 @@ with `preemptionPolicy: Never`. Preparation reservations use this class instead
 of the workload's priority, so they wait for free resources without preempting
 other Pods. Higher-priority workloads may therefore wait longer for preparation.
 Without Helm, provision the same class contract and pass its name using
-`--mobility-placement-priority-class` (default `shiftpv-placement`).
+`--mobility-placement-priority-class` (default `shiftpv-placement`). Apply CRDs
+first, then upgrade the chart and controller together: older controller binaries
+do not accept this flag, so an old image override under the new chart is not a
+CRD-only upgrade.
 
 Settled terminal `ShiftPVMove` metadata is retained for seven days by default
 and then removed with a UID precondition. Configure whole-hour retention with
