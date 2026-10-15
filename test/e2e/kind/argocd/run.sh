@@ -12,6 +12,10 @@ CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-argocd-e2e}
 NODE_IMAGE=${NODE_IMAGE:-$(kind_node_image)}
 ARGOCD_VERSION=${ARGOCD_VERSION:-v3.5.2}
 ARGOCD_MANIFEST_SHA256=${ARGOCD_MANIFEST_SHA256:-9a87f2b3e14c278f12501eb0ef5c3955b27cf05370ca425381c6a908cf85a5c5}
+# The ECR mirror and Docker Hub have this exact Redis 8.2.3-alpine index.
+ARGOCD_REDIS_DIGEST=sha256:08ad0b1d280850169a790dba1393ff7a90aef951fc19632cf4d3ce4f78e679ba
+ARGOCD_REDIS_SOURCE="docker.io/library/redis@${ARGOCD_REDIS_DIGEST}"
+ARGOCD_REDIS_LOCAL="shiftpv-argocd-redis:sha256-${ARGOCD_REDIS_DIGEST#sha256:}"
 IMAGE_REPOSITORY=${IMAGE_REPOSITORY:-shiftpv-argocd-e2e}
 IMAGE_TAG=${IMAGE_TAG:-dev}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
@@ -37,6 +41,63 @@ sha256_file() {
 	fi
 }
 
+prepare_argocd_redis() {
+	local image_id platform expected_id nodes node node_image_id
+	docker pull "${ARGOCD_REDIS_SOURCE}"
+	image_id=$(docker image inspect --format '{{.Id}}' "${ARGOCD_REDIS_SOURCE}")
+	platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "${ARGOCD_REDIS_SOURCE}")
+	case "${platform}" in
+	linux/amd64) expected_id=sha256:f508abec2c47b3b5099daf9e7b11ead2a9396c17ca46654f2f9723c14892e3da ;;
+	linux/arm64) expected_id=sha256:7dc4da3a2de931d1c82d12b569038c90df13fe90be2b87d807201b133b4b4d21 ;;
+	*) echo "unsupported Argo Redis platform: ${platform}" >&2; return 1 ;;
+	esac
+	if [[ "${image_id}" != "${expected_id}" ]]; then
+		echo "Argo Redis image ID mismatch: ${image_id}, expected ${expected_id}" >&2
+		return 1
+	fi
+	# A local alias survives Docker archive import without assuming preservation
+	# of the original OCI index reference. Verify the loaded content on every node.
+	docker image tag "${image_id}" "${ARGOCD_REDIS_LOCAL}"
+	kind load docker-image "${ARGOCD_REDIS_LOCAL}" --name "${CLUSTER_NAME}"
+	nodes=$(kind get nodes --name "${CLUSTER_NAME}")
+	test -n "${nodes}"
+	printf 'source=%s\nplatform=%s\nimageID=%s\n' \
+		"${ARGOCD_REDIS_SOURCE}" "${platform}" "${image_id}" >"${WORK_DIR}/argocd-redis-image.txt"
+	while IFS= read -r node; do
+		node_image_id=$(docker exec "${node}" crictl inspecti \
+			--output go-template --template '{{.status.id}}' "${ARGOCD_REDIS_LOCAL}")
+		printf 'node=%s imageID=%s\n' "${node}" "${node_image_id}" >>"${WORK_DIR}/argocd-redis-image.txt"
+		if [[ "${node_image_id}" != "${image_id}" ]]; then
+			echo "Argo Redis preload mismatch on ${node}: ${node_image_id}, expected ${image_id}" >&2
+			return 1
+		fi
+	done <<<"${nodes}"
+}
+
+preserve_argocd_bootstrap() {
+	local output="${ROOT_DIR}/.tmp/ci-argocd-diagnostics/redis-bootstrap/${WORK_DIR##*/}" filename
+	mkdir -p "${output}" || return 1
+	# Public pinned inputs and image IDs only; never copy kubeconfig, secrets or data.
+	for filename in argocd-install.yaml argocd-rendered.yaml argocd-redis-image.txt; do
+		test ! -L "${WORK_DIR}/${filename}" || return 1
+		if [[ -f "${WORK_DIR}/${filename}" ]]; then
+			cp -- "${WORK_DIR}/${filename}" "${output}/${filename}" || return 1
+		fi
+	done
+}
+
+# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
+finish_argocd_test() {
+	local result=$?
+	trap - EXIT
+	preserve_argocd_bootstrap || {
+		echo 'failed to preserve Argo bootstrap input/image evidence' >&2
+		result=1
+	}
+	delete_cluster_unless_kept || result=1
+	exit "${result}"
+}
+
 mkdir -p "${ROOT_DIR}/.tmp"
 WORK_DIR=$(mktemp -d "${ROOT_DIR}/.tmp/shiftpv-argocd.XXXXXX")
 WORKER_POOL="${WORK_DIR}/worker"
@@ -51,7 +112,7 @@ export DOCKER_HOST=${DOCKER_HOST:-${ACTIVE_DOCKER_HOST}}
 export DOCKER_CONFIG=${DOCKER_CONFIG_DIR}
 unset DOCKER_CONTEXT
 
-trap delete_cluster_unless_kept EXIT
+trap finish_argocd_test EXIT
 
 sed "s|__WORKER_POOL__|${WORKER_POOL}|g" \
 	"${ROOT_DIR}/test/e2e/kind/argocd/cluster.yaml.tpl" >"${WORK_DIR}/cluster.yaml"
@@ -85,8 +146,41 @@ ARGOCD_MANIFEST="${WORK_DIR}/argocd-install.yaml"
 curl -fsSL "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml" \
 	-o "${ARGOCD_MANIFEST}"
 test "$(sha256_file "${ARGOCD_MANIFEST}")" = "${ARGOCD_MANIFEST_SHA256}"
+prepare_argocd_redis
+cat >"${WORK_DIR}/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - argocd-install.yaml
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: argocd-redis
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: redis
+      - op: test
+        path: /spec/template/spec/containers/0/image
+        value: public.ecr.aws/docker/library/redis:8.2.3-alpine
+      - op: test
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: ${ARGOCD_REDIS_LOCAL}
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+EOF
+ARGOCD_RENDERED="${WORK_DIR}/argocd-rendered.yaml"
+kubectl kustomize "${WORK_DIR}" >"${ARGOCD_RENDERED}"
+awk -v image="${ARGOCD_REDIS_LOCAL}" \
+	'$1 == "image:" && $2 == image { count++ } END { exit count != 1 }' "${ARGOCD_RENDERED}"
 kubectl create namespace argocd
-kubectl apply --server-side --force-conflicts -n argocd -f "${ARGOCD_MANIFEST}" >/dev/null
+kubectl apply --server-side --force-conflicts -n argocd -f "${ARGOCD_RENDERED}" >/dev/null
 
 for deployment in \
 	argocd-applicationset-controller \
