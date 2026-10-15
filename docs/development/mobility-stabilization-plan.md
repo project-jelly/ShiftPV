@@ -1,7 +1,8 @@
 # Mobility stabilization plan
 
-상태: 2026-10-15 1단계 [PR #199](https://github.com/project-jelly/ShiftPV/pull/199) 머지.
-2단계 기반 구현 중이며, 아래 후속 설계는 아직 제품 동작이 아니다.
+상태: 2026-10-15 1단계 [PR #199](https://github.com/project-jelly/ShiftPV/pull/199),
+2A 저장 계약 [PR #200](https://github.com/project-jelly/ShiftPV/pull/200) 머지.
+2B 구현 중이며, 새 준비 protocol 실행은 아직 비활성이다.
 현재 계약은 [volume mobility](../spec/volume-mobility.md)가 소유한다.
 
 근거: NoteGate `daily:/research/2026/10/2026-10-15-shiftpv-two-node/02-basic-results-2026-10-15.md`.
@@ -63,17 +64,18 @@ Volume별 처리              동일 Volume 직렬화, 다른 Volume 진행 (5�
 
 2단계는 단순 사전 용량 조회로 끝내지 않는다.
 
-두 PR로 나눠 순서대로 검증한다.
+다음 변경 단위로 순서대로 검증한다.
 
 1. **2A 저장 계약**: immutable `prepared-v1` protocol, 정확한 UID/resourceVersion CAS,
    준비 hold의 공통 용량 계상과 Pool 삭제 보호, 실제 API 서버에서 CRD 검증.
    이 단계는 새 protocol을 생성하거나 실행하지 않으며, 발견한 기록도 기존 실행·복구·GC 경로로 넘기지 않는다.
-2. **2B 실행 연결**: 준비 → 예약 → 중단 → 실행 승인 전환과 구간별 취소를 연결한다.
+2. **2B-1 용량 조회와 owner 전환**: `ListVolumes`가 commit 전 원본 owner를 읽고
+   `ListMoves`가 cleanup 후 완료를 읽으면 목적지 예약을 놓칠 수 있다. 실제 Registry·공유
+   Pool 잠금의 경합 테스트를 먼저 만들고, owner CAS가 destination Pool의 용량 승인과
+   직렬화되게 한다. `Volumes → Moves` 조회 순서를 유지하면 source 유출은 보수적으로
+   계상되므로 추가 잠금이 필요 없다. 이 수정은 별도 PR로 먼저 검증한다.
+3. **2B-2 실행 연결**: 준비 → 예약 → 중단 → 실행 승인 전환과 구간별 취소를 연결한다.
    034의 consumer 유지 회귀·장애 주입·통합 시험과 035 복구 절차까지 완료해야 2단계가 끝난다.
-
-2B의 활성화 조건에는 ledger의 혼합 snapshot 회귀도 포함한다. `ListVolumes`가 commit 전
-원본 owner를 읽고 `ListMoves`가 cleanup 후 완료를 읽으면 목적지 예약을 놓칠 수 있다.
-실제 admission 잠금과 owner commit·정산을 연결한 장애 주입 테스트로 이 경계를 닫는다.
 
 - 준비 중 Volume은 `Ready + activeMove`로 원본 서비스를 유지한다.
 - Pool UID 잠금 안에서 최신 ledger를 읽고 durable logical hold를 저장한다.

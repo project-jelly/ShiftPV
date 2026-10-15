@@ -216,19 +216,25 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 	if observed.FSM.OwnerCommitted {
 		return confirmCommittedCopy(move, observed)
 	}
+	if r.PoolLocks == nil {
+		return fmt.Errorf("Pool capacity locker is required for owner handoff")
+	}
+	destinationPoolUID, err := ownerCommitPoolUID(*move, observed.Volume, destination)
+	if err != nil {
+		return err
+	}
 	if err := r.requireScheduledPlacement(ctx, *move); err != nil {
 		return err
 	}
-	if move.Status.DestinationCopy == nil || move.Status.DestinationCopy.Role != volume.RoleServing || move.Status.DestinationCopy.NodeName != destination {
-		return fmt.Errorf("destination serving-copy identity is missing")
-	}
-	next := volumeapi.State{UID: observed.Volume.UID, Phase: volumeapi.PhaseReady, OwnerNode: destination, ActiveMove: move.Name, PublishedNodes: append([]string(nil), observed.Volume.PublishedNodes...)}
-	var destinationCopy volume.CopyIdentity
-	if move.Status.DestinationCopy != nil {
-		destinationCopy = *move.Status.DestinationCopy
-		next.CurrentCopy = &destinationCopy
-	}
-	err := r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseMoving, move.Name, move.Spec.SourceNode, next)
+	destinationCopy := *move.Status.DestinationCopy
+	next := volumeapi.State{UID: observed.Volume.UID, Phase: volumeapi.PhaseReady, OwnerNode: destination,
+		ActiveMove: move.Name, CurrentCopy: &destinationCopy, PublishedNodes: append([]string(nil), observed.Volume.PublishedNodes...)}
+	// Capacity readers list Volumes before Moves under the destination Pool lock.
+	// Keep the incoming owner change from falling between those reads. A source
+	// reader may conservatively retain its old Volume reservation during handoff.
+	unlock := r.PoolLocks.Lock(destinationPoolUID)
+	defer unlock()
+	err = r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseMoving, move.Name, move.Spec.SourceNode, next)
 	if err != nil && !errors.Is(err, volumeapi.ErrStateConflict) {
 		return err
 	}
@@ -236,6 +242,23 @@ func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, obse
 		return r.confirmCommitConflict(ctx, *move, destination, destinationCopy, err)
 	}
 	return nil
+}
+
+// ownerCommitPoolUID binds the destination ledger key to the exact copy being
+// handed off. Node names are not capacity identities.
+func ownerCommitPoolUID(move volumeapi.Move, state volumeapi.State, destination string) (string, error) {
+	source, target := move.Status.SourceCopy, move.Status.DestinationCopy
+	if source == nil || source.Validate() != nil || source.Role != volume.RoleServing ||
+		source.VolumeID != move.Spec.VolumeID || source.VolumeUID != state.UID || source.NodeName != move.Spec.SourceNode ||
+		state.CurrentCopy == nil || *state.CurrentCopy != *source {
+		return "", fmt.Errorf("source serving-copy identity does not match owner handoff")
+	}
+	if target == nil || target.Validate() != nil || target.Role != volume.RoleServing || target.NodeName != destination ||
+		target.VolumeID != move.Spec.VolumeID || target.VolumeUID != source.VolumeUID ||
+		target.InstallationID != source.InstallationID || target.PoolUID != move.Status.DestinationPoolUID || target.PoolUID == source.PoolUID {
+		return "", fmt.Errorf("destination serving-copy identity does not match owner handoff")
+	}
+	return target.PoolUID, nil
 }
 
 // confirmCommittedCopy checks that an already committed owner still serves the

@@ -17,6 +17,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -24,7 +25,7 @@ import (
 // share. Anything beyond it is an explicit option so each test still reads as
 // the exact configuration it exercises.
 func newTestReconciler(client kubernetes.Interface, repository Repository, options ...func(*Reconciler)) *Reconciler {
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", PoolLocks: &poolcapacity.Locker{}}
 	for _, option := range options {
 		option(reconciler)
 	}
