@@ -365,9 +365,13 @@ func completionAllowed(move volumeapi.Move, state volumeapi.State, missing bool)
 }
 
 func hasCommittedDestinationAuthority(move volumeapi.Move, state volumeapi.State, allowReleased bool) bool {
+	return state.Phase == volumeapi.PhaseReady && matchesCommittedDestinationIdentity(move, state, allowReleased)
+}
+
+func matchesCommittedDestinationIdentity(move volumeapi.Move, state volumeapi.State, allowReleased bool) bool {
 	destination := move.Status.DestinationCopy
 	if !validDestinationAuthorityIntent(move) ||
-		state.UID != destination.VolumeUID || state.Phase != volumeapi.PhaseReady || state.OwnerNode != move.Status.DestinationNode ||
+		state.UID != destination.VolumeUID || state.OwnerNode != move.Status.DestinationNode ||
 		state.CurrentCopy == nil || *state.CurrentCopy != *destination {
 		return false
 	}

@@ -236,7 +236,7 @@ fi
 
 if [[ "${CLEANUP_EXECUTOR_RETRY_ONLY:-0}" == "1" ]]; then
 	run_cleanup_executor_retry
-	echo "ShiftPV focused cleanup Job retry E2E passed"
+	echo "ShiftPV focused cleanup executor retry E2E passed"
 	exit 0
 fi
 

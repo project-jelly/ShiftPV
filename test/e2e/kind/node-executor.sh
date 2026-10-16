@@ -31,25 +31,24 @@ cleanup() {
  rm -f "${WATCH_FILE}"
  kubectl delete pod "${NAME}" --ignore-not-found --wait=true --timeout=30s >/dev/null 2>&1 || true
  kubectl delete pvc "${NAME}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+ kubectl delete pod "${NAME}-capacity" --ignore-not-found --wait=true --timeout=30s >/dev/null 2>&1 || true
+ kubectl delete pvc "${NAME}-capacity" --ignore-not-found --wait=false >/dev/null 2>&1 || true
  return "${result}"
 }
 trap cleanup EXIT
 
 for node_pod in $(kubectl -n shiftpv-system get pods -l app.kubernetes.io/component=node -o name); do
  kubectl -n shiftpv-system wait --for=jsonpath='{.metadata.annotations.shiftpv\.io/node-rpc-port}'=9760 "${node_pod}" --timeout=1m
+ kubectl -n shiftpv-system wait --for=jsonpath='{.metadata.annotations.shiftpv\.io/node-effects}'=v1 "${node_pod}" --timeout=1m
 done
 
-CAPABILITY_POD=$(kubectl -n shiftpv-system get pods -l app.kubernetes.io/component=node --field-selector "spec.nodeName=${CLUSTER_NAME}-worker" -o json | jq -ce '.items | select(length == 1) | .[0] | select(.metadata.annotations["shiftpv.io/node-effects"] == "v1")')
-CAPABILITY_PATCH=$(jq -c '[{op:"test",path:"/metadata/uid",value:.metadata.uid},
- {op:"test",path:"/metadata/resourceVersion",value:.metadata.resourceVersion},
- {op:"remove",path:"/metadata/annotations/shiftpv.io~1node-effects"}]' <<<"${CAPABILITY_POD}")
-kubectl -n shiftpv-system patch "pod/$(jq -er '.metadata.name' <<<"${CAPABILITY_POD}")" --type=json -p "${CAPABILITY_PATCH}"
-
+apply_effect_workload() {
+ local workload=$1
 kubectl apply -f - <<YAML
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ${NAME}
+  name: ${workload}
 spec:
   storageClassName: shiftpv
   accessModes: [ReadWriteOnce]
@@ -60,7 +59,7 @@ spec:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ${NAME}
+  name: ${workload}
 spec:
   nodeSelector:
     kubernetes.io/hostname: ${CLUSTER_NAME}-worker
@@ -75,8 +74,23 @@ spec:
   volumes:
     - name: data
       persistentVolumeClaim:
-        claimName: ${NAME}
+        claimName: ${workload}
 YAML
+}
+
+# A healthy new admission must exercise authenticated CAPACITY RPC. The later
+# capability-retry case intentionally reuses its Pending capacity reservation.
+apply_effect_workload "${NAME}-capacity"
+kubectl wait --for=condition=Ready "pod/${NAME}-capacity" --timeout=3m
+CAPACITY_PV=$(kubectl get "pvc/${NAME}-capacity" -o jsonpath='{.spec.volumeName}')
+
+CAPABILITY_POD=$(kubectl -n shiftpv-system get pods -l app.kubernetes.io/component=node --field-selector "spec.nodeName=${CLUSTER_NAME}-worker" -o json | jq -ce '.items | select(length == 1) | .[0] | select(.metadata.annotations["shiftpv.io/node-effects"] == "v1")')
+CAPABILITY_PATCH=$(jq -c '[{op:"test",path:"/metadata/uid",value:.metadata.uid},
+ {op:"test",path:"/metadata/resourceVersion",value:.metadata.resourceVersion},
+ {op:"remove",path:"/metadata/annotations/shiftpv.io~1node-effects"}]' <<<"${CAPABILITY_POD}")
+kubectl -n shiftpv-system patch "pod/$(jq -er '.metadata.name' <<<"${CAPABILITY_POD}")" --type=json -p "${CAPABILITY_PATCH}"
+
+apply_effect_workload "${NAME}"
 PVC_UID=$(kubectl get "pvc/${NAME}" -o jsonpath='{.metadata.uid}')
 PENDING=
 for _ in {1..120}; do
@@ -143,8 +157,15 @@ jq -e --arg old "${CREATE_UID}" '
 ' "${WATCH_FILE}" >/dev/null
 kubectl -n shiftpv-system get pods -o json | jq -e 'all(.items[]; (.metadata.name | startswith("shiftpv-create-") | not))' >/dev/null
 kubectl -n shiftpv-system get jobs -o json | jq -e 'all(.items[]; (.metadata.name | startswith("shiftpv-cleanup-") | not))' >/dev/null
+# Remove the healthy admission fixture after the tested Node replacement.
+kubectl delete "pod/${NAME}-capacity" --wait=true
+kubectl delete "pvc/${NAME}-capacity" --wait=true
+kubectl wait "pv/${CAPACITY_PV}" --for=delete --timeout=3m
 RPC_LOGS=$(kubectl -n shiftpv-system logs deployment/shiftpv-controller -c shiftpv-controller)
-grep -q 'operation="CREATE"' <<<"${RPC_LOGS}"
-grep -q 'operation="RECLAIM"' <<<"${RPC_LOGS}"
-grep -q 'operation="CAPACITY"' <<<"${RPC_LOGS}"
+for operation in CAPACITY CREATE RECLAIM; do
+ if ! grep -Eq "operation=\"${operation}\".*error=null" <<<"${RPC_LOGS}"; then
+  echo "missing authenticated ${operation} RPC evidence" >&2
+  exit 1
+ fi
+done
 echo "Authenticated Node gRPC capacity, capability retry, create, Pod restart and fenced delete passed"
