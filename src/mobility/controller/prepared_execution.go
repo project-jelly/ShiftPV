@@ -9,44 +9,29 @@ import (
 	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 )
 
-// Prepared Moves join the copy FSM only after their durable preparation and
-// source disruption stages. Legacy Moves keep their original entry path.
-func (r *Reconciler) reconcilePreparedStage(ctx context.Context, move volumeapi.Move) (bool, error) {
-	if legacyMoveProtocol(move) {
-		return false, nil
-	}
-	phase := fsm.Phase(move.Status.Phase)
-	switch phase {
-	case fsm.PhaseCanceling, fsm.PhaseCancelled:
-		return true, r.reconcileCancellation(ctx, move)
-	case "", fsm.PhasePending, fsm.PhasePreparing, fsm.PhaseStartingDisruption:
-		return true, r.reconcilePreparation(ctx, move)
-	case fsm.PhaseLocking, fsm.PhaseEvicting:
-		return true, fmt.Errorf("prepared Move cannot use legacy disruption phase %q", phase)
-	}
+// Admission facts are checked before observing the execution graph. This does
+// not dispatch a separate lifecycle or select a next phase.
+func validatePreparedStage(move volumeapi.Move) error {
 	if err := volumeapi.ValidatePreparedMovePlan(move); err != nil {
-		return true, err
+		return err
 	}
 	if err := volumeapi.ValidateMovePreparation(move); err != nil {
-		return true, err
+		return err
 	}
 	if move.Status.CapacityApproved || !noDestinationEffectIntent(move) {
-		return false, validatePreparedExecutionPlan(move)
+		return validatePreparedExecutionPlan(move)
 	}
-	if phase == fsm.PhaseBlocked {
-		return true, r.requestPreparationCancellation(ctx, &move, "UnapprovedMoveBlocked")
+	if move.Status.Phase == string(fsm.PhaseBlocked) {
+		return nil
 	}
 	if move.Status.Preparation == nil || !slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer) {
-		return true, fmt.Errorf("prepared execution requires its protected durable reservation")
+		return fmt.Errorf("prepared execution requires its protected durable reservation")
 	}
-	switch phase {
+	switch fsm.Phase(move.Status.Phase) {
 	case fsm.PhaseWaitingForUnpublish, fsm.PhaseWaitingForReplacement, fsm.PhaseWaitingForDestination, fsm.PhaseWaitingForCapacity:
-		if move.Deleting {
-			return true, r.requestPreparationCancellation(ctx, &move, "MoveDeleting")
-		}
-		return false, nil
+		return nil
 	default:
-		return true, fmt.Errorf("prepared Move has no execution approval in phase %q", phase)
+		return fmt.Errorf("prepared Move has no execution approval in phase %q", move.Status.Phase)
 	}
 }
 

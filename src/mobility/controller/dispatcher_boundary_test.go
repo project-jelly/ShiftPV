@@ -173,7 +173,7 @@ func prepareDispatcherPlacement(t *testing.T, f *preparationRegistryFixture, ind
 	t.Helper()
 	for range 8 {
 		move := f.move(t, index)
-		if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 			t.Fatal(err)
 		}
 		pod, err := f.client.CoreV1().Pods("system").Get(f.ctx, namesFor(move.Name).PlacementPod, metav1.GetOptions{})

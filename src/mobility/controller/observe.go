@@ -14,6 +14,7 @@ import (
 type observation struct {
 	FSM             fsm.Observation
 	Volume          volumeapi.State
+	Pools           poolIndex
 	VolumeMissing   bool
 	PV              *corev1.PersistentVolume
 	Claim           *corev1.PersistentVolumeClaim

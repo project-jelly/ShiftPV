@@ -81,7 +81,7 @@ func TestPreparationStartingDisruptionRejectsMultipleReplacements(t *testing.T) 
 		t.Run(map[bool]string{false: "original present", true: "original absent"}[originalGone], func(t *testing.T) {
 			f := newPreparationRegistryFixture(t, 1)
 			move := f.untilPrepared(t, 0)
-			if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 				t.Fatal(err)
 			}
 			if f.move(t, 0).Status.Phase != "StartingDisruption" {
@@ -105,7 +105,7 @@ func TestPreparationStartingDisruptionRejectsMultipleReplacements(t *testing.T) 
 				}
 			}
 			f.client.ClearActions()
-			if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 				t.Fatal(err)
 			}
 			move = f.move(t, 0)
@@ -139,7 +139,7 @@ func TestPreparationLateQuotaDenialReleasesUnreservedPlacementBeforeRetry(t *tes
 	f := newPreparationRegistryFixture(t, 1)
 	var placement *corev1.Pod
 	for range 6 {
-		if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 			t.Fatal(err)
 		}
 		var err error
@@ -166,7 +166,7 @@ func TestPreparationLateQuotaDenialReleasesUnreservedPlacementBeforeRetry(t *tes
 		}
 	}
 	f.reconciler.Repository = &preparationPoolReadRepository{Repository: f.registry, beforeReady: func() { setLimit("1Gi") }}
-	if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if f.move(t, 0).Status.Preparation != nil || f.move(t, 0).Status.Reason != "DestinationReservationLimit" {
@@ -195,7 +195,7 @@ func TestPreparationProtectsMoveBeforeAnyPlanOrVolumeEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.move(t, 0)
-	if err = f.reconciler.reconcilePreparation(f.ctx, before); err != nil {
+	if err = f.reconciler.reconcilePersistedMove(f.ctx, before); err != nil {
 		t.Fatal(err)
 	}
 	after := f.move(t, 0)
@@ -257,7 +257,7 @@ func TestPreparationAdvisoryFilterAvoidsFullNode(t *testing.T) {
 	}
 	var placement *corev1.Pod
 	for range 6 {
-		if err = f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+		if err = f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 			t.Fatal(err)
 		}
 		placement, err = f.client.CoreV1().Pods("system").Get(f.ctx, namesFor(f.moveNames[0]).PlacementPod, metav1.GetOptions{})
@@ -285,7 +285,7 @@ func TestPreparationAdvisoryFilterAvoidsFullNode(t *testing.T) {
 	if _, err = f.client.CoreV1().Pods("system").Update(f.ctx, placement, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err = f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+	if err = f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 		t.Fatal(err)
 	}
 	move := f.move(t, 0)

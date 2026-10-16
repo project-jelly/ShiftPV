@@ -317,7 +317,7 @@ func TestDiscoveryWaitsForDestinationRecoveryJournalAfterFinalCAS(t *testing.T) 
 	if len(repo.moves) != 1 {
 		t.Fatal("new transaction discovered before recovery terminal journal")
 	}
-	if err := r.reconcileRecovery(context.Background(), repo.moves[0]); err != nil {
+	if err := r.reconcilePersistedMove(context.Background(), repo.moves[0]); err != nil {
 		t.Fatal(err)
 	}
 	if repo.moves[0].Status.RecoveryPhase != recoveryRecovered {
@@ -457,7 +457,7 @@ func TestRecoveryRollbackPreservesAmbiguousArtifactsForReview(t *testing.T) {
 				repo.pools[1].Status.Inventory.Copies = []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: true}}
 			}
 			move := repo.moves[0]
-			err := r.reconcileRecovery(context.Background(), move)
+			err := r.reconcilePersistedMove(context.Background(), move)
 			if !errors.Is(err, errRecoveryCleanupNeedsReview) || repo.moves[0].Status.RecoveryReason != "CleanupNeedsReview" {
 				t.Fatalf("ambiguous artifact was not sent to review: status=%+v err=%v", repo.moves[0].Status, err)
 			}
@@ -481,7 +481,7 @@ func TestPostcommitRecoveryWaitsForActualDestinationPublicationBeforeSourceClean
 	state.PublishedNodes = nil
 	repo.volumes[move.Spec.VolumeID] = state
 
-	if err := r.reconcileRecovery(context.Background(), move); err == nil {
+	if err := r.reconcilePersistedMove(context.Background(), move); err == nil {
 		t.Fatal("source cleanup started before destination publication")
 	}
 	if !repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason == recoveryCapacitySettled {
@@ -502,14 +502,14 @@ func TestPostcommitRecoveryWaitsForActualDestinationPublicationBeforeSourceClean
 			Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: false}},
 		}},
 	}}
-	if err := r.reconcileRecovery(context.Background(), move); err == nil {
+	if err := r.reconcilePersistedMove(context.Background(), move); err == nil {
 		t.Fatal("source cleanup started before destination scanner publication proof")
 	}
 	if !repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason == recoveryCapacitySettled {
 		t.Fatalf("unproven destination released source hold: %+v", repo.moves[0].Status)
 	}
 	repo.readyPools[0].Status.Inventory.Copies[0].Published = true
-	if err := r.reconcileRecovery(context.Background(), move); err != nil {
+	if err := r.reconcilePersistedMove(context.Background(), move); err != nil {
 		t.Fatal(err)
 	}
 	if repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason != recoveryCapacitySettled {
@@ -545,7 +545,7 @@ func TestPostcommitScannerPublicationWaitCarriesNoNilCause(t *testing.T) {
 		}},
 	}}
 
-	err := r.reconcileRecovery(context.Background(), repo.moves[0])
+	err := r.reconcilePersistedMove(context.Background(), repo.moves[0])
 	if err == nil {
 		t.Fatal("source cleanup started before destination scanner publication proof")
 	}

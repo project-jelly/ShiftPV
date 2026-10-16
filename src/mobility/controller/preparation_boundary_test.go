@@ -21,7 +21,7 @@ func TestPreparationFiveGiAdmitsTwoOfFourConsumersWithoutEviction(t *testing.T) 
 			move := f.move(t, index)
 			// Freeze at the durable hold, as the Kind admission policy does.
 			if move.Status.Preparation == nil {
-				if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 					t.Fatalf("cycle %d consumer %d: %v", cycle, index, err)
 				}
 			}
@@ -50,7 +50,7 @@ func TestPreparationFiveGiAdmitsTwoOfFourConsumersWithoutEviction(t *testing.T) 
 	// serving. One pass can persist StartingDisruption but cannot evict yet.
 	f.reconciler = newTestReconciler(f.client, f.registry)
 	for index := range f.moveNames {
-		if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, index)); err != nil {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, index)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -78,7 +78,7 @@ func TestPreparationWriteResponseLossStopsBeforeFurtherEffects(t *testing.T) {
 				return nil
 			}
 			for range 20 {
-				err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0))
+				err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0))
 				if fired {
 					if !errors.Is(err, lost) {
 						t.Fatalf("lost result not returned: %v", err)
@@ -104,7 +104,7 @@ func TestPreparationWriteResponseLossStopsBeforeFurtherEffects(t *testing.T) {
 				assertPreparationOriginals(t, f)
 				assertPreparationReserved(t, f, preparationRequestedBytes)
 			} else {
-				if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 				if f.state(t, 0).Phase != volumeapi.PhaseMoving || f.move(t, 0).Status.Phase != "WaitingForUnpublish" {
@@ -188,7 +188,7 @@ func TestPreparationChangedAuthorityCannotEvictOriginal(t *testing.T) {
 			}
 			// Refusal may be a retry, cancellation or identity error; none grants
 			// disruption from the stale preparation snapshot.
-			_ = f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0))
+			_ = f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0))
 			assertNoEviction(t, f.client)
 			if f.state(t, 0).Phase != volumeapi.PhaseReady || f.move(t, 0).Status.Phase == "StartingDisruption" {
 				t.Fatalf("%s authorized disruption", change)

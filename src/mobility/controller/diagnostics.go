@@ -121,38 +121,31 @@ func mobilityMessage(phase fsm.Phase, reason string) string {
 	if reason != "" {
 		return "automatic retry; " + waitReasonMessage(reason)
 	}
-	switch phase {
-	case fsm.PhasePending:
-		return "automatic retry; evaluating mobility preconditions"
-	case fsm.PhaseLocking:
-		return "automatic retry; acquiring the volume mobility lock"
-	case fsm.PhaseEvicting:
-		return "automatic retry; requesting consumer eviction without bypassing its disruption budget"
-	case fsm.PhaseWaitingForUnpublish:
-		return "automatic retry; waiting for the source node to report the volume unpublished"
-	case fsm.PhaseWaitingForReplacement:
-		return "automatic retry; waiting for the workload controller to create a replacement Pod"
-	case fsm.PhaseWaitingForDestination:
-		return "automatic retry; waiting for the scheduler to select a registered destination"
-	case fsm.PhaseCopying:
-		return "automatic retry; waiting for the destination staging copy Job"
-	case fsm.PhasePromoting:
-		return "automatic retry; waiting for destination promotion"
-	case fsm.PhaseCommitting:
-		return "automatic retry; committing the destination as authoritative owner"
-	case fsm.PhaseReleasingDestination:
-		return "automatic retry; releasing the destination reservation after owner commit"
-	case fsm.PhaseWaitingForDestinationPublish:
-		return "automatic retry; waiting for the destination node to publish the volume"
-	case fsm.PhaseCleaningSource:
-		return "automatic retry; waiting for source cleanup"
-	case fsm.PhaseCompleting:
-		return "automatic retry; finalizing confirmed cleanup and releasing the move lock"
-	case fsm.PhaseSucceeded:
-		return "mobility completed; no operator action is required"
-	default:
-		return "automatic retry; reconciling mobility state"
+	if message, exists := mobilityMessages[phase]; exists {
+		return message
 	}
+	return "automatic retry; reconciling mobility state"
+}
+
+var mobilityMessages = map[fsm.Phase]string{
+	fsm.PhasePending:                      "automatic retry; evaluating mobility preconditions",
+	fsm.PhasePreparing:                    "automatic retry; reserving a destination while the source remains publishable",
+	fsm.PhaseStartingDisruption:           "automatic retry; starting disruption from the durable preparation intent",
+	fsm.PhaseCanceling:                    "cancelling preparation before destination execution approval",
+	fsm.PhaseCancelled:                    "preparation cancelled; source authority preserved",
+	fsm.PhaseLocking:                      "automatic retry; acquiring the volume mobility lock",
+	fsm.PhaseEvicting:                     "automatic retry; requesting consumer eviction without bypassing its disruption budget",
+	fsm.PhaseWaitingForUnpublish:          "automatic retry; waiting for the source node to report the volume unpublished",
+	fsm.PhaseWaitingForReplacement:        "automatic retry; waiting for the workload controller to create a replacement Pod",
+	fsm.PhaseWaitingForDestination:        "automatic retry; waiting for the scheduler to select a registered destination",
+	fsm.PhaseCopying:                      "automatic retry; waiting for the destination staging copy Job",
+	fsm.PhasePromoting:                    "automatic retry; waiting for destination promotion",
+	fsm.PhaseCommitting:                   "automatic retry; committing the destination as authoritative owner",
+	fsm.PhaseReleasingDestination:         "automatic retry; releasing the destination reservation after owner commit",
+	fsm.PhaseWaitingForDestinationPublish: "automatic retry; waiting for the destination node to publish the volume",
+	fsm.PhaseCleaningSource:               "automatic retry; waiting for source cleanup",
+	fsm.PhaseCompleting:                   "automatic retry; finalizing confirmed cleanup and releasing the move lock",
+	fsm.PhaseSucceeded:                    "mobility completed; no operator action is required",
 }
 
 func waitReasonMessage(reason string) string {

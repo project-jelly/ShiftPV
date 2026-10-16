@@ -13,51 +13,52 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 const (
-	recoveryQuiescing  = "Quiescing"
-	recoveryVerifying  = "Verifying"
-	recoveryRetiring   = "Retiring"
-	recoveryResuming   = "Resuming"
-	recoveryCompleting = "Completing"
-	recoveryRecovered  = "Recovered"
+	recoveryQuiescing  = fsm.RecoveryQuiescing
+	recoveryVerifying  = fsm.RecoveryVerifying
+	recoveryRetiring   = fsm.RecoveryRetiring
+	recoveryResuming   = fsm.RecoveryResuming
+	recoveryCompleting = fsm.RecoveryCompleting
+	recoveryRecovered  = fsm.RecoveryRecovered
 )
 
-// Recovery never changes owner. Its journal is separate from the failed Move FSM.
-func (r *Reconciler) reconcileRecovery(ctx context.Context, move volumeapi.Move) error {
+// Recovery keeps the failed Move phase and the current authoritative owner.
+// Only Decide selects recovery progression; these reads grant no new owner.
+func (r *Reconciler) observeRecovery(ctx context.Context, move volumeapi.Move) (observation, error) {
+	result := observation{Names: namesFor(move.Name)}
 	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
 	if err != nil {
-		return r.recoveryError(ctx, move, "ObservationFailed", err)
+		return result, err
 	}
-	// The final CAS may have succeeded immediately before a controller restart.
+	result.Volume = state
 	if move.Status.RecoveryPhase == recoveryCompleting && state.Phase == volumeapi.PhaseReady && state.ActiveMove == "" && state.OwnerNode == move.Status.RecoveryOwner {
-		return r.recoveryAdvance(ctx, move, recoveryRecovered)
+		result.FSM.RecoveryUnlockObserved = true
+		return result, nil
 	}
-	if reason, guardErr := recoveryGuards(move, state); guardErr != nil {
-		return r.recoveryError(ctx, move, reason, guardErr)
+	if reason, err := recoveryGuards(move, state); err != nil {
+		return result, recoveryObservationError{reason, err}
 	}
 	if err := r.recoveryNodes(ctx, move, state); err != nil {
-		return r.recoveryError(ctx, move, "NodeNotReady", err)
+		return result, recoveryObservationError{"NodeNotReady", err}
 	}
 	claim, err := r.recoveryClaim(ctx, move)
 	if err != nil {
-		return r.recoveryError(ctx, move, "BindingMismatch", err)
+		return result, recoveryObservationError{"BindingMismatch", err}
 	}
-	if move.Status.RecoveryPhase == "" {
-		move.Status.RecoveryOwner = state.OwnerNode
-		return r.recoveryAdvance(ctx, move, recoveryQuiescing)
-	}
-	err = r.recoveryStep(ctx, move, state, claim)
-	if err != nil {
-		if errors.Is(err, errRecoveryCleanupNeedsReview) {
-			return r.recoveryError(ctx, move, "CleanupNeedsReview", err)
-		}
-		return r.recoveryError(ctx, move, "RecoveryStepFailed", err)
-	}
-	return nil
+	result.Claim = claim
+	return result, nil
 }
+
+type recoveryObservationError struct {
+	reason string
+	error
+}
+
+func (e recoveryObservationError) Unwrap() error { return e.error }
 
 // recoveryGuards holds the invariants that must still be true before any
 // recovery step runs. It returns the exact status reason and error the caller
@@ -84,83 +85,45 @@ func recoveryGuards(move volumeapi.Move, state volumeapi.State) (string, error) 
 	return "", nil
 }
 
-func (r *Reconciler) recoveryStep(ctx context.Context, move volumeapi.Move, state volumeapi.State, claim *corev1.PersistentVolumeClaim) error {
-	switch move.Status.RecoveryPhase {
-	case recoveryQuiescing:
-		return r.recoveryQuiesceStep(ctx, move)
-	case recoveryVerifying:
-		return r.recoveryVerifyStep(ctx, move, state)
-	case recoveryRetiring:
-		return r.recoveryRetireStep(ctx, move, state)
-	case recoveryResuming:
-		return r.recoveryResumeStep(ctx, move, state, claim)
-	case recoveryCompleting:
-		return r.recoveryCompleteStep(ctx, move, state)
+func (r *Reconciler) executeRecovery(ctx context.Context, move *volumeapi.Move, observed observation, action fsm.Action) (bool, error) {
+	switch action {
+	case fsm.ActionBeginRecovery:
+		move.Status.RecoveryOwner = observed.Volume.OwnerNode
+		return true, nil
+	case fsm.ActionQuiesceRecovery:
+		return r.quiesceMove(ctx, *move)
+	case fsm.ActionVerifyRecovery:
+		return r.recoveryJob(ctx, *move)
+	case fsm.ActionRetireRecovery:
+		return r.settleRecoveryArtifacts(ctx, move, observed.Volume)
+	case fsm.ActionResumeRecovery:
+		return r.resumeRecovery(ctx, *move, observed.Volume, observed.Claim)
+	case fsm.ActionCompleteRecovery:
+		return r.completeRecovery(ctx, *move, observed.Volume)
 	default:
-		return fmt.Errorf("unknown recovery phase %q", move.Status.RecoveryPhase)
+		return false, fmt.Errorf("unsupported recovery action %q", action)
 	}
 }
 
-func (r *Reconciler) recoveryQuiesceStep(ctx context.Context, move volumeapi.Move) error {
-	done, err := r.quiesceMove(ctx, move)
-	if err != nil || !done {
-		return err
-	}
-	return r.recoveryAdvance(ctx, move, recoveryVerifying)
-}
-
-func (r *Reconciler) recoveryVerifyStep(ctx context.Context, move volumeapi.Move, state volumeapi.State) error {
-	done, err := r.recoveryJob(ctx, move)
-	if err != nil || !done {
-		return err
-	}
-	if state.OwnerNode == move.Status.DestinationNode {
-		// Postcommit recovery must restore the committed destination and
-		// observe its actual publication before retiring the old source.
-		return r.recoveryAdvance(ctx, move, recoveryResuming)
-	}
-	return r.recoveryAdvance(ctx, move, recoveryRetiring)
-}
-
-func (r *Reconciler) recoveryRetireStep(ctx context.Context, move volumeapi.Move, state volumeapi.State) error {
-	done, err := r.settleRecoveryArtifacts(ctx, &move, state)
-	if err != nil || !done {
-		return err
-	}
-	if state.OwnerNode == move.Spec.SourceNode {
-		return r.recoveryAdvance(ctx, move, recoveryResuming)
-	}
-	return r.recoveryAdvance(ctx, move, recoveryCompleting)
-}
-
-func (r *Reconciler) recoveryResumeStep(ctx context.Context, move volumeapi.Move, state volumeapi.State, claim *corev1.PersistentVolumeClaim) error {
+func (r *Reconciler) resumeRecovery(ctx context.Context, move volumeapi.Move, state volumeapi.State, claim *corev1.PersistentVolumeClaim) (bool, error) {
 	if state.Phase == volumeapi.PhaseBlocked {
-		// Keep the lock until the workload has published on the same owner.
 		next := state
 		next.Phase = volumeapi.PhaseReady
-		return r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseBlocked, move.Name, state.OwnerNode, next)
+		return false, r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseBlocked, move.Name, state.OwnerNode, next)
 	}
 	placed, err := r.recoverPlacement(ctx, move, claim)
-	if err != nil || !placed || !slices.Contains(state.PublishedNodes, state.OwnerNode) {
-		return err
-	}
-	if state.OwnerNode == move.Status.DestinationNode {
-		return r.recoveryAdvance(ctx, move, recoveryRetiring)
-	}
-	return r.recoveryAdvance(ctx, move, recoveryCompleting)
+	return placed && slices.Contains(state.PublishedNodes, state.OwnerNode), err
 }
 
-func (r *Reconciler) recoveryCompleteStep(ctx context.Context, move volumeapi.Move, state volumeapi.State) error {
+func (r *Reconciler) completeRecovery(ctx context.Context, move volumeapi.Move, state volumeapi.State) (bool, error) {
 	done, err := r.removeRecoveryJobs(ctx, move)
 	if err != nil || !done {
-		return err
+		return false, err
 	}
 	next := state
 	next.ActiveMove = ""
-	if err := r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseReady, move.Name, state.OwnerNode, next); err != nil {
-		return err
-	}
-	return r.recoveryAdvance(ctx, move, recoveryRecovered)
+	err = r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseReady, move.Name, state.OwnerNode, next)
+	return err == nil, err
 }
 
 func (r *Reconciler) recoveryNodes(ctx context.Context, move volumeapi.Move, state volumeapi.State) error {
@@ -252,15 +215,6 @@ func (r *Reconciler) recoverPlacement(ctx context.Context, move volumeapi.Move, 
 		return false, err
 	}
 	return placed, nil
-}
-
-func (r *Reconciler) recoveryAdvance(ctx context.Context, move volumeapi.Move, phase string) error {
-	previous := move.Status
-	move.Status.RecoveryPhase = phase
-	move.Status.RecoveryReason = ""
-	move.Status.RecoveryMessage = ""
-	move.Status.Message = recoveryPhaseMessage(phase, move.Status.RecoveryOwner)
-	return r.persistMoveStatus(ctx, &move, previous)
 }
 
 func (r *Reconciler) recoveryError(ctx context.Context, move volumeapi.Move, reason string, err error) error {

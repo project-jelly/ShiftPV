@@ -5,13 +5,9 @@ package fsm
 // helper starts where its old `case` arm started, with every guard kept in the
 // order it was evaluated before.
 
-// lifecycleGuard settles the phases whose decision does not depend on the
-// source or the destination at all: the terminal phases park, and Completing
-// answers only to durable completion evidence.
+// lifecycleGuard makes Completing answer only to durable completion evidence.
+// Terminal history and recovery have already been routed by decideLifecycle.
 func lifecycleGuard(current Phase, observation Observation) (Decision, bool, error) {
-	if terminal(current) {
-		return Decision{Next: current, Action: ActionWait}, true, nil
-	}
 	if current == PhaseCompleting {
 		if observation.CompletionReady {
 			decision, err := transition(current, PhaseSucceeded, ActionMarkSucceeded, "")
@@ -110,6 +106,11 @@ func decideWaitingForDestination(current Phase, observation Observation) (Decisi
 	}
 	if observation.DestinationUnavailable {
 		return transition(current, PhaseWaitingForCapacity, ActionWait, "DestinationUnavailable")
+	}
+	if observation.Prepared {
+		// The approval CAS consumes an already observed WaitingForCapacity
+		// reservation. Merely entering the phase cannot authorize disk work.
+		return transition(current, PhaseWaitingForCapacity, ActionWait, "")
 	}
 	return transition(current, PhaseWaitingForCapacity, ActionEnsureCapacity, "")
 }

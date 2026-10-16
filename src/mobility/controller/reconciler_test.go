@@ -848,7 +848,7 @@ func TestObserveAllowsOnlyActiveMoveToRepairDestinationCrashWindow(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			decision, err := fsm.Decide(fsm.Phase(test.phase), observed.FSM)
+			decision, err := fsm.Decide(fsm.State{Phase: fsm.Phase(test.phase)}, observed.FSM)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -932,7 +932,7 @@ func TestObserveBlocksApprovedDestinationAfterPoolRecreation(t *testing.T) {
 	if !observed.FSM.DestinationBlocked || observed.FSM.UnsafeReason != "DestinationPoolIdentityChanged" {
 		t.Fatalf("destination observation = %#v", observed.FSM)
 	}
-	decision, err := fsm.Decide(fsm.PhaseCopying, observed.FSM)
+	decision, err := fsm.Decide(fsm.State{Phase: fsm.PhaseCopying}, observed.FSM)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -978,11 +978,11 @@ func TestObserveKeepsTerminatingPlacementReservedUntilNotFound(t *testing.T) {
 	if !observed.FSM.PlacementExists || observed.FSM.DestinationScheduled {
 		t.Fatalf("terminating placement observation = %#v", observed.FSM)
 	}
-	decision, err := fsm.Decide(fsm.PhaseReleasingDestination, observed.FSM)
+	decision, err := fsm.Decide(fsm.State{Phase: fsm.PhaseReleasingDestination}, observed.FSM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Action != fsm.ActionDeletePlacement || decision.Next != fsm.PhaseReleasingDestination {
+	if decision.Action != fsm.ActionDeletePlacement || decision.Next.Phase != fsm.PhaseReleasingDestination {
 		t.Fatalf("terminating placement released workload: %#v", decision)
 	}
 }
