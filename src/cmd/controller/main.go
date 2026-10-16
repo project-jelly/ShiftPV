@@ -162,7 +162,7 @@ func main() {
 	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
-	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Fallback: csiOperator, Timeout: cfg.helperWait}
+	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Inspector: &helperpod.Inspector{Client: effectClients.Typed, Namespace: cfg.namespace}, Timeout: cfg.helperWait}
 	var mobilityRPC remotemeasurement.RPC
 	if cfg.nodeRPCTokenFile != "" {
 		// The outer RPC probe observes the complete call, including API fallback.

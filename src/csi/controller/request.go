@@ -21,10 +21,29 @@ func compatibleCreateRequest(existing volumeapi.State, request createRequest) er
 		(request.capacityRange.GetLimitBytes() > 0 && existing.CapacityBytes > request.capacityRange.GetLimitBytes()) {
 		return status.Errorf(codes.AlreadyExists, "volume %q already exists outside the requested capacity range", request.name)
 	}
-	if !creationNodeAllowed(existing.InitialNode, request.topology) {
+	allowed := creationNodeAllowed(existing.InitialNode, request.topology)
+	if existing.Phase == volumeapi.PhaseReady {
+		allowed = readyNodeAllowed(existing.OwnerNode, request.topology)
+	}
+	if !allowed {
 		return status.Errorf(codes.AlreadyExists, "volume %q already exists outside the requested topology", request.name)
 	}
 	return nil
+}
+
+// Ready replay observes where the volume is currently served. Preferred is
+// advisory; an explicit Requisite must still include that current owner.
+func readyNodeAllowed(node string, requirements *csi.TopologyRequirement) bool {
+	if len(requirements.GetRequisite()) == 0 {
+		return true
+	}
+	for _, topology := range requirements.GetRequisite() {
+		segments := topology.GetSegments()
+		if len(segments) == 1 && segments[TopologyKey] == node {
+			return true
+		}
+	}
+	return false
 }
 
 func creationNodeAllowed(node string, requirements *csi.TopologyRequirement) bool {

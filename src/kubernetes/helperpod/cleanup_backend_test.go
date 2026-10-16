@@ -57,7 +57,7 @@ func TestCleanupRunnerPreservesNodeWinner(t *testing.T) {
 				}
 				return true, job, nil
 			})
-			journal := cleanupBackendJournal{CleanupJournal: store}
+			journal := cleanupBackendJournal{Journal: store}
 			if boundary == "before Job binding" {
 				journal.write = func(ctx context.Context, expected cleanupapi.Cleanup, next cleanupapi.Status) error {
 					if err := bindNode(); err != nil {
@@ -114,7 +114,7 @@ func TestCleanupRunnerPreservesJobWinner(t *testing.T) {
 	})
 	writeReceiptOnFirstJobGet(client, store, stale)
 	var nodeBindErr error
-	journal := cleanupBackendJournal{CleanupJournal: store, write: func(ctx context.Context, expected cleanupapi.Cleanup, next cleanupapi.Status) error {
+	journal := cleanupBackendJournal{Journal: store, write: func(ctx context.Context, expected cleanupapi.Cleanup, next cleanupapi.Status) error {
 		if err := store.UpdateStatus(ctx, expected, next); err != nil {
 			return err
 		}
@@ -134,7 +134,7 @@ func TestCleanupRunnerPreservesJobWinner(t *testing.T) {
 }
 
 type cleanupBackendJournal struct {
-	CleanupJournal
+	cleanupapi.Journal
 	write func(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error
 }
 
@@ -142,7 +142,7 @@ func (j cleanupBackendJournal) UpdateStatus(ctx context.Context, expected cleanu
 	if j.write != nil {
 		return j.write(ctx, expected, next)
 	}
-	return j.CleanupJournal.UpdateStatus(ctx, expected, next)
+	return j.Journal.UpdateStatus(ctx, expected, next)
 }
 
 func moveCleanupBackendFixture(t *testing.T) (*cleanupapi.Store, cleanupapi.Cleanup) {

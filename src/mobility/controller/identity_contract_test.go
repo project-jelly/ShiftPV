@@ -14,7 +14,6 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -280,7 +279,12 @@ func TestMoveHelperContainersOmitPoolReadinessBudget(t *testing.T) {
 
 type receiptCleanupOperator struct{}
 
-func (receiptCleanupOperator) AdvanceReclaim(ctx context.Context, request cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+func (receiptCleanupOperator) ObserveCompletedCleanup(_ context.Context, current cleanupapi.Cleanup) (bool, error) {
+	err := cleanupapi.ValidateSettled(current)
+	return err == nil, err
+}
+
+func (receiptCleanupOperator) AdvanceReclaim(ctx context.Context, request cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
 	if request.Status.Phase == cleanupapi.PhaseVerifying || request.Status.Phase == cleanupapi.PhaseConfirmingAbsence || request.Status.Phase == cleanupapi.PhaseCompleted {
 		return request, true, nil
 	}

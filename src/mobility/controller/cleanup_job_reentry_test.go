@@ -15,9 +15,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestMoveCleanupReentryWaitsForLegacyExecutorSettlement(t *testing.T) {
+func TestMoveCleanupReentryRequiresLegacyWriterSettlement(t *testing.T) {
 	for _, phase := range []string{cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence} {
 		for _, settlement := range []string{"Job complete", "Job absent but Pod remains"} {
 			t.Run(phase+"/"+settlement, func(t *testing.T) {
@@ -33,7 +34,7 @@ func TestMoveCleanupReentryWaitsForLegacyExecutorSettlement(t *testing.T) {
 				prepareLegacyCleanupPool(t, r.Cleanups, spec.Target.PoolName)
 				registry := &volumeapi.Registry{Client: r.Cleanups.Client}
 				helper := &helperpod.Runner{Client: kube, Namespace: "system", Pools: registry, Image: "helper", Timeout: 10 * time.Millisecond}
-				operator := &nodeexecutor.Client{Volumes: registry, Fallback: helper, Timeout: helper.Timeout}
+				operator := &nodeexecutor.Client{Volumes: registry, Inspector: &helperpod.Inspector{Client: helper.Client, Namespace: helper.Namespace}, Timeout: helper.Timeout}
 				current, err := r.Cleanups.Ensure(ctx, spec)
 				if err != nil {
 					t.Fatal(err)
@@ -80,8 +81,8 @@ func TestMoveCleanupReentryWaitsForLegacyExecutorSettlement(t *testing.T) {
 				}
 				assertHeld := func() {
 					t.Helper()
-					if err := reconcile(); err != nil {
-						t.Fatalf("live executor did not return normal pending: %v", err)
+					if err := reconcile(); !errors.Is(err, nodeexecutor.ErrLegacyExecution) {
+						t.Fatalf("unsettled legacy journal was not reported: %v", err)
 					}
 					current, err := r.Cleanups.Get(ctx, spec.Authority)
 					if err != nil || !reflect.DeepEqual(current, before) {
@@ -92,7 +93,7 @@ func TestMoveCleanupReentryWaitsForLegacyExecutorSettlement(t *testing.T) {
 						t.Fatal(err)
 					}
 					epoch, _, _ := unstructured.NestedInt64(pool.Object, "spec", "scanEpoch")
-					if epoch != cleanupObservationEpoch(phase) || !reflect.DeepEqual(repository.moves[0].Status, moveBefore) ||
+					if epoch != cleanupObservationEpoch(phase) || !sameMoveAuthority(moveBefore, repository.moves[0].Status) ||
 						!repository.moves[0].Status.CapacityApproved || repository.volumes[move.Spec.VolumeID].ActiveMove != move.Name {
 						t.Fatalf("executor wait released hold/lock or requested scan: epoch=%d move=%+v error=%v", epoch, repository.moves[0], err)
 					}
@@ -117,18 +118,26 @@ func TestMoveCleanupReentryWaitsForLegacyExecutorSettlement(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				// A finished Job is insufficient: only the compatible writer may
+				// settle the old journal and its independent absence fence.
+				assertHeld()
+				settleLegacyCleanupFixture(t, r, kube, spec)
+				settledHistory := listedJournal(t, r, move)
 				if err := reconcile(); err != nil {
 					t.Fatal(err)
 				}
 				current, err = r.Cleanups.Get(ctx, spec.Authority)
-				if err != nil || current.Status.Phase != cleanupapi.PhaseCompleted || current.Status.AbsenceProof == nil {
-					t.Fatalf("settled executor did not open and confirm fresh absence: %+v %v", current, err)
+				if err != nil || current.Status.Phase != cleanupapi.PhaseCompleted || current.Status.AbsenceProof == nil || !reflect.DeepEqual(current, settledHistory) {
+					t.Fatalf("candidate did not preserve independently settled history: %+v %v", current, err)
+				}
+				if repository.moves[0].Status.Phase != "Completing" || repository.volumes[move.Spec.VolumeID].ActiveMove != move.Name {
+					t.Fatalf("cleanup observation skipped the separate completion boundary: move=%+v volume=%+v", repository.moves[0], repository.volumes[move.Spec.VolumeID])
 				}
 				if err := reconcile(); err != nil {
 					t.Fatal(err)
 				}
-				if repository.moves[0].Status.Phase != "Completing" {
-					t.Fatalf("settled cleanup did not permit completion: %+v", repository.moves[0])
+				if repository.moves[0].Status.Phase != "Succeeded" || repository.volumes[move.Spec.VolumeID].ActiveMove != "" {
+					t.Fatalf("completion did not settle source authority: move=%+v volume=%+v", repository.moves[0], repository.volumes[move.Spec.VolumeID])
 				}
 			})
 		}
@@ -182,4 +191,36 @@ func prepareLegacyCleanupPool(t *testing.T, store *cleanupapi.Store, name string
 	if _, err := store.Client.Resource(volumeapi.PoolResource).UpdateStatus(context.Background(), pool, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Settle the old execution before the candidate is permitted to consume history.
+func settleLegacyCleanupFixture(t *testing.T, r *Reconciler, kube *fake.Clientset, spec cleanupapi.Spec) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := r.Cleanups.Get(ctx, spec.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := &helperpod.Runner{Client: kube, Namespace: "system", Pools: &volumeapi.Registry{Client: r.Cleanups.Client}, Image: "helper", Timeout: time.Second}
+	if _, ready, err := helper.AdvanceReclaim(ctx, current, r.Cleanups); err != nil || !ready {
+		t.Fatalf("compatible writer settlement: ready=%v err=%v", ready, err)
+	}
+	if err := r.driveCleanupAbsence(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	current, err = r.Cleanups.Get(ctx, spec.Authority)
+	if err != nil || cleanupapi.ValidateSettled(current) != nil {
+		t.Fatalf("legacy writer did not close journal: %+v %v", current, err)
+	}
+}
+
+// Diagnostics may report the compatibility blocker; execution authority may not change.
+func sameMoveAuthority(before, after volumeapi.MoveStatus) bool {
+	after.Reason = before.Reason
+	after.Message = before.Message
+	after.LastTransitionTime = before.LastTransitionTime
+	after.LastProgressTime = before.LastProgressTime
+	after.RecoveryReason = before.RecoveryReason
+	after.RecoveryMessage = before.RecoveryMessage
+	return reflect.DeepEqual(before, after)
 }

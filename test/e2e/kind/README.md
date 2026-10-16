@@ -48,7 +48,7 @@ fixture cleanup. One successful Move or checksum is not sufficient.
 POOL_CAPACITY_ONLY=1 CLUSTER_NAME=shiftpv-capacity-focused ./test/e2e/kind/run.sh
 DIRECTORY_POOL_ONLY=1 CLUSTER_NAME=shiftpv-directory-focused ./test/e2e/kind/run.sh
 VOLUME_DELETE_CLEANUP_ONLY=1 CLUSTER_NAME=shiftpv-delete-focused ./test/e2e/kind/run.sh
-CLEANUP_JOB_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
+CLEANUP_EXECUTOR_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
 MOBILITY_FILESYSTEM_FAULTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-fs-focused ./test/e2e/kind/run.sh
 MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./test/e2e/kind/run.sh
 MOBILITY_NODE_RESTARTS_ONLY=1 MOBILITY_NODE_RESTART_CASE=source,destination \

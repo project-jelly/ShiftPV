@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ import (
 	ktesting "k8s.io/client-go/testing"
 )
 
-func TestDeleteReentryRequiresJobSettlementBeforeConsumingAbsence(t *testing.T) {
+func TestDeleteReentryRequiresCompatibleWriterBeforeConsumingLegacyHistory(t *testing.T) {
 	for _, phase := range []string{cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence} {
 		for _, executor := range []string{"running Job", "absent Job with owned Pod", "absent Job with relabeled owned Pod", "absent Job with orphaned receipt Pod"} {
 			t.Run(phase+"/"+executor, func(t *testing.T) {
@@ -85,6 +86,12 @@ func TestDeleteReentryRequiresJobSettlementBeforeConsumingAbsence(t *testing.T) 
 				} else if err := kube.CoreV1().Pods(service.Namespace).Delete(ctx, "residual-cleanup", metav1.DeleteOptions{}); err != nil {
 					t.Fatal(err)
 				}
+				// Process completion alone cannot authorize this candidate to
+				// advance the old journal. The compatible writer closes it first.
+				if _, err := service.DeleteVolume(ctx, request); status.Code(err) != codes.Unavailable {
+					t.Fatalf("candidate adopted unsettled legacy journal: %v", err)
+				}
+				journal = settleDeleteLegacyHistory(t, service, kube, journal)
 				kube.ClearActions()
 				// This method is the real deletion settlement path; retain the
 				// parent briefly so the completed proof can be inspected.
@@ -111,6 +118,104 @@ func TestDeleteReentryRequiresJobSettlementBeforeConsumingAbsence(t *testing.T) 
 				}
 				assertNoDeleteJobWrites(t, kube)
 			})
+		}
+	}
+}
+
+func TestCompletedLegacyDeleteKeepsParentWhileReceiptPodRemains(t *testing.T) {
+	for _, missingJob := range []bool{false, true} {
+		name := "completed Job with live receipt Pod"
+		if missingJob {
+			name = "absent Job with live receipt Pod"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			service, kube, journal, job := newDeleteJobReceiptFixture(t)
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			if _, err := kube.BatchV1().Jobs(service.Namespace).UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			journal = settleDeleteLegacyHistory(t, service, kube, journal)
+			// Completed evidence alone cannot rule out an executor still alive
+			// after a legacy writer's observation. Even a relabelled orphan is
+			// found by the exact receipt-writing Pod UID recorded in the journal.
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "late-receipt-pod", Namespace: service.Namespace, UID: types.UID(journal.Status.Executor.PodUID)}, Spec: corev1.PodSpec{NodeName: journal.Spec.Target.NodeName, Containers: []corev1.Container{{Name: "helper", Image: "helper"}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+			if _, err := kube.CoreV1().Pods(service.Namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if missingJob {
+				if err := kube.BatchV1().Jobs(service.Namespace).Delete(ctx, job.Name, metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforePool := deleteJobPool(t, service, journal)
+			api := service.Cleanups.Client.(*dynamicfake.FakeDynamicClient)
+			kube.ClearActions()
+			api.ClearActions()
+			request := &csi.DeleteVolumeRequest{VolumeId: journal.Spec.Target.VolumeID}
+			if _, err := service.DeleteVolume(ctx, request); status.Code(err) != codes.Unavailable {
+				t.Fatalf("live legacy executor released completed parent: %v", err)
+			}
+			state, err := service.Volumes.Get(ctx, request.VolumeId)
+			if err != nil || state.UID != journal.Spec.Target.VolumeUID || state.Phase != volumeapi.PhaseDeleting || state.CapacityBytes != 64<<20 || !slices.Contains(state.Finalizers, volumeapi.VolumeProtectionFinalizer) {
+				t.Fatalf("live executor lost parent/hold/protection: %+v %v", state, err)
+			}
+			current, err := service.Cleanups.Get(ctx, journal.Spec.Authority)
+			if err != nil || !reflect.DeepEqual(current, journal) {
+				t.Fatalf("candidate changed completed legacy proof: before=%+v after=%+v err=%v", journal, current, err)
+			}
+			if !reflect.DeepEqual(beforePool, deleteJobPool(t, service, journal)) {
+				t.Fatal("live executor observation opened another absence fence")
+			}
+			for _, action := range api.Actions() {
+				if action.GetVerb() == "delete" {
+					t.Fatalf("live executor allowed parent delete: %#v", action)
+				}
+			}
+			assertNoExecutorWrites(t, kube)
+			if err := kube.CoreV1().Pods(service.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &pod.UID}}); err != nil {
+				t.Fatal(err)
+			}
+			kube.ClearActions()
+			if _, err := service.DeleteVolume(ctx, request); err != nil {
+				t.Fatalf("exact executor absence did not permit settled parent removal: %v", err)
+			}
+			if _, err := service.Volumes.Get(ctx, request.VolumeId); !apierrors.IsNotFound(err) {
+				t.Fatalf("settled parent remained: %v", err)
+			}
+			if !reflect.DeepEqual(beforePool, deleteJobPool(t, service, journal)) {
+				t.Fatal("completed history requested a new absence fence")
+			}
+			assertNoExecutorWrites(t, kube)
+		})
+	}
+}
+
+func settleDeleteLegacyHistory(t *testing.T, service *Service, kube *fake.Clientset, journal cleanupapi.Cleanup) cleanupapi.Cleanup {
+	t.Helper()
+	ctx := context.Background()
+	oldWriter := &helperpod.Runner{Client: kube, Namespace: service.Namespace, Pools: service.Volumes.(*volumeapi.Registry), Image: "helper", Timeout: time.Second}
+	if _, err := oldWriter.Reclaim(ctx, journal, service.Cleanups); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		var err error
+		journal, _, err = service.Cleanups.ReconcileAbsence(ctx, journal)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cleanupapi.ValidateSettled(journal); err != nil {
+		t.Fatal(err)
+	}
+	return journal
+}
+
+func assertNoExecutorWrites(t *testing.T, kube *fake.Clientset) {
+	t.Helper()
+	for _, action := range kube.Actions() {
+		if action.GetVerb() != "get" && action.GetVerb() != "list" {
+			t.Fatalf("candidate mutated legacy executor: %#v", action)
 		}
 	}
 }
@@ -152,7 +257,7 @@ func newDeleteJobReceiptFixture(t *testing.T) (*Service, *fake.Clientset, cleanu
 	registry := &volumeapi.Registry{Client: api}
 	store := &cleanupapi.Store{Client: api}
 	helper := &helperpod.Runner{Client: kube, Namespace: "shiftpv-system", Pools: registry, Image: "helper", Timeout: 10 * time.Millisecond}
-	operator := &nodeexecutor.Client{Volumes: registry, Fallback: helper, Timeout: helper.Timeout}
+	operator := &nodeexecutor.Client{Volumes: registry, Inspector: &helperpod.Inspector{Client: helper.Client, Namespace: helper.Namespace}, Timeout: helper.Timeout}
 	service := &Service{Client: kube, Namespace: helper.Namespace, Operator: &fakeDirectoryOperator{}, Volumes: registry,
 		Cleanups: store, CleanupOperator: operator, CleanupAbsenceWait: time.Second}
 	state, err := registry.BeginDelete(ctx, copy.VolumeID, copy.VolumeUID, copy)

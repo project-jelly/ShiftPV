@@ -76,6 +76,17 @@ func (s *Store) Ensure(ctx context.Context, spec Spec) (Cleanup, error) {
 // Get reads status.cleanup from the exact parent identity. A terminating
 // parent remains usable while its ShiftPV protection finalizer is present.
 func (s *Store) Get(ctx context.Context, authority Authority) (Cleanup, error) {
+	return s.get(ctx, authority, true)
+}
+
+// GetHistory reads the exact parent journal without requiring a protection
+// finalizer. Historical proof can be inspected after metadata protection was
+// released; this method grants no execution or status-update authority.
+func (s *Store) GetHistory(ctx context.Context, authority Authority) (Cleanup, error) {
+	return s.get(ctx, authority, false)
+}
+
+func (s *Store) get(ctx context.Context, authority Authority, protected bool) (Cleanup, error) {
 	if err := s.validate(); err != nil {
 		return Cleanup{}, err
 	}
@@ -87,8 +98,13 @@ func (s *Store) Get(ctx context.Context, authority Authority) (Cleanup, error) {
 	if err != nil {
 		return Cleanup{}, err
 	}
-	if err := validateParent(object, authority, finalizer); err != nil {
+	if err := validateParentIdentity(object, authority); err != nil {
 		return Cleanup{}, err
+	}
+	if protected {
+		if err := validateParent(object, authority, finalizer); err != nil {
+			return Cleanup{}, err
+		}
 	}
 	cleanup, found, err := journalFromParent(object)
 	if err != nil {

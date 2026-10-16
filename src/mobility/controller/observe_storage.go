@@ -61,6 +61,23 @@ func (r *Reconciler) observeVolume(ctx context.Context, move volumeapi.Move, res
 		result.FSM.CompletionReady = completionAllowed(move, state, false)
 		return true, nil
 	}
+	// Volume blocking and Move status are separate writes. If the latter loses
+	// its CAS, re-observe the exact failed journal before source/binding checks
+	// can mask it. This diagnoses failure only; Blocked grants no Ready authority.
+	if state.Phase == volumeapi.PhaseBlocked && matchesCommittedDestinationIdentity(move, state, false) &&
+		(move.Status.Phase == string(fsm.PhaseWaitingForDestinationPublish) || move.Status.Phase == string(fsm.PhaseCleaningSource)) {
+		if r.Cleanups == nil {
+			return false, fmt.Errorf("cleanup journal store is not configured")
+		}
+		_, failed, err := r.cleanupState(ctx, move)
+		if err != nil {
+			return false, err
+		}
+		if failed {
+			result.FSM.CleanupFailed = true
+			return true, nil
+		}
+	}
 	result.FSM.OwnerCommitted = hasCommittedDestinationAuthority(move, state, false)
 	return false, nil
 }

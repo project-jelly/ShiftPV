@@ -173,7 +173,7 @@ func TestCleanupAdvanceResponseLossReusesAcceptedJobAndBinding(t *testing.T) {
 				}
 				return true, job, nil
 			})
-			journal := cleanupBackendJournal{CleanupJournal: store}
+			journal := cleanupBackendJournal{Journal: store}
 			if boundary == "binding" {
 				journal.write = func(ctx context.Context, expected cleanupapi.Cleanup, next cleanupapi.Status) error {
 					if err := store.UpdateStatus(ctx, expected, next); err != nil {

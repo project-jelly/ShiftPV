@@ -2,6 +2,76 @@
 # Shared assertions for the cleanup journal embedded in a ShiftPVVolume or
 # ShiftPVMove parent. This file is sourced by the Kind suites.
 
+# Pause one Move before a cleanup journal can authorize any Node effect.
+# The policy only denies the first journal write; it cannot create evidence.
+hold_cleanup_admission() {
+	local policy=$1 volume=$2
+	test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}" || return
+	test -z "$(kubectl get "validatingadmissionpolicy/${policy}" --ignore-not-found -o name)" || return
+	test -z "$(kubectl get "validatingadmissionpolicybinding/${policy}" --ignore-not-found -o name)" || return
+	kubectl apply -f - <<EOF
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ${policy}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [shiftpv.io]
+      apiVersions: [v1alpha1]
+      operations: [UPDATE]
+      resources: [shiftpvmoves/status]
+  validations:
+  - expression: "object.spec.volumeID != '${volume}' || !has(object.status) || !has(object.status.cleanup) || (has(oldObject.status) && has(oldObject.status.cleanup))"
+    message: cleanup admission test barrier
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ${policy}
+spec:
+  policyName: ${policy}
+  validationActions: [Deny]
+EOF
+}
+
+release_cleanup_admission() {
+	local policy=$1
+	test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}" || return
+	kubectl delete "validatingadmissionpolicybinding/${policy}" || return
+	kubectl delete "validatingadmissionpolicy/${policy}"
+}
+
+wait_for_cleanup_barrier() {
+	local move=$1 volume=$2 source=$3 parent attempt denial
+	kubectl wait "shiftpvmove/${move}" --for=jsonpath='{.status.phase}'=WaitingForDestinationPublish --timeout=300s || return
+	test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.ownerNode}')" != "${source}" || return
+	test "$(kubectl get "shiftpvvolume/${volume}" -o jsonpath='{.status.activeMove}')" = "${move}" || return
+	parent=$(kubectl get "shiftpvmove/${move}" -o json) || return
+	jq -e --arg source "${source}" '
+		.status.sourceCopy.nodeName == $source and .status.capacityApproved == true and
+		.status.cleanup == null and .status.destinationCopy != null' <<<"${parent}" >/dev/null || return
+	# A server dry-run verifies this exact intent is blocked without storing it.
+	attempt=$(jq -c '.status.cleanup = {spec:{operationID:("cleanup-" + .metadata.uid),
+		target:.status.sourceCopy, reason:"MoveSource", authority:{kind:"ShiftPVMove", name:.metadata.name, uid:.metadata.uid}},
+		status:{phase:"Pending"}}' <<<"${parent}") || return
+	if denial=$(kubectl replace --subresource=status --dry-run=server -f - <<<"${attempt}" 2>&1); then
+		echo 'cleanup admission barrier was not enforced' >&2
+		return 1
+	fi
+	grep -Fq 'cleanup admission test barrier' <<<"${denial}"
+}
+
+assert_no_cleanup_job() {
+	local move=$1 uid
+	uid=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.metadata.uid}') || return
+	test -n "${uid}" || return
+	kubectl -n shiftpv-system get jobs -o json | jq -e --arg uid "${uid}" '
+		[.items[] | select(.metadata.labels["app.kubernetes.io/component"] == "cleanup-helper") |
+		 select(any(.metadata.ownerReferences[]?; .uid == $uid))] | length == 0' >/dev/null
+}
+
 wait_for_cleanup_phase() {
 	local resource=$1 phase=$2 timeout=${3:-5m}
 	kubectl wait "${resource}" \
@@ -12,80 +82,6 @@ wait_for_cleanup_phase() {
 cleanup_job_name() {
 	local resource=$1
 	kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.jobName}'
-}
-
-# Select the legacy Job backend for one test Move without disabling Volume
-# effects. Return the original Pod plus scope; restore only after Job binding.
-suspend_move_cleanup_capability() {
-	local node=$1 pod patch context
-	: "${CLUSTER_NAME:?isolated Kind cluster name required}"
-	: "${KUBECONFIG:?isolated kubeconfig required}"
-	context=$(kubectl config current-context) || return
-	test "${context}" = "kind-${CLUSTER_NAME}" || return
-	[[ "${node}" == "${CLUSTER_NAME}-"* ]] || return 1
-	pod=$(kubectl -n shiftpv-system get pods -l app.kubernetes.io/component=node \
-		--field-selector "spec.nodeName=${node}" -o json) || return
-	pod=$(jq -ce --arg node "${node}" --arg context "${context}" --arg kubeconfig "${KUBECONFIG}" '
-		select(.items | length == 1) | .items[0] |
-		select(.spec.nodeName == $node and .metadata.deletionTimestamp == null and
-			.metadata.uid != null and .metadata.resourceVersion != null and
-			.metadata.annotations["shiftpv.io/node-move-cleanup"] == "v1" and
-			any(.metadata.ownerReferences[]?; .kind == "DaemonSet" and .name == "shiftpv-node" and .controller == true)) |
-		. + {_testContext: $context, _testKubeconfig: $kubeconfig}' <<<"${pod}") || return
-	patch=$(jq -c '[
-		{op:"test", path:"/metadata/uid", value:.metadata.uid},
-		{op:"test", path:"/metadata/resourceVersion", value:.metadata.resourceVersion},
-		{op:"test", path:"/metadata/annotations/shiftpv.io~1node-move-cleanup", value:"v1"},
-		{op:"remove", path:"/metadata/annotations/shiftpv.io~1node-move-cleanup"}]' <<<"${pod}") || return
-	kubectl -n shiftpv-system patch "pod/$(jq -r '.metadata.name' <<<"${pod}")" \
-		--type=json -p "${patch}" >/dev/null || return
-	printf '%s\n' "${pod}"
-}
-
-restore_move_cleanup_capability() {
-	local original=$1 pod name uid node patch context
-	: "${CLUSTER_NAME:?isolated Kind cluster name required}"
-	: "${KUBECONFIG:?isolated kubeconfig required}"
-	context=$(kubectl config current-context) || return
-	test "${context}" = "kind-${CLUSTER_NAME}" || return
-	jq -e --arg context "${context}" --arg kubeconfig "${KUBECONFIG}" \
-		'._testContext == $context and ._testKubeconfig == $kubeconfig and .metadata.namespace == "shiftpv-system"' \
-		<<<"${original}" >/dev/null || return
-	name=$(jq -er '.metadata.name' <<<"${original}") || return
-	uid=$(jq -er '.metadata.uid' <<<"${original}") || return
-	node=$(jq -er '.spec.nodeName' <<<"${original}") || return
-	pod=$(kubectl -n shiftpv-system get "pod/${name}" -o json) || return
-	jq -e --arg uid "${uid}" --arg node "${node}" \
-		'.metadata.uid == $uid and .spec.nodeName == $node and .metadata.deletionTimestamp == null' \
-		<<<"${pod}" >/dev/null || return
-	if jq -e '.metadata.annotations["shiftpv.io/node-move-cleanup"] == "v1"' <<<"${pod}" >/dev/null; then
-		return
-	fi
-	jq -e '.metadata.annotations["shiftpv.io/node-move-cleanup"] == null' <<<"${pod}" >/dev/null || return
-	patch=$(jq -c --arg uid "${uid}" '[
-		{op:"test", path:"/metadata/uid", value:$uid},
-		{op:"test", path:"/metadata/resourceVersion", value:.metadata.resourceVersion},
-		{op:"add", path:"/metadata/annotations/shiftpv.io~1node-move-cleanup", value:"v1"}]' <<<"${pod}") || return
-	kubectl -n shiftpv-system patch "pod/${name}" --type=json -p "${patch}" >/dev/null || return
-}
-
-wait_for_cleanup_job_binding() {
-	local resource=$1 deadline=$((SECONDS + 480)) parent
-	while ((SECONDS < deadline)); do
-		parent=$(kubectl get "${resource}" -o json) || return
-		if jq -e '.status.cleanup.status.executor.kind == "Node"' <<<"${parent}" >/dev/null; then
-			echo "expected legacy Job cleanup binding in ${resource}, got Node" >&2
-			return 1
-		fi
-		if jq -e '(.status.cleanup.status.executor.jobUID // "") != "" and
-			(.status.cleanup.status.executor.jobName // "") != "" and
-			(.status.cleanup.status.executor.kind // "") == ""' <<<"${parent}" >/dev/null; then
-			return
-		fi
-		sleep 1
-	done
-	echo "timed out waiting for legacy Job cleanup binding in ${resource}" >&2
-	return 1
 }
 
 assert_cleanup_journal() {

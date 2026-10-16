@@ -15,7 +15,6 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
@@ -51,7 +50,11 @@ func cleanupMoveFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 
 type failingCleanupOperator struct{}
 
-func (failingCleanupOperator) AdvanceReclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+func (failingCleanupOperator) ObserveCompletedCleanup(context.Context, cleanupapi.Cleanup) (bool, error) {
+	return false, errors.New("cleanup API unavailable")
+}
+
+func (failingCleanupOperator) AdvanceReclaim(context.Context, cleanupapi.Cleanup, cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
 	return cleanupapi.Cleanup{}, false, errors.New("cleanup API unavailable")
 }
 

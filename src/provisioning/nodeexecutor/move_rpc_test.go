@@ -155,7 +155,7 @@ func TestMoveCleanupStoredBindingLostResponseDoesNotInvokeRPC(t *testing.T) {
 	f := newMoveClientFixture(t, "MoveSource")
 	reply := &cleanupRPCReply{f: f}
 	attachCleanupRPC(t, f, reply)
-	journal := moveClientJournal{CleanupJournal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
+	journal := moveClientJournal{Journal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
 		if err := f.store.UpdateStatus(ctx, current, next); err != nil {
 			return err
 		}

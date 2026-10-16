@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,11 +28,11 @@ func TestRollbackCleanupPendingPreservesRecoveryAndCapacity(t *testing.T) {
 			before := seedCleanupObservationPhase(t, r, spec, phase)
 			state := repo.volumes[move.Spec.VolumeID]
 			for range 2 {
-				if err := r.reconcilePersistedMove(ctx, repo.moves[0]); err != nil {
-					t.Fatalf("executor wait became recovery error: %v", err)
+				if err := r.reconcilePersistedMove(ctx, repo.moves[0]); !errors.Is(err, nodeexecutor.ErrLegacyExecution) {
+					t.Fatalf("unsettled legacy work was not reported: %v", err)
 				}
 				current, err := r.Cleanups.Get(ctx, spec.Authority)
-				if err != nil || !reflect.DeepEqual(current, before) || !reflect.DeepEqual(repo.moves[0], move) || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
+				if err != nil || !reflect.DeepEqual(current, before) || !sameMoveAuthority(move.Status, repo.moves[0].Status) || repo.moves[0].UID != move.UID || repo.moves[0].Spec != move.Spec || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
 					t.Fatalf("pending rollback changed journal, hold or authority: cleanup=%+v move=%+v err=%v", current, repo.moves[0], err)
 				}
 			}
@@ -38,6 +40,7 @@ func TestRollbackCleanupPendingPreservesRecoveryAndCapacity(t *testing.T) {
 			if _, err := kube.BatchV1().Jobs(job.Namespace).UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
 				t.Fatal(err)
 			}
+			settleLegacyCleanupFixture(t, r, kube, spec)
 			if err := r.reconcilePersistedMove(ctx, repo.moves[0]); err != nil {
 				t.Fatal(err)
 			}

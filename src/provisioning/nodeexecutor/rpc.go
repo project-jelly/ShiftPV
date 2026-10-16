@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/rpc/connection"
 	"github.com/project-jelly/ShiftPV/src/node/rpc/protocol"
@@ -88,7 +87,7 @@ func (c *Client) createDirect(ctx context.Context, copy volume.CopyIdentity, sta
 	}
 	return true, nil
 }
-func (c *Client) cleanupResult(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (c *Client) cleanupResult(ctx context.Context, expected cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, error) {
 	current, err := store.Get(ctx, expected.Spec.Authority)
 	if err != nil {
 		return current, err

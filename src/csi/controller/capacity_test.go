@@ -152,6 +152,18 @@ func (r *capacityTrackingVolumeRegistry) PoolNodesForGroup(ctx context.Context, 
 	return r.PoolNodes(ctx)
 }
 
+func (r *capacityTrackingVolumeRegistry) PoolForIdentity(_ context.Context, name, uid, node string) (volumeapi.Pool, error) {
+	unlock := readLock(r.mu)
+	defer unlock()
+	for _, state := range r.volumes {
+		copy := state.CurrentCopy
+		if copy != nil && copy.PoolName == name && copy.PoolUID == uid && copy.NodeName == node {
+			return volumeapi.Pool{Name: name, UID: uid, NodeName: node, PoolGroup: volumeapi.DefaultPoolGroup}, nil
+		}
+	}
+	return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
+}
+
 func (r *capacityTrackingVolumeRegistry) BeginCreate(ctx context.Context, volumeID, requestName, nodeName string, capacityBytes int64) (volumeapi.State, error) {
 	return r.BeginCreateInPool(ctx, volumeID, requestName, nodeName, capacityBytes, "pool", "pool-uid")
 }

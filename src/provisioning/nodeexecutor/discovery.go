@@ -12,7 +12,7 @@ import (
 )
 
 // Discovery trusts the configured DaemonSet incarnation, rather than a label
-// or a node name alone. Missing old Nodes select the helper before binding.
+// or a node name alone. Missing capabilities grant no executor identity.
 type Discovery struct {
 	Client               kubernetes.Interface
 	Namespace, DaemonSet string

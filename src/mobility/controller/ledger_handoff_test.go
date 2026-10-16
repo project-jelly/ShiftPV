@@ -328,7 +328,7 @@ func newLedgerHandoffFixture(t *testing.T, approved bool) *ledgerHandoffFixture 
 	f.registry = &volumeapi.Registry{Client: f.client}
 	f.reconciler = &Reconciler{Client: fake.NewSimpleClientset(), Namespace: "system", HelperImage: "helper", Repository: f.registry,
 		SourceUsage: fakeMoveCapacityProbe{}, PoolLocks: &poolcapacity.Locker{}, CapacityProbe: fakeMoveCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
-		Cleanups: &cleanupapi.Store{Client: f.client}}
+		Cleanups: &cleanupapi.Store{Client: f.client}, CleanupOperator: receiptCleanupOperator{}}
 	if approved {
 		f.move.Status.DestinationNode, f.move.Status.DestinationPoolUID = f.destinationPool.NodeName, f.destinationPool.UID
 		if err := prepareMoveCopyIdentitiesForPool(&f.move, f.destinationPool); err != nil {
@@ -391,7 +391,25 @@ func (f *ledgerHandoffFixture) completeMove(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := unstructured.SetNestedMap(object.Object, map[string]any{"spec": encoded, "status": map[string]any{"phase": cleanupapi.PhaseCompleted}}, "status", "cleanup"); err != nil {
+	// This accounting-only fixture starts after independent executor and Pool
+	// settlement. Keep the full historical proof, rather than trusting a phase.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	completed := cleanupapi.Status{
+		Phase: cleanupapi.PhaseCompleted, SettledAt: now,
+		Executor: &cleanupapi.Executor{JobName: "completed-source-cleanup", JobUID: "cleanup-job-uid", PodUID: "cleanup-pod-uid", NodeName: spec.Target.NodeName},
+		Receipt: &cleanupapi.Receipt{OperationID: spec.OperationID, ExecutorUID: "cleanup-job-uid", ObservedAt: now, Retired: true, Purged: true,
+			LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		AbsenceProof: &cleanupapi.AbsenceProof{RequestID: "completed-source-scan", PoolName: spec.Target.PoolName, PoolUID: spec.Target.PoolUID,
+			RequiredGeneration: 2, ObservedGeneration: 2, Valid: true, Complete: true, Absent: true, ConfirmedAt: now},
+	}
+	if err := cleanupapi.ValidateSettled(cleanupapi.Cleanup{UID: move.UID, Spec: spec, Status: completed}); err != nil {
+		return err
+	}
+	status, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&completed)
+	if err != nil {
+		return err
+	}
+	if err := unstructured.SetNestedMap(object.Object, map[string]any{"spec": encoded, "status": status}, "status", "cleanup"); err != nil {
 		return err
 	}
 	if _, err := f.client.Resource(volumeapi.MoveResource).UpdateStatus(ctx, object, metav1.UpdateOptions{}); err != nil {

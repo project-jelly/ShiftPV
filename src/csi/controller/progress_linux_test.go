@@ -12,7 +12,6 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/observation"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
@@ -57,7 +56,7 @@ func (e *localProgressEffects) CreateCopy(ctx context.Context, copy volume.CopyI
 
 func (*localProgressEffects) FinalizeCreate(context.Context, volume.CopyIdentity) error { return nil }
 
-func (e *localProgressEffects) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, journal helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (e *localProgressEffects) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, journal cleanupapi.Journal) (cleanupapi.Cleanup, error) {
 	// This in-process executor has already settled when it returns a receipt.
 	// Re-entry observes that result; it must not start another destructive run.
 	if cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence {

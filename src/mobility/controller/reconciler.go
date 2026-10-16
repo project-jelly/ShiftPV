@@ -12,7 +12,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
@@ -72,7 +71,8 @@ type Reconciler struct {
 	ServiceAccountName         string
 	Cleanups                   *cleanupapi.Store
 	CleanupOperator            interface {
-		AdvanceReclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error)
+		AdvanceReclaim(context.Context, cleanupapi.Cleanup, cleanupapi.Journal) (cleanupapi.Cleanup, bool, error)
+		ObserveCompletedCleanup(context.Context, cleanupapi.Cleanup) (bool, error)
 	}
 	Interval time.Duration
 	// ReconcileTimeout bounds one Volume pass; non-positive values use DefaultReconcileTimeout.
@@ -115,6 +115,9 @@ func supportedMoveProtocol(move volumeapi.Move) bool {
 }
 
 func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.Move) error {
+	if err := r.observeTerminalCleanupHistory(ctx, move); err != nil {
+		return err
+	}
 	if done, err := r.finalizeSourceUsage(ctx, move); err != nil || !done {
 		return err
 	}

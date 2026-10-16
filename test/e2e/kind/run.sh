@@ -193,10 +193,10 @@ run_volume_delete_cleanup() {
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/volume-delete-cleanup.sh"
 }
 
-run_cleanup_job_retry() {
+run_cleanup_executor_retry() {
 	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
 		WORKER_A_POOL="${WORKER_A_POOL}" WORKER_B_POOL="${WORKER_B_POOL}" \
-		"${ROOT_DIR}/test/e2e/kind/cleanup-job-retry.sh"
+		"${ROOT_DIR}/test/e2e/kind/cleanup-executor-retry.sh"
 }
 
 install_shiftpv true
@@ -234,16 +234,16 @@ if [[ "${VOLUME_DELETE_CLEANUP_ONLY:-0}" == "1" ]]; then
 	exit 0
 fi
 
-if [[ "${CLEANUP_JOB_RETRY_ONLY:-0}" == "1" ]]; then
-	run_cleanup_job_retry
-	echo "ShiftPV focused cleanup Job retry E2E passed"
+if [[ "${CLEANUP_EXECUTOR_RETRY_ONLY:-0}" == "1" ]]; then
+	run_cleanup_executor_retry
+	echo "ShiftPV focused cleanup executor retry E2E passed"
 	exit 0
 fi
 
 if [[ "${MOBILITY_NODE_RESTARTS_ONLY:-0}" == "1" ]]; then
 	run_mobility_node_restarts
 	if [[ "${MOBILITY_NODE_RESTART_CASE:-all}" == all ]]; then
-		run_cleanup_job_retry
+		run_cleanup_executor_retry
 	fi
 	echo "ShiftPV focused mobility node-container restart E2E passed"
 	exit 0

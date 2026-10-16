@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"slices"
 	"sync"
@@ -17,7 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-func TestVolumeDispatcherPendingCleanupsDoNotOccupyAllWorkers(t *testing.T) {
+func TestVolumeDispatcherLegacyCleanupBlockersDoNotOccupyAllWorkers(t *testing.T) {
 	f := newPreparationRegistryFixture(t, mobilityWorkers+2)
 	assignJobUIDs(f.client)
 	pending := mobilityWorkers + 1
@@ -37,11 +38,12 @@ func TestVolumeDispatcherPendingCleanupsDoNotOccupyAllWorkers(t *testing.T) {
 		}
 		states[index] = f.state(t, index)
 	}
-	// If the production path accidentally uses a synchronous observer again,
-	// both workers would wait here until shutdown. No timeout frees a worker.
+	// Each old binding must be reported without executing its helper. Adopting
+	// these live Jobs through the compatible writer would occupy the workers;
+	// the candidate must keep the independent Volume progressing instead.
 	helper := &helperpod.Runner{Client: f.client, Namespace: "system", Pools: f.registry, Image: "helper", Timeout: time.Hour}
-	client := &nodeexecutor.Client{Volumes: f.registry, Fallback: helper, Timeout: time.Hour}
-	observer := &pendingCleanupObserver{advance: client.AdvanceReclaim}
+	client := &nodeexecutor.Client{Volumes: f.registry, Inspector: &helperpod.Inspector{Client: helper.Client, Namespace: helper.Namespace}, Timeout: time.Hour}
+	observer := &pendingCleanupObserver{advance: client.AdvanceReclaim, observe: client.ObserveCompletedCleanup}
 	f.reconciler.CleanupOperator = observer
 	f.reconciler.Interval = 10 * time.Millisecond
 	f.client.ClearActions()
@@ -65,14 +67,19 @@ func TestVolumeDispatcherPendingCleanupsDoNotOccupyAllWorkers(t *testing.T) {
 }
 
 type pendingCleanupObserver struct {
-	advance func(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error)
+	advance func(context.Context, cleanupapi.Cleanup, cleanupapi.Journal) (cleanupapi.Cleanup, bool, error)
+	observe func(context.Context, cleanupapi.Cleanup) (bool, error)
 	mu      sync.Mutex
 	seen    map[string]bool
 }
 
-func (o *pendingCleanupObserver) AdvanceReclaim(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+func (o *pendingCleanupObserver) ObserveCompletedCleanup(ctx context.Context, current cleanupapi.Cleanup) (bool, error) {
+	return o.observe(ctx, current)
+}
+
+func (o *pendingCleanupObserver) AdvanceReclaim(ctx context.Context, expected cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
 	current, ready, err := o.advance(ctx, expected, store)
-	if err == nil && !ready {
+	if (err == nil || errors.Is(err, nodeexecutor.ErrLegacyExecution)) && !ready {
 		o.mu.Lock()
 		if o.seen == nil {
 			o.seen = map[string]bool{}

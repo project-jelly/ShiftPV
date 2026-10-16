@@ -1,6 +1,7 @@
 package cleanupapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,12 @@ const (
 	PhaseCompleted         = "Completed"
 	PhaseNeedsReview       = "NeedsReview"
 )
+
+// Journal exposes the parent-owned cleanup state to execution adapters.
+type Journal interface {
+	Get(context.Context, Authority) (Cleanup, error)
+	UpdateStatus(context.Context, Cleanup, Status) error
+}
 
 type CopyIdentity = volume.CopyIdentity
 
@@ -163,13 +170,20 @@ func (s *Store) parentResource(authority Authority) (dynamic.ResourceInterface, 
 }
 
 func validateParent(object *unstructured.Unstructured, authority Authority, finalizer string) error {
-	if object == nil || string(object.GetUID()) != authority.UID || object.GetName() != authority.Name {
-		return fmt.Errorf("%w: cleanup parent identity changed", ErrConflict)
+	if err := validateParentIdentity(object, authority); err != nil {
+		return err
 	}
 	if hasFinalizer(object, finalizer) {
 		return nil
 	}
 	return fmt.Errorf("%w: cleanup parent lacks %q", ErrConflict, finalizer)
+}
+
+func validateParentIdentity(object *unstructured.Unstructured, authority Authority) error {
+	if object == nil || string(object.GetUID()) != authority.UID || object.GetName() != authority.Name {
+		return fmt.Errorf("%w: cleanup parent identity changed", ErrConflict)
+	}
+	return nil
 }
 
 func hasFinalizer(object *unstructured.Unstructured, finalizer string) bool {
