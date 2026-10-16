@@ -157,6 +157,7 @@ wait_for_unpublished_pool_observation() {
 }
 
 hold_pool_observation() {
+	local deadline pool denial
 	test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
 	test -z "$(kubectl get "validatingadmissionpolicy/${OBSERVATION_POLICY}" --ignore-not-found -o name)"
 	test -z "$(kubectl get "validatingadmissionpolicybinding/${OBSERVATION_POLICY}" --ignore-not-found -o name)"
@@ -175,6 +176,8 @@ spec:
       operations: [UPDATE]
       resources: [shiftpvpools/status]
   validations:
+  - expression: "object.metadata.name != '${POOL}' || object.metadata.uid != '${POOL_UID}' || !has(request.dryRun) || !request.dryRun || (has(object.spec.scanEpoch) && object.spec.scanEpoch > ${BASELINE_SCAN_EPOCH})"
+    message: volume delete observation barrier activation
   - expression: "object.metadata.name != '${POOL}' || object.metadata.uid != '${POOL_UID}' || !has(object.spec.scanEpoch) || object.spec.scanEpoch <= ${BASELINE_SCAN_EPOCH}"
     message: volume delete post-receipt observation barrier
 ---
@@ -186,9 +189,23 @@ spec:
   policyName: ${OBSERVATION_POLICY}
   validationActions: [Deny]
 EOF
-	# No spec or status changes: baseline status writes must still be allowed.
-	kubectl get "shiftpvpool/${POOL}" -o json |
-		kubectl replace --subresource=status --dry-run=server -f - >/dev/null
+	# Policy creation is asynchronous. Prove the exact target's dry-run rule is
+	# active before deletion; real baseline writes still pass both rules.
+	deadline=$((SECONDS + 60))
+	while ((SECONDS < deadline)); do
+		pool=$(kubectl get "shiftpvpool/${POOL}" --request-timeout=10s -o json)
+		jq -e --arg uid "${POOL_UID}" --argjson baseline "${BASELINE_SCAN_EPOCH}" \
+			'.metadata.uid == $uid and (.spec.scanEpoch // 0) == $baseline' <<<"${pool}" >/dev/null
+		if ! denial=$(kubectl replace --subresource=status --dry-run=server --request-timeout=10s -f - <<<"${pool}" 2>&1); then
+			if grep -Fq 'volume delete observation barrier activation' <<<"${denial}"; then
+				return
+			fi
+		fi
+		sleep 1
+	done
+	echo "Pool observation barrier did not become active before deletion: ${denial}" >&2
+	kubectl get "validatingadmissionpolicy/${OBSERVATION_POLICY}" -o yaml >&2 || true
+	return 1
 }
 
 assert_pool_observation_barrier() {
