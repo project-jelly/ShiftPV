@@ -57,11 +57,25 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 // settledAbsence re-checks an already Completed journal: closing cleanup is
 // only reportable while the recorded proof still stands on its own.
 func settledAbsence(current Cleanup) (Cleanup, bool, error) {
-	if !validPurgedReceipt(current, current.Status) || !validAbsenceFence(current.Spec.Target, current.Status.AbsenceProof) ||
-		!confirmedAbsence(current.Status.AbsenceProof) || current.Status.SettledAt == "" {
-		return Cleanup{}, false, fmt.Errorf("%w: completed cleanup proof is invalid", ErrConflict)
+	if err := ValidateSettled(current); err != nil {
+		return Cleanup{}, false, err
 	}
 	return current, true, nil
+}
+
+// ValidateSettled checks the recorded completion evidence without reading or
+// modifying its parent, Pool, or executor. Callers must independently match the
+// exact parent and target they expect; this does not prove live Job termination.
+func ValidateSettled(current Cleanup) error {
+	if err := current.Spec.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid completed cleanup intent: %v", ErrConflict, err)
+	}
+	if current.UID != current.Spec.Authority.UID || current.Status.Phase != PhaseCompleted ||
+		!validPurgedReceipt(current, current.Status) || !validAbsenceFence(current.Spec.Target, current.Status.AbsenceProof) ||
+		!confirmedAbsence(current.Status.AbsenceProof) {
+		return fmt.Errorf("%w: completed cleanup proof is invalid", ErrConflict)
+	}
+	return validateCompletedRule(current, PhaseCompleted, current.Status)
 }
 
 // openAbsenceFence bumps spec.scanEpoch on the target Pool and records the

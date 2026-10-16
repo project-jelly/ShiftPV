@@ -153,6 +153,7 @@ kind: ShiftPVMove
 metadata:
   name: move-sample
 spec:
+  protocolVersion: prepared-v1
   volumeID: ${volume_id}
   sourceNode: source-node
 YAML

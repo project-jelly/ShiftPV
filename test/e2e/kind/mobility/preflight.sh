@@ -134,18 +134,19 @@ kind: ShiftPVMove
 metadata:
   name: ${move}
 spec:
+  protocolVersion: prepared-v1
   volumeID: ${volume}
   sourceNode: ${source}
 EOF
 	while ((SECONDS < deadline)); do
-		if ! kubectl get "shiftpvmove/${move}" >/dev/null 2>&1; then
+		if kubectl get "shiftpvmove/${move}" -o json | jq -e '.status.phase == "Cancelled" and .status.preparation == null' >/dev/null; then
 			assert_retained_volumes_unchanged
-			echo "obsolete pre-lock Move cancellation passed: volume=${volume} source=${source}"
+			echo "obsolete prepared Move cancellation passed: volume=${volume} source=${source}"
 			return
 		fi
 		sleep 1
 	done
-	echo "obsolete pre-lock Move was not cancelled: ${move}" >&2
+	echo "obsolete prepared Move was not cancelled: ${move}" >&2
 	return 1
 }
 

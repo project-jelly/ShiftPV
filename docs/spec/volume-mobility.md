@@ -32,7 +32,8 @@ after approval therefore retains both the capacity hold and its recovery plan.
 
 ### Preparation and execution
 
-New discovery creates Moves with immutable `spec.protocolVersion: prepared-v1`.
+New Moves require immutable `spec.protocolVersion: prepared-v1` in both the registry and API.
+Existing records without this field remain writable and retain their legacy execution path.
 Preparation later records a `status.preparation` logical reservation identified by Pool name/UID, node and
 requested bytes. The shared capacity ledger counts it once; it protects its Pool
 from deletion and never authorizes a disk effect. Updates use exact Move UID and
@@ -63,7 +64,7 @@ original UID; cancellation restores source authority, not that Pod's lifetime.
 Apply the CRDs separately before upgrading the chart and controller together.
 The new chart passes the preparation PriorityClass flag, which older controller
 binaries do not accept; pinning an old image under the new chart is not a CRD-only
-upgrade. Moves without a protocol field keep their legacy path; unknown protocols retain their records without executing effects.
+upgrade. Unknown protocols retain their records without executing effects.
 Do not run an older controller while prepared records remain. The implementation
 sequence is in [mobility stabilization](../development/mobility-stabilization-plan.md).
 

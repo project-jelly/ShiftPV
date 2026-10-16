@@ -49,6 +49,9 @@ spec:
               type: object
               required: [volumeID, sourceNode]
               x-kubernetes-validations:
+                - rule: "oldSelf.hasValue() || (has(self.protocolVersion) && self.protocolVersion == 'prepared-v1')"
+                  optionalOldSelf: true
+                  message: new Moves require prepared-v1
                 - rule: '!has(oldSelf.recovery) || (has(self.recovery) && self.recovery == oldSelf.recovery)'
                   message: recovery cannot be removed or changed once requested
                 - rule: 'has(self.protocolVersion) == has(oldSelf.protocolVersion) && (!has(self.protocolVersion) || self.protocolVersion == oldSelf.protocolVersion)'

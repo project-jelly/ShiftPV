@@ -94,6 +94,35 @@ Node 0.4.12 이하로 되돌리면 전체 status 쓰기가 이 필드를 보존�
    덮어쓰는 방식은 사용하지 않는다. controller는 단일 writer와 `Recreate`를 유지한다.
 5. 배포 후 controller·Pool·capability 상태를 확인한 다음 새 유지보수 작업을 시작한다.
 
+### 전환 사전 검사
+
+승인된 **새 Controller 이미지**를 별도 one-shot Pod로 실행하면 기존 Controller를 종료하기 전에
+`upgrade-check`를 수행할 수 있다. 기존 바이너리에는 이 명령이 없을 수 있으므로 기존 Pod에서
+실행한다고 가정하지 않는다. 아래 이름은 기본 설치 기준이며 실제 namespace·ServiceAccount·
+Node DaemonSet 이름과 새 이미지 digest를 지정한다.
+
+```sh
+TARGET_CONTROLLER_IMAGE='<approved-controller-image@sha256:...>'
+kubectl -n shiftpv-system run shiftpv-upgrade-check --restart=Never \
+  --image="${TARGET_CONTROLLER_IMAGE}" \
+  --overrides='{"spec":{"serviceAccountName":"shiftpv-controller"}}' \
+  --command -- /shiftpv-controller upgrade-check \
+  --namespace=shiftpv-system --node-daemonset-name=shiftpv-node --timeout=90s
+kubectl -n shiftpv-system wait --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/shiftpv-upgrade-check --timeout=120s
+kubectl -n shiftpv-system logs shiftpv-upgrade-check
+```
+
+검사는 GET/LIST만 사용한다. 정상 Ready Volume과 기존 PVC/PV·게시된 데이터, 정산된 완료 이력은
+유지하며, 미정산 이동·생성·삭제·cleanup·실행자와 필요한 Node 기능 부재를 보고한다.
+실패하면 기존 Controller를 계속 실행하고 원인을 정산한다. journal·finalizer·예약을 강제로
+삭제하거나 Job 실행자를 Node로 바꿔 적지 않는다.
+
+성공은 그 시점의 관측이며 영속적인 전환 허가가 아니다. 새 작업 유입을 멈춘 상태를 검사부터
+업그레이드 완료까지 유지한다. 검사는 새 작업을 차단하거나 기록을 변환하지 않는다.
+구 rollback이 inventory로만 완료되어 독립적인 journal 증거가 없는 이력은 보수적으로 보고할 수
+있다. 기존 runtime의 정산·보존·정상 GC 절차로 처리하며 검사를 통과시키려고 증거를 만들지 않는다.
+
 helper image 변경은 작업 정산 후가 기본이다. 중간 controller 갱신이 필요하면 CLI 호환성을
 확인한 기존 immutable image를 `mobility.helperImage`와 `helperPod.image`에 모두 pin하고
 service-account/resource/timeout profile도 유지한다. 빈 값은 controller image를 상속한다.
