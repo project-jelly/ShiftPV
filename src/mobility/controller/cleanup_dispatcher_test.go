@@ -14,7 +14,6 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -103,25 +102,26 @@ func prepareTerminalCleanupDispatcher(t *testing.T, f *preparationRegistryFixtur
 	destination := source
 	destination.PoolName, destination.PoolUID, destination.NodeName = "destination-pool", "destination-pool-uid", "destination"
 	destination.CopyID = "move-" + move.UID + "-serving"
-	sourceObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&source)
-	if err != nil {
-		t.Fatal(err)
-	}
 	destinationObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&destination)
 	if err != nil {
 		t.Fatal(err)
 	}
-	object, err := f.dynamic.Resource(volumeapi.MoveResource).Get(f.ctx, move.Name, metav1.GetOptions{})
+	move = preparedFixtureMove(move)
+	move.Status.SourceCopy = &source
+	move.Status.SourceBytes, move.Status.DestinationNode, move.Status.DestinationPoolUID = 1, "destination", "destination-pool-uid"
+	if err := prepareMoveCopyIdentitiesForPool(&move, volumeapi.Pool{Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination"}); err != nil {
+		t.Fatal(err)
+	}
+	move.Status.Phase, move.Status.LastTransitionTime = "Succeeded", time.Now().UTC().Format(time.RFC3339Nano)
+	destination = *move.Status.DestinationCopy
+	destinationObject, err = runtime.DefaultUnstructuredConverter.ToUnstructured(&destination)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unstructured.RemoveNestedField(object.Object, "spec", "protocolVersion")
-	object.Object["status"] = map[string]any{"phase": "Succeeded", "destinationNode": "destination", "sourceCopy": sourceObject,
-		"destinationCopy": destinationObject, "lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano)}
-	if _, err := f.commitDynamicUpdate(volumeapi.MoveResource, object); err != nil {
+	if err := seedLedgerMove(f.ctx, f.dynamic, move); err != nil {
 		t.Fatal(err)
 	}
-	object, err = f.dynamic.Resource(volumeapi.VolumeResource).Get(f.ctx, move.Spec.VolumeID, metav1.GetOptions{})
+	object, err := f.dynamic.Resource(volumeapi.VolumeResource).Get(f.ctx, move.Spec.VolumeID, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

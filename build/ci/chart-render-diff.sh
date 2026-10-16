@@ -40,7 +40,7 @@ COMBINATIONS=(
 	"upgrade readiness args|--set|poolReadiness.interval=2s|--set|poolReadiness.staleAfter=10s|--set|storageClass.defaultClass=true"
 	"replica fence rejects two|--set|controller.replicas=2"
 	"overridden images|--set|controller.image.repository=controller,controller.image.tag=test,node.image.repository=node,node.image.tag=test,helperPod.image=controller:test,mobility.helperImage=helper:test"
-	"separate create and move helper images|--set|controller.image.repository=controller,controller.image.tag=test,helperPod.image=create-helper:test,mobility.helperImage=move-helper:test"
+	"separate measurement and move helper images|--set|controller.image.repository=controller,controller.image.tag=test,helperPod.image=create-helper:test,mobility.helperImage=move-helper:test"
 	"external helper service account|--set|serviceAccount.helper.create=false,serviceAccount.helper.name=existing-helper"
 	"external controller and node service accounts|--set|serviceAccount.controller.create=false,serviceAccount.controller.name=ext-controller,serviceAccount.node.create=false,serviceAccount.node.name=ext-node"
 	"argocd uninstall mode|--set|lifecycle.uninstallMode=argocd"

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/volume"
 	batchv1 "k8s.io/api/batch/v1"
@@ -17,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -99,14 +99,6 @@ func (f moveClientFixture) assertNoJobs(t *testing.T) {
 	}
 }
 
-func (f moveClientFixture) assignJobUIDs() {
-	f.kube.PrependReactor("create", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		job := action.(k8stesting.CreateAction).GetObject().(*batchv1.Job).DeepCopy()
-		job.UID = "job-uid"
-		return true, job, f.kube.Tracker().Create(batchv1.SchemeGroupVersion.WithResource("jobs"), job, job.Namespace)
-	})
-}
-
 type moveClientJournal struct {
 	cleanupapi.Journal
 	write func(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error
@@ -116,22 +108,29 @@ func (j moveClientJournal) UpdateStatus(ctx context.Context, current cleanupapi.
 	return j.write(ctx, current, next)
 }
 
-// Use the real helper to create its exact deterministic suspended Job, but lose
-// the following binding write. The resident-only client must report this old
-// responsibility without adopting, starting or deleting its Job.
+// This historical snapshot was accepted by an older writer before its binding
+// write completed. The resident-only client must preserve and report it without
+// adopting, starting, deleting or recreating the Job.
 func (f moveClientFixture) acceptedJob(t *testing.T) *batchv1.Job {
 	t.Helper()
-	f.assignJobUIDs()
-	journal := moveClientJournal{Journal: f.store, write: func(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error {
-		return apierrors.NewTimeoutError("binding response unavailable", 1)
-	}}
-	legacy := &helperpod.Runner{Client: f.kube, Namespace: "shiftpv", Pools: f.client.Volumes, Image: "helper:test", Timeout: 10 * time.Millisecond}
-	if _, err := legacy.Reclaim(context.Background(), f.cleanup, journal); err == nil {
-		t.Fatal("expected interrupted Job binding")
+	suspended, controller := true, true
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: f.cleanup.Name + "-effect", Namespace: "shiftpv", UID: "job-uid",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "shiftpv.io/v1alpha1", Kind: f.cleanup.Spec.Authority.Kind,
+				Name: f.cleanup.Spec.Authority.Name, UID: types.UID(f.cleanup.Spec.Authority.UID), Controller: &controller,
+			}},
+		},
+		Spec: batchv1.JobSpec{Suspend: &suspended, Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{NodeName: f.cleanup.Spec.Target.NodeName},
+		}},
 	}
-	job, err := f.kube.BatchV1().Jobs("shiftpv").Get(context.Background(), f.cleanup.Name+"-effect", metav1.GetOptions{})
-	if err != nil || job.Spec.Suspend == nil || !*job.Spec.Suspend || f.current(t).Status.Executor != nil {
-		t.Fatalf("accepted suspended Job setup: job=%+v err=%v", job, err)
+	if err := f.kube.Tracker().Add(job); err != nil {
+		t.Fatal(err)
+	}
+	if f.current(t).Status.Executor != nil {
+		t.Fatal("historical accepted Job must remain unbound")
 	}
 	return job
 }

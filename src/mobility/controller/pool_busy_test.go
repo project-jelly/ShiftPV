@@ -88,7 +88,7 @@ func TestPreparedConversionPoolBusyRetainsHoldWithoutDiagnosticReplay(t *testing
 	assertPreparationReserved(t, f, preparationRequestedBytes)
 }
 
-func TestLegacyCapacityPoolBusyDoesNotBecomeCapacityDenial(t *testing.T) {
+func TestPreparedCapacityPoolBusyDoesNotBecomeCapacityDenial(t *testing.T) {
 	r, repo, move := capacityCostFixture()
 	move.Status.Phase = "WaitingForCapacity"
 	repo.moves[0] = move
@@ -105,10 +105,10 @@ func TestLegacyCapacityPoolBusyDoesNotBecomeCapacityDenial(t *testing.T) {
 	stored := repo.moves[0]
 	if stored.Status.SourceBytes != 32<<20 || stored.Status.Phase != "WaitingForCapacity" ||
 		stored.Status.Reason != "" || stored.Status.CapacityReason != "" || stored.Status.CapacityApproved {
-		t.Fatalf("busy legacy admission changed its phase or denial: %+v", stored.Status)
+		t.Fatalf("busy prepared admission changed its phase or denial: %+v", stored.Status)
 	}
 	if err := r.ensureCapacity(context.Background(), &stored, observation{DestinationNode: "destination"}); err != nil || !stored.Status.CapacityApproved {
-		t.Fatalf("fresh legacy retry did not approve: status=%+v err=%v", stored.Status, err)
+		t.Fatalf("fresh prepared retry did not approve: status=%+v err=%v", stored.Status, err)
 	}
 }
 

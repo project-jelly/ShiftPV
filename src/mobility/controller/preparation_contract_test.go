@@ -23,7 +23,7 @@ func TestUnknownProtocolRetainsEveryLegacyEffectBoundary(t *testing.T) {
 	}{
 		{"uninitialized", volumeapi.MoveStatus{}},
 		{"pending", volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}},
-		{"locking", volumeapi.MoveStatus{Phase: string(fsm.PhaseLocking)}},
+		{"locking", volumeapi.MoveStatus{Phase: "Locking"}},
 		{"recovery", volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked)}},
 		{"terminal cleanup", volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseRunning}},
 		{"terminal finalizer", volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}},
@@ -56,17 +56,17 @@ func TestUnknownProtocolRetainsEveryLegacyEffectBoundary(t *testing.T) {
 	}
 }
 
-func TestUnknownMoveProtocolDoesNotBlockIndependentLegacyMove(t *testing.T) {
+func TestUnknownMoveProtocolDoesNotBlockIndependentPreparedMove(t *testing.T) {
 	r, repo, _ := preflightFixture()
 	repo.moves = []volumeapi.Move{
 		{Name: "future", UID: "future-uid", Spec: volumeapi.MoveSpec{VolumeID: "future-volume", ProtocolVersion: "future-v2"}},
-		{Name: "legacy", UID: "legacy-uid", Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}},
+		{Name: "prepared", UID: "prepared-uid", ResourceVersion: "1", Finalizers: []string{volumeapi.MoveProtectionFinalizer}, Spec: volumeapi.MoveSpec{ProtocolVersion: volumeapi.MoveProtocolPreparedV1, VolumeID: preflightVolume, SourceNode: "source"}},
 	}
 	if err := r.ReconcileAll(context.Background()); err == nil || !strings.Contains(err.Error(), "future-v2") {
 		t.Fatalf("expected unsupported record diagnostic, got %v", err)
 	}
-	if len(repo.moves) != 2 || repo.moves[1].Status.Phase != string(fsm.PhasePending) || repo.moves[0].Status.Phase != "" {
-		t.Fatalf("independent legacy progress or protocol fence lost: %+v", repo.moves)
+	if len(repo.moves) != 2 || repo.moves[1].Status.Phase != string(fsm.PhasePreparing) || repo.moves[0].Status.Phase != "" {
+		t.Fatalf("independent prepared progress or protocol fence lost: %+v", repo.moves)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestPreparationCountsLogicalCapacityWithoutPhysicalExecutionHold(t *testing
 	repo.volumes[id] = volumeapi.State{UID: source.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "source",
 		CurrentCopy: &source, ActiveMove: prepared.Name, CapacityBytes: prepared.Status.Preparation.ReservedBytes}
 	_, logical, physical, _, err := r.destinationCapacityForPool(context.Background(), current, repo.pools[1])
-	if err != nil || logical != 16<<20 || physical != 0 {
+	if err != nil || logical != 48<<20 || physical != 0 {
 		t.Fatalf("preparation accounting: logical=%d physical=%d err=%v", logical, physical, err)
 	}
 }
@@ -162,8 +162,5 @@ func (r *forbidPreparedEffects) RemoveMoveFinalizer(context.Context, string, str
 	return r.reject()
 }
 func (r *forbidPreparedEffects) DeleteMove(context.Context, string, string) error {
-	return r.reject()
-}
-func (r *forbidPreparedEffects) SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error {
 	return r.reject()
 }

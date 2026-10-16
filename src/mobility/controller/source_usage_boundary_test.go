@@ -53,21 +53,10 @@ func completeSourceUsageForTest(t *testing.T, f *preparationRegistryFixture, mov
 }
 
 func TestSourceUsageResponseLossRetainsResultAndRestartsWithoutMeasurement(t *testing.T) {
-	for _, protocol := range []string{"", volumeapi.MoveProtocolPreparedV1} {
+	for _, protocol := range []string{volumeapi.MoveProtocolPreparedV1} {
 		t.Run("protocol="+protocol, func(t *testing.T) {
 			f, move := preparationAtCapacity(t)
-			if protocol == "" {
-				object, err := f.dynamic.Resource(volumeapi.MoveResource).Get(f.ctx, move.Name, metav1.GetOptions{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				unstructured.RemoveNestedField(object.Object, "spec", "protocolVersion")
-				unstructured.RemoveNestedField(object.Object, "status", "preparation")
-				if _, err = f.commitDynamicUpdate(volumeapi.MoveResource, object); err != nil {
-					t.Fatal(err)
-				}
-				move = f.move(t, 0)
-			}
+
 			installSourceUsageRunner(f)
 			before := move
 			if err := f.reconciler.reconcileMove(f.ctx, move); err != nil {

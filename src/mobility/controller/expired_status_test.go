@@ -30,32 +30,6 @@ func (s expirySourceUsage) FinalizeSourceUsage(ctx context.Context, move volumea
 	return s.finalize(ctx, move)
 }
 
-type expiryRecoveryRepository struct {
-	Repository
-	gets int
-}
-
-func (r *expiryRecoveryRepository) Get(context.Context, string) (volumeapi.State, error) {
-	r.gets++
-	return volumeapi.State{}, errors.New("unexpected recovery read")
-}
-
-func TestExpiredSourceUsageFinalizationDoesNotStartRecovery(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cause := errors.New("finalization reply failed")
-	repo := &expiryRecoveryRepository{}
-	r := &Reconciler{Repository: repo, SourceUsage: expirySourceUsage{finalize: func(context.Context, volumeapi.Move) (bool, error) {
-		cancel()
-		return false, cause
-	}}}
-	move := volumeapi.Move{Spec: volumeapi.MoveSpec{Recovery: "ResumeOwner"}, Status: volumeapi.MoveStatus{Phase: "Blocked"}}
-	err := r.reconcilePersistedMove(ctx, move)
-	if !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || repo.gets != 0 {
-		t.Fatalf("expired finalization started recovery: gets=%d err=%v", repo.gets, err)
-	}
-}
-
 type expiryCleanupObserver struct {
 	cancel context.CancelFunc
 	cause  error
@@ -101,11 +75,6 @@ func TestExpiredCleanupObservationDoesNotRereadJournal(t *testing.T) {
 			}
 		})
 	}
-}
-
-func (r *expiredStatusRepository) SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error {
-	r.writes++
-	return errors.New("unexpected legacy write")
 }
 
 func (r *expiredStatusRepository) CompareAndSetMoveStatus(context.Context, volumeapi.Move, volumeapi.MoveStatus) (volumeapi.Move, error) {
@@ -166,7 +135,7 @@ func TestLiveContextDeadlineErrorStillRecordsDiagnostic(t *testing.T) {
 	for _, recovery := range []bool{false, true} {
 		t.Run(map[bool]string{false: "move", true: "recovery"}[recovery], func(t *testing.T) {
 			ctx := context.Background()
-			move := volumeapi.Move{Name: "move", UID: "uid", Status: volumeapi.MoveStatus{Phase: "Blocked"}}
+			move := preparedFixtureMove(volumeapi.Move{Name: "move", UID: "uid", Status: volumeapi.MoveStatus{Phase: "Blocked"}})
 			repo := &memoryRepository{moves: []volumeapi.Move{move}}
 			r := &Reconciler{Repository: repo}
 			var err error

@@ -33,7 +33,7 @@ func (p measuredCapacityProbe) VolumeUsageForCopy(ctx context.Context, _ volume.
 	return p.usage(ctx)
 }
 
-func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *testing.T) {
+func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksPhysicalReservations(t *testing.T) {
 	r, repo, move := capacityCostFixture()
 	r.CapacityProbe = measuredCapacityProbe{
 		usage: func(ctx context.Context) (int64, error) {
@@ -49,7 +49,11 @@ func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *tes
 			select {
 			case unlock := <-acquired:
 				// A competing create can spend capacity while the source is measured.
-				repo.volumes["another-volume"] = volumeapi.State{OwnerNode: "destination", CapacityBytes: 120 << 20}
+				otherID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				source, _, _ := testCopyIdentities(otherID, "source", "destination")
+				source.PoolName, source.PoolUID = "source", "source-uid"
+				repo.volumes[otherID] = volumeapi.State{UID: source.VolumeUID, OwnerNode: "source", CurrentCopy: &source, ActiveMove: "other-move", CapacityBytes: 120 << 20}
+				repo.moves = append(repo.moves, volumeapi.Move{Name: "other-move", Spec: volumeapi.MoveSpec{VolumeID: otherID, SourceNode: "source"}, Status: volumeapi.MoveStatus{SourceCopy: &source, DestinationNode: "destination", DestinationPoolUID: "destination-uid", CapacityApproved: true, SourceBytes: 120 << 20}})
 				unlock()
 			case <-ctx.Done():
 				return 0, errors.New("source measurement held destination lock")
@@ -66,7 +70,7 @@ func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *tes
 	if err := r.ensureCapacity(ctx, &move, observation{DestinationNode: "destination"}); err != nil {
 		t.Fatal(err)
 	}
-	if move.Status.CapacityApproved || move.Status.CapacityReason != "DestinationReservationLimit" {
+	if move.Status.CapacityApproved || move.Status.CapacityReason != "DestinationFilesystemSpace" {
 		t.Fatalf("stale reservations accepted: %+v", move.Status)
 	}
 }
@@ -106,6 +110,7 @@ func capacityCostFixture() (*Reconciler, *memoryRepository, volumeapi.Move) {
 		pools:   []volumeapi.Pool{{Name: "source", UID: "source-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "128Mi"}, {Name: "destination", UID: "destination-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: "128Mi"}},
 		moves:   []volumeapi.Move{move},
 	}
+	prepareCapacityMove(repo, &move, repo.pools[1])
 	r := newTestReconciler(fake.NewSimpleClientset(), repo)
 	r.PoolLocks = &poolcapacity.Locker{}
 	return r, repo, move

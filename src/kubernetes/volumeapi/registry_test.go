@@ -1247,7 +1247,7 @@ func TestRegistryRejectsMissingConfigurationAndEmptyPools(t *testing.T) {
 	}
 }
 
-func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
+func TestRegistryCompareAndSetAndHistoricalMoveStatus(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-33333333333333333333333333333333"
 	moveObject := &unstructured.Unstructured{Object: map[string]any{
@@ -1273,10 +1273,9 @@ func TestRegistryCompareAndSetAndMoveStatus(t *testing.T) {
 		t.Fatal("stale state precondition was accepted")
 	}
 	status := MoveStatus{Phase: "Copying", DestinationNode: "node-b", DestinationPoolUID: "pool-b-uid", ReplacementUID: "replacement-uid", CandidateNodes: []string{"node-b"}, EvictionRequested: true, CopyJobName: "copy"}
-	if err := registry.SetMoveStatus(ctx, "move-test", "replacement-uid", status); !errors.Is(err, ErrStateConflict) {
-		t.Fatalf("replacement Move status error = %v", err)
-	}
-	if err := registry.SetMoveStatus(ctx, "move-test", "move-uid", status); err != nil {
+	// Seed an older controller's persisted status; this candidate only reads it.
+	setMoveStatus(moveObject, status)
+	if _, err := client.Resource(MoveResource).UpdateStatus(ctx, moveObject, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	move, err := registry.GetMove(ctx, "move-test")

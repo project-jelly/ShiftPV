@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"slices"
 	"testing"
@@ -194,10 +193,7 @@ func TestCompletedLegacyDeleteKeepsParentWhileReceiptPodRemains(t *testing.T) {
 func settleDeleteLegacyHistory(t *testing.T, service *Service, kube *fake.Clientset, journal cleanupapi.Cleanup) cleanupapi.Cleanup {
 	t.Helper()
 	ctx := context.Background()
-	oldWriter := &helperpod.Runner{Client: kube, Namespace: service.Namespace, Pools: service.Volumes.(*volumeapi.Registry), Image: "helper", Timeout: time.Second}
-	if _, err := oldWriter.Reclaim(ctx, journal, service.Cleanups); err != nil {
-		t.Fatal(err)
-	}
+	// Seed the previous writer's absence settlement after its Job has finished.
 	for range 2 {
 		var err error
 		journal, _, err = service.Cleanups.ReconcileAbsence(ctx, journal)
@@ -269,9 +265,7 @@ func newDeleteJobReceiptFixture(t *testing.T) (*Service, *fake.Clientset, cleanu
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := helper.Reclaim(ctx, journal, store); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("start exact legacy cleanup Job: %v", err)
-	}
+	seedLegacyCleanupJob(t, store, kube, journal, helper.Namespace)
 	journal, err = store.Get(ctx, journal.Spec.Authority)
 	if err != nil {
 		t.Fatal(err)

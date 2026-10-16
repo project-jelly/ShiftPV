@@ -1,21 +1,15 @@
 package main
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
-// TestHelperForwardsPoolReadinessBudgetToRegistry pins that every node-bound
-// helper subcommand accepts --pool-readiness-stale-after and carries it into
-// its Registry. The cleanup subcommand is the one that consumes it: its move
-// source publication proof calls ReadyPoolForNode, so a dropped flag would
-// silently fall back to DefaultPoolReadinessStaleAfter and accept a Pool probe
-// the parent controller already treats as stale. The move subcommands recheck
-// authority through PoolForNode and hold the value only so a controller may
-// forward it without version-skewing the CLI.
 func TestHelperForwardsPoolReadinessBudgetToRegistry(t *testing.T) {
 	t.Setenv("POD_NAME", "helper-pod")
 	const budget = 7 * time.Minute
@@ -51,29 +45,6 @@ func TestHelperForwardsPoolReadinessBudgetToRegistry(t *testing.T) {
 		}
 	}
 
-	cleanupIdentity := []string{
-		"--authority-kind=ShiftPVMove", "--authority-name=move-test", "--authority-uid=move-uid",
-		"--operation-id=cleanup-move-uid", "--namespace=shiftpv-system",
-	}
-	cleanupDefaults, err := parseCleanupOptions(cleanupIdentity)
-	if err != nil {
-		t.Fatalf("cleanup default parse: %v", err)
-	}
-	if cleanupDefaults.poolReadinessStaleAfter != volumeapi.DefaultPoolReadinessStaleAfter {
-		t.Fatalf("cleanup default budget = %v", cleanupDefaults.poolReadinessStaleAfter)
-	}
-	cleanup, err := parseCleanupOptions(append(append([]string{}, cleanupIdentity...),
-		volumeapi.PoolReadinessStaleAfterArgument(budget)))
-	if err != nil {
-		t.Fatalf("cleanup forwarded parse: %v", err)
-	}
-	if cleanup.poolReadinessStaleAfter != budget {
-		t.Fatalf("cleanup parsed budget = %v", cleanup.poolReadinessStaleAfter)
-	}
-	registry := &volumeapi.Registry{PoolReadinessStaleAfter: cleanup.poolReadinessStaleAfter}
-	if registry.PoolReadinessStaleAfter != budget {
-		t.Fatalf("cleanup Registry budget = %v", registry.PoolReadinessStaleAfter)
-	}
 }
 
 func TestMoveCopyArgumentsPreserveFilesystemContract(t *testing.T) {
@@ -92,5 +63,16 @@ func TestMoveCopyArgumentsPreserveFilesystemContract(t *testing.T) {
 	}
 	if !reflect.DeepEqual(verifyArguments, wantVerify) {
 		t.Fatalf("verify arguments = %#v", verifyArguments)
+	}
+}
+
+func TestRetiredEffectsAreNotHelperCommands(t *testing.T) {
+	previous := os.Args
+	t.Cleanup(func() { os.Args = previous })
+	for _, action := range []string{"create", "cleanup"} {
+		os.Args = []string{"shiftpv-volume-helper", action}
+		if err := run(); err == nil || !strings.Contains(err.Error(), "unknown volume helper action") {
+			t.Fatalf("retired effect reached infrastructure: %s %v", action, err)
+		}
 	}
 }

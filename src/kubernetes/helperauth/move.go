@@ -67,7 +67,7 @@ func SourceAuthority(client kubernetes.Interface, registry *volumeapi.Registry, 
 // sourceServiceAuthorizes reports whether the Move still authorizes serving the
 // exact source copy under the exact copy operation this helper was started for.
 func sourceServiceAuthorizes(move volumeapi.Move, options MoveOptions, identity volume.CopyIdentity) bool {
-	return move.UID == options.MoveUID && move.Status.SourceCopy != nil && *move.Status.SourceCopy == identity &&
+	return move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && move.UID == options.MoveUID && move.Status.SourceCopy != nil && *move.Status.SourceCopy == identity &&
 		move.Status.CopyOperationID == options.OperationID &&
 		(move.Status.Phase == "WaitingForCapacity" || move.Status.Phase == "Copying")
 }
@@ -148,7 +148,7 @@ func MoveAuthority(client kubernetes.Interface, registry *volumeapi.Registry, op
 // moveTransactionIntact reports whether the Move is still the exact object this
 // helper was started for and still carries both transaction copies.
 func moveTransactionIntact(move volumeapi.Move, options MoveOptions) bool {
-	return move.UID == options.MoveUID && move.Status.SourceCopy != nil && move.Status.IncomingCopy != nil
+	return move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && move.UID == options.MoveUID && move.Status.SourceCopy != nil && move.Status.IncomingCopy != nil
 }
 
 // moveActionPhaseAllowed reports whether the Move's phase still admits action.
@@ -220,7 +220,7 @@ func RecoveryAuthority(client kubernetes.Interface, registry *volumeapi.Registry
 // recoveryOwnerAuthorizes reports whether the Move is still the exact blocked
 // object whose verification this node owns.
 func recoveryOwnerAuthorizes(move volumeapi.Move, options MoveOptions, identity volume.CopyIdentity) bool {
-	return move.UID == options.MoveUID && move.Status.Phase == "Blocked" &&
+	return move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && move.UID == options.MoveUID && move.Status.Phase == "Blocked" &&
 		move.Status.RecoveryPhase == "Verifying" && move.Status.RecoveryOwner == identity.NodeName
 }
 

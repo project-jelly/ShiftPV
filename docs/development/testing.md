@@ -85,7 +85,7 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 
 1. current owner identity와 authoritative bytes
 2. source/destination 물리 경로와 mount 상태
-3. Volume/Move phase, journal, finalizer와 child Job UID
+3. Volume/Move phase, journal, finalizer와 executor Pod/Job UID
 4. Pool observed generation, validity, completeness와 inventory
 5. source/destination capacity hold 합계
 6. restart count, warning event, bounded-cardinality metric
@@ -113,13 +113,16 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | `pool/readiness`: `backing_boundary_test.go`; `volumeapi`: `pool_backing_test.go` | 실제 Registry·Probe DI로 승인된 peer 유실/복구, 신규 등록 경쟁, own 실패·세대·구버전 condition 호환을 검증 |
 | `node/executor`: `peer_backing_progress_linux_test.go`; `csi/node`, `node/observation`, `mobility/controller`: `backing_test.go` | peer 장애 중 기존 작업·실제 create/purge 진행, 실행 전후 own identity 변경 거절, receipt 이후 fresh absence 전 hold 유지 |
 | `mobility/controller`: `preparation_boundary_test.go`, `prepared_execution_test.go`, `prepared_cancellation_test.go` | 실제 Registry/RV CAS + 5Gi에 2Gi 4개 요청, hold 전환·응답 유실·지연 claim/Moving PUT·binding 부재·placement NotFound와 취소 정산 |
-| `e2e/kind/mobility/preparation.sh`, `legacy-upgrade.sh` (preparation) | 실제 scheduler/API admission + 2개 hold/4개 원본 유지, restart, 2개 완료/2개 원본 유지; 구버전 controller의 in-flight legacy Move를 candidate가 같은 UID로 완료 |
+| `e2e/kind/mobility/preparation.sh` (preparation) | 실제 scheduler/API admission + 2개 hold/4개 원본 유지, restart, 2개 완료/2개 원본 유지 |
+| `e2e/kind/mobility/legacy-upgrade.sh` (preparation) | candidate preflight의 active legacy 거절 → old writer/helper image로 정산 → 교체 전 complete·blocker 없음 확인 → Recreate 후 같은 PVC/PV/Volume/Move UID·데이터·history 보존 및 새 legacy actor 미생성 |
 | `e2e/kind/mobility-node-restarts.sh` (source/destination) | 실행 승인 전 노드 장애 → 취소·같은 held Pod 복구; test-owned placement finalizer로 삭제 대기 중 hold 유지와 NotFound 후 정산을 검증. source에 쓴 PVC별 고유 데이터로 재생성 없는 보존 확인 |
-| `mobility/controller`: `approval_recovery_test.go` | 승인 직후 source 장애 + 원자적 copy 계획 + 구버전 승인·재시작·fresh absence 전 hold 유지 |
+| `mobility/controller`: `approval_recovery_test.go` | 승인 직후 source 장애·원자적 copy 계획·재시작·fresh absence 전 hold 유지; 계획 없는 승인은 추론·scan 없이 보존 |
+| `mobility/history`: `classify_test.go`; `lifecycle/upgrade`: `checker_test.go` | cleanup 없는 prepared 복구의 exact CAS 정산을 읽기 전용으로 승인; legacy·불완전 계획·미해제 hold·cleanup 증거 누락·실행 중 helper는 거절 |
 | `node/executor`: `move_cleanup*_linux_test.go`; `provisioning/nodeexecutor`: Move cleanup tests | source/incoming/serving 실제 purge·동일 Volume RPC/watch 직렬화·권한 변경·receipt 응답 유실·Pod 교체·구버전 capability와 Job binding 경쟁 |
-| `mobility/controller`: `native_cleanup_test.go`, `cleanup_job_reentry_test.go`; `kubernetes/helperpod`: `cleanup_backend_test.go` | Node receipt 이후 fresh absence 전 hold 유지; Node/Job 동시 선택에서 한 backend만 실행; controller 재진입도 Job 완료 또는 Job·Pod 부재 확인 전 scan/hold 해제를 막음 |
-| `csi/controller`: `cleanup_job_reentry_test.go` | 실제 Registry·Store·Runner·Client로 Job 실행 중/Job 부재·owned Pod 잔존 시 부모와 용량 유지; 구버전 ConfirmingAbsence fence 보존, 종료 후 Job 재실행 없이 삭제 정산 |
-| `helperpod`, `nodeexecutor`: `cleanup_advance_test.go`; `mobility/controller`: `cleanup_pending_test.go`, `cleanup_dispatcher_test.go` | 공유 sync/advance 경계·Node RPC 미호출·Job 정산/재시도·라벨/소유 참조 유실; 실제 Registry에서 cleanup 대기 3개가 worker 2개를 점유하지 않고 독립 Move 계획 저장 |
+| `mobility/controller`: `native_cleanup_test.go`, `cleanup_job_reentry_test.go`; `nodeexecutor`: `resident_cleanup_test.go` | Node receipt 이후 fresh absence 전 hold 유지; 미정산 legacy Job은 호환성 blocker로 보존하고 실행·전환하지 않음 |
+| `csi/controller`: `cleanup_job_reentry_test.go` | 실제 Registry·Store·Client와 명시적 과거 snapshot으로 미정산 Job·잔존 Pod·ConfirmingAbsence fence 보존, 이전 writer의 정산 증거가 있어야 삭제 완료 |
+| `helperpod`: `inspector_test.go`, `inspector_move_test.go`; `nodeexecutor`: `cleanup_advance_test.go` | GET/LIST만으로 exact legacy history·Job/Pod 종료·orphan owner를 확인; 여러 Move에 LIST 2회, 불완전 관찰은 보존 |
+| `mobility/controller`: `cleanup_pending_test.go`, `cleanup_dispatcher_test.go` | Node cleanup 대기 3개가 worker 2개를 점유하지 않고 독립 Move 계획 저장 |
 | `mobility/controller`: `source_usage_boundary_test.go`; `helperpod`: `source_usage_test.go`; `volumeapi`: `move_usage_test.go` | 실제 Registry·helper Pod 경로의 응답 유실·재시작·취소·terminal 잔여 Pod와 3개 측정 대기 중 독립 Volume 진행; 결과 CAS와 양수 사용량 불변성 |
 | `mobility/controller`: `legacy_recovery_response_loss_test.go` | 실제 Registry의 저장 후 EOF/API timeout과 저장 전 실패에서 진단 재쓰기 금지, 원래 오류 보존, fresh read 뒤 복구 재개 |
 | `cmd/controller`: `mobility_probe_test.go`; `pool/measurement` clients; `mobility/controller`: capacity probe tests | 실제 HTTP 지연을 포함한 resident 조회 전체 시간 예산, helper fallback 부재, fresh nonce, 중단 전 확인·pending 시 예약과 source 권한 유지 |
@@ -163,14 +166,15 @@ patch하거나 host-side copy로 제품 effect를 대신하면 안 된다.
 ```bash
 NODE_EFFECTS_ONLY=1 CLUSTER_NAME=shiftpv-node-focused ./test/e2e/kind/run.sh
 VOLUME_DELETE_CLEANUP_ONLY=1 CLUSTER_NAME=shiftpv-delete-focused ./test/e2e/kind/run.sh
-CLEANUP_JOB_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
+CLEANUP_EXECUTOR_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
 MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./test/e2e/kind/run.sh
 ```
 
 Node gate는 상주 Node 생성 receipt, Pod 교체 뒤 데이터 보존, 새 Pod UID의 purge receipt와 fenced cleanup 완료를 확인한다.
 Volume delete gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 유지되고, generation-fenced absence 뒤에만
-삭제와 용량 재사용이 일어나는지 검증한다. Job retry gate는 cleanup Job의 첫 Pod가 receipt 기록 전에 사라져도
-같은 Job identity 아래 새 Pod로 재결합해 수렴하는지 검증한다. Mobility restart gate는 owner commit 전후 및
+삭제와 용량 재사용이 일어나는지 검증한다. Cleanup executor retry gate는 receipt 전 resident Node Pod 교체에서
+같은 operation·target을 보존하고 새 exact Pod UID로 재지정해 수렴하며 cleanup Job이 생기지 않는지 확인한다.
+Mobility restart gate는 owner commit 전후 및
 `CleaningSource`에서 source/destination node가 중단됐다가 돌아온 뒤 현재 transaction이 계속 수렴하는지
 검증한다.
 
@@ -237,7 +241,7 @@ probe independently. Lock-wait timing must finish before protected work; failed
 API stages must report duration without proceeding to intent or filesystem work.
 
 For the two-VM/250Gi Pool scenario, compare reservation return → next
-`CreateVolume` start, rejection helper count, and successful creation duration.
+`CreateVolume` start, Node effect count, and successful creation duration.
 Use Controller level-2 step logs and, when enabled,
 `shiftpv_provisioning_step_duration_seconds`. Nested durations must not be summed.
 Use the [CreateVolume step names](../spec/metrics.md#emitted-signals) to separate

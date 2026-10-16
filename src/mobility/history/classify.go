@@ -103,6 +103,11 @@ func validateRecovered(move volumeapi.Move, journal *cleanupapi.Cleanup) error {
 	case move.Status.DestinationNode:
 		return validateJournal(move, journal, "MoveSource", *move.Status.SourceCopy)
 	case move.Spec.SourceNode:
+		// The prepared controller releases this full plan by Retiring CAS after
+		// causal absence. No cleanup journal means no purge was authorized.
+		if preparedRollbackWithoutCleanup(move, journal) {
+			return nil
+		}
 		if journal == nil || move.Status.RollbackRequiredGeneration <= 0 {
 			return fmt.Errorf("recovered Move lacks recorded rollback completion evidence")
 		}
@@ -120,6 +125,11 @@ func validateRecovered(move volumeapi.Move, journal *cleanupapi.Cleanup) error {
 	default:
 		return fmt.Errorf("Move recovery owner is neither transaction endpoint")
 	}
+}
+
+func preparedRollbackWithoutCleanup(move volumeapi.Move, journal *cleanupapi.Cleanup) bool {
+	return move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && journal == nil &&
+		move.Status.CleanupPhase == "" && move.Status.RollbackRequiredGeneration > 0
 }
 
 func validateJournal(move volumeapi.Move, journal *cleanupapi.Cleanup, reason string, target volume.CopyIdentity) error {

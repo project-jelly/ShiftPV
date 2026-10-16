@@ -93,8 +93,13 @@ func (i *Inspector) CompletedCleanupSettled(ctx context.Context, cleanup cleanup
 	if err != nil {
 		return false, fmt.Errorf("list completed cleanup Pods: %w", err)
 	}
-	for index := range pods.Items {
-		pod := &pods.Items[index]
+	return inspectorCleanupPodsSettled(cleanup, missing, pods.Items, i.Namespace)
+}
+
+func inspectorCleanupPodsSettled(cleanup cleanupapi.Cleanup, missing bool, pods []corev1.Pod, namespace string) (bool, error) {
+	executor := cleanup.Status.Executor
+	for index := range pods {
+		pod := &pods[index]
 		if !inspectorExecutorPod(pod, executor) {
 			continue
 		}
@@ -103,7 +108,7 @@ func (i *Inspector) CompletedCleanupSettled(ctx context.Context, cleanup cleanup
 			// receipt-writing Pod still prevents absence-based settlement.
 			return false, nil
 		}
-		if !inspectorPodIdentity(pod, executor, i.Namespace) {
+		if !inspectorPodIdentity(pod, executor, namespace) {
 			return false, fmt.Errorf("%w: completed cleanup Pod identity changed", cleanupapi.ErrConflict)
 		}
 		if !inspectorPodTerminated(pod) {

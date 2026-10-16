@@ -62,7 +62,7 @@ func (n *Node) resolveCleanup(ctx context.Context, volumeID string, state volume
 		if err != nil {
 			return cleanupapi.Cleanup{}, err
 		}
-		if move.Name != state.ActiveMove || move.UID == "" || move.Spec.VolumeID != volumeID {
+		if move.Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 || move.Name != state.ActiveMove || move.UID == "" || move.Spec.VolumeID != volumeID {
 			return cleanupapi.Cleanup{}, volumeapi.ErrStateConflict
 		}
 		authority = cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.Name, UID: move.UID}

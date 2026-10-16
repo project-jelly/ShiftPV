@@ -239,9 +239,7 @@ func verifyingCleanupJob(t *testing.T, r *Reconciler, kube *fake.Clientset, spec
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ready, err := helper.AdvanceReclaim(ctx, current, r.Cleanups); err != nil || ready {
-		t.Fatalf("live helper setup: ready=%t err=%v", ready, err)
-	}
+	seedLegacyCleanupJob(t, r.Cleanups, kube, current, helper.Namespace)
 	current, err = r.Cleanups.Get(ctx, spec.Authority)
 	if err != nil {
 		t.Fatal(err)

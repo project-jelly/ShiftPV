@@ -128,17 +128,17 @@ func (r *rollbackFaultRepository) RequestPoolScan(ctx context.Context, target vo
 	}
 	return generation, err
 }
-func (r *rollbackFaultRepository) SetMoveStatus(ctx context.Context, name, uid string, next volumeapi.MoveStatus) error {
+func (r *rollbackFaultRepository) CompareAndSetMoveStatus(ctx context.Context, expected volumeapi.Move, next volumeapi.MoveStatus) (volumeapi.Move, error) {
 	if r.statusFault {
 		r.statusFault = false
 		if r.apply {
-			if err := r.memoryRepository.SetMoveStatus(ctx, name, uid, next); err != nil {
-				return err
+			if _, err := r.memoryRepository.CompareAndSetMoveStatus(ctx, expected, next); err != nil {
+				return volumeapi.Move{}, err
 			}
 		}
-		return errors.New("status response lost")
+		return volumeapi.Move{}, errors.New("status response lost")
 	}
-	return r.memoryRepository.SetMoveStatus(ctx, name, uid, next)
+	return r.memoryRepository.CompareAndSetMoveStatus(ctx, expected, next)
 }
 
 func TestRollbackScanRecoversAmbiguousWritesWithoutReusingOldProof(t *testing.T) {

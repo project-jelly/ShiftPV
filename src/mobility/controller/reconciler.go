@@ -45,7 +45,6 @@ type Repository interface {
 	DeleteMove(context.Context, string, string) error
 	ListMoves(context.Context) ([]volumeapi.Move, error)
 	GetMove(context.Context, string) (volumeapi.Move, error)
-	SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error
 	CompareAndSetMoveStatus(context.Context, volumeapi.Move, volumeapi.MoveStatus) (volumeapi.Move, error)
 	RecordSourceUsage(context.Context, volumeapi.Move, volume.CopyIdentity, int64) (volumeapi.Move, error)
 }
@@ -59,7 +58,12 @@ type SourceUsage interface {
 	FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error)
 }
 
+type HistoryInspector interface {
+	MovesSettled(context.Context, []volumeapi.Move, map[string]cleanupapi.Cleanup) error
+}
+
 type Reconciler struct {
+	HistoryInspector           HistoryInspector
 	Client                     kubernetes.Interface
 	Repository                 Repository
 	CapacityProbe              CapacityProbe
@@ -100,6 +104,12 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 }
 
 func (r *Reconciler) reconcilePersistedMove(ctx context.Context, move volumeapi.Move) error {
+	if legacyMoveProtocol(move) {
+		if err := r.validateSettledMoves(ctx, []volumeapi.Move{move}); err != nil {
+			return fmt.Errorf("retain legacy Move without execution: %w", err)
+		}
+		return r.retireMoveHistory(ctx, move)
+	}
 	if !supportedMoveProtocol(move) {
 		return fmt.Errorf("retain unsupported protocol %q", move.Spec.ProtocolVersion)
 	}
@@ -111,7 +121,7 @@ func legacyMoveProtocol(move volumeapi.Move) bool {
 }
 
 func supportedMoveProtocol(move volumeapi.Move) bool {
-	return legacyMoveProtocol(move) || move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1
+	return move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1
 }
 
 func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.Move) error {
@@ -121,6 +131,10 @@ func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.M
 	if done, err := r.finalizeSourceUsage(ctx, move); err != nil || !done {
 		return err
 	}
+	return r.retireMoveHistory(ctx, move)
+}
+
+func (r *Reconciler) retireMoveHistory(ctx context.Context, move volumeapi.Move) error {
 	if slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer) {
 		return r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID)
 	}

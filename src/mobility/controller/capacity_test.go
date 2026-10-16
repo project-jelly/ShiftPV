@@ -42,9 +42,8 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 		available int64
 		want      string
 	}{
-		"approved":            {limit: "128Mi", usage: 32 << 20, available: 64 << 20},
-		"logical reservation": {limit: "16Mi", usage: 8 << 20, available: 64 << 20, want: "DestinationReservationLimit"},
-		"physical space":      {limit: "128Mi", usage: 80 << 20, available: 64 << 20, want: "DestinationFilesystemSpace"},
+		"approved":       {limit: "128Mi", usage: 32 << 20, available: 64 << 20},
+		"physical space": {limit: "128Mi", usage: 80 << 20, available: 64 << 20, want: "DestinationFilesystemSpace"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
@@ -63,16 +62,14 @@ func TestEnsureCapacityApprovesOrBlocksBeforeCopy(t *testing.T) {
 				r.SourceUsage = r.CapacityProbe.(SourceUsage)
 				r.PoolLocks = &poolcapacity.Locker{}
 			})
+			prepareCapacityMove(repository, &move, repository.pools[1])
 			if err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err != nil {
 				t.Fatal(err)
 			}
 			if move.Status.CapacityApproved != (test.want == "") || move.Status.CapacityReason != test.want || move.Status.SourceBytes != test.usage {
 				t.Fatalf("capacity status = %+v", move.Status)
 			}
-			wantPoolUID := ""
-			if test.want == "" {
-				wantPoolUID = "destination-pool-uid"
-			}
+			wantPoolUID := "destination-pool-uid"
 			if move.Status.DestinationPoolUID != wantPoolUID {
 				t.Fatalf("destination Pool UID = %q, want %q", move.Status.DestinationPoolUID, wantPoolUID)
 			}
@@ -99,6 +96,7 @@ func TestEnsureCapacityRejectsNonPositiveSourceUsage(t *testing.T) {
 		r.SourceUsage = r.CapacityProbe.(SourceUsage)
 		r.PoolLocks = &poolcapacity.Locker{}
 	})
+	prepareCapacityMove(repository, &move, repository.pools[1])
 	err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"})
 	if err == nil {
 		t.Fatal("unmeasured source usage was approved")
@@ -137,11 +135,12 @@ func TestDestinationCapacityRetainsRecoveredMoveUntilSettled(t *testing.T) {
 	repository.moves[1].Status.SourceCopy = sourceState.CurrentCopy
 	client := fake.NewSimpleClientset()
 	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system"}
+	prepareCapacityMove(repository, &current, repository.pools[1])
 	requested, logicalReserved, physicalPending, limit, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requested != 32<<20 || logicalReserved != 32<<20 || physicalPending != 32<<20 || limit != 64<<20 {
+	if requested != 32<<20 || logicalReserved != 64<<20 || physicalPending != 32<<20 || limit != 64<<20 {
 		t.Fatalf("capacity = requested=%d logical=%d physical=%d limit=%d", requested, logicalReserved, physicalPending, limit)
 	}
 }
@@ -169,11 +168,12 @@ func TestDestinationCapacityIgnoresMoveAfterVolumeAndReservationDeletion(t *test
 		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
 	}
+	prepareCapacityMove(repository, &current, repository.pools[1])
 	requested, logicalReserved, physicalPending, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err != nil {
 		t.Fatalf("deleted volume's Move blocked destination admission: %v", err)
 	}
-	if requested != 32<<20 || logicalReserved != 0 || physicalPending != 0 {
+	if requested != 32<<20 || logicalReserved != 32<<20 || physicalPending != 0 {
 		t.Fatalf("capacity = requested=%d logical=%d physical=%d", requested, logicalReserved, physicalPending)
 	}
 }
@@ -200,6 +200,7 @@ func TestDestinationCapacityRejectsMoveWithReservationButNoVolume(t *testing.T) 
 		Client:     fake.NewSimpleClientset(),
 		Repository: repository, Namespace: "system",
 	}
+	prepareCapacityMove(repository, &current, repository.pools[1])
 	_, _, _, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[1])
 	if err == nil || !strings.Contains(err.Error(), "has no volume state") {
 		t.Fatalf("incomplete move was not rejected: %v", err)
@@ -234,6 +235,7 @@ func TestDestinationCapacityRejectsPhysicalPendingOverflow(t *testing.T) {
 		repository.moves[i].Status.DestinationPoolUID = "destination-uid"
 	}
 	reconciler := &Reconciler{Repository: repository}
+	prepareCapacityMove(repository, &current, repository.pools[0])
 	_, _, _, _, err := reconciler.destinationCapacityForPool(context.Background(), current, repository.pools[0])
 	if err == nil || !strings.Contains(err.Error(), "overflows int64") {
 		t.Fatalf("physical pending overflow was not rejected: %v", err)
@@ -259,6 +261,7 @@ func TestEnsureCapacityFailsClosedWhenDestinationPoolLimitIsMissing(t *testing.T
 		SourceUsage: fakeMoveCapacityProbe{usage: 1}, CapacityProbe: fakeMoveCapacityProbe{usage: 1, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
 		PoolLocks: &poolcapacity.Locker{},
 	}
+	prepareCapacityMove(repository, &move, repository.pools[1])
 	err := reconciler.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"})
 	if err == nil || !strings.Contains(err.Error(), "capacity limit") {
 		t.Fatalf("missing Pool limit did not fail closed: %v", err)

@@ -13,24 +13,14 @@ func validateState(current State, observation Observation) error {
 	}
 	switch current.Phase {
 	case PhasePreparing, PhaseStartingDisruption, PhaseCanceling, PhaseCancelled:
-		if !observation.Prepared {
-			return fmt.Errorf("phase %q requires the prepared protocol", current.Phase)
-		}
 		if observation.CapacityApproved || observation.DestinationIntentRecorded {
 			return fmt.Errorf("phase %q cannot release destination execution authority", current.Phase)
-		}
-	case PhaseLocking, PhaseEvicting:
-		if observation.Prepared {
-			return fmt.Errorf("prepared Move cannot use legacy phase %q", current.Phase)
 		}
 	}
 	return validatePreparationEvidence(current.Phase, observation)
 }
 
 func validatePreparationEvidence(phase Phase, observation Observation) error {
-	if !observation.Prepared {
-		return nil
-	}
 	if phase == PhasePending && (observation.CapacityApproved || observation.DestinationIntentRecorded) {
 		return fmt.Errorf("pending preparation cannot carry destination execution authority")
 	}
@@ -53,9 +43,6 @@ func validateReservedSource(observation Observation) error {
 // Lifecycle routing precedes execution health checks. Cancellation does not
 // require a live workload binding, and terminal history cannot regain authority.
 func decideLifecycle(current State, observation Observation) (Decision, bool, error) {
-	if current.Phase == PhasePending && !observation.Prepared && observation.PendingObsolete {
-		return Decision{Next: current, Action: ActionDiscardUnstartedMove}, true, nil
-	}
 	switch current.Phase {
 	case PhaseSucceeded:
 		return Decision{Next: current, Action: ActionFinalizeHistory}, true, nil
@@ -80,15 +67,13 @@ func decideLifecycle(current State, observation Observation) (Decision, bool, er
 		decision, err := transition(current.Phase, PhaseCanceling, ActionWait, observation.PreparationChangedReason)
 		return decision, true, err
 	}
-	if observation.Prepared {
-		switch current.Phase {
-		case PhasePending, PhasePreparing:
-			decision, err := decidePreparation(current.Phase, observation)
-			return decision, true, err
-		case PhaseStartingDisruption:
-			decision, err := decideStartingDisruption(current.Phase, observation)
-			return decision, true, err
-		}
+	switch current.Phase {
+	case PhasePending, PhasePreparing:
+		decision, err := decidePreparation(current.Phase, observation)
+		return decision, true, err
+	case PhaseStartingDisruption:
+		decision, err := decideStartingDisruption(current.Phase, observation)
+		return decision, true, err
 	}
 	return Decision{}, false, nil
 }

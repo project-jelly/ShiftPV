@@ -105,6 +105,9 @@ func TestOwnerPlacementWaitsForMoveSettlement(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			r, client, repository, pod := ownerPlacementFixture()
 			repository.moves = []volumeapi.Move{{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: ownerPlacementVolumeID, SourceNode: "source"}, Status: test.status}}
+			if test.released {
+				seedSettledFinalizerHistory(t, r, repository)
+			}
 			if err := r.reconcileOwnerPlacements(context.Background()); err != nil {
 				t.Fatal(err)
 			}

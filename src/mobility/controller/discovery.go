@@ -55,25 +55,8 @@ func (r *Reconciler) discoverVolume(ctx context.Context, volumeID string) (volum
 func activeMoveVolumes(moves []volumeapi.Move, volumes map[string]volumeapi.State) map[string]bool {
 	activeByVolume := make(map[string]bool)
 	for _, move := range moves {
-		if !legacyMoveProtocol(move) {
-			state := volumes[move.Spec.VolumeID]
-			if !supportedMoveProtocol(move) || !volumeapi.MoveCleanupSettled(move) || state.ActiveMove == move.Name {
-				activeByVolume[move.Spec.VolumeID] = true
-			}
-			continue
-		}
-		if move.Status.RecoveryPhase == recoveryRecovered {
-			continue
-		}
-		if move.Spec.Recovery == "ResumeOwner" && move.Status.Phase == string(fsm.PhaseBlocked) {
-			// The final Volume CAS can precede recovery status persistence. Do not
-			// discover a new transaction across that crash boundary on either owner.
-			activeByVolume[move.Spec.VolumeID] = true
-			continue
-		}
-		state, exists := volumes[move.Spec.VolumeID]
-		if move.Status.Phase != string(fsm.PhaseSucceeded) &&
-			(move.Status.Phase != string(fsm.PhaseBlocked) || (exists && state.OwnerNode == move.Spec.SourceNode)) {
+		state := volumes[move.Spec.VolumeID]
+		if (!legacyMoveProtocol(move) && !supportedMoveProtocol(move)) || !volumeapi.MoveCleanupSettled(move) || state.ActiveMove == move.Name {
 			activeByVolume[move.Spec.VolumeID] = true
 		}
 	}
@@ -102,6 +85,9 @@ func (r *Reconciler) discoverVolumeMove(ctx context.Context, volumeID string, st
 	}
 	moves, err := r.Repository.ListMoves(ctx)
 	if err != nil {
+		return volumeapi.Move{}, err
+	}
+	if err := r.validateSettledMoves(ctx, movesForVolume(moves, volumeID)); err != nil {
 		return volumeapi.Move{}, err
 	}
 	fresh, err := r.Repository.Get(ctx, volumeID)

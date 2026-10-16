@@ -65,7 +65,7 @@ func storeUsageUpdate(client *dynamicfake.FakeDynamicClient, action ktesting.Act
 }
 
 func TestRecordSourceUsageChangesOnlyExactMeasurement(t *testing.T) {
-	for _, test := range []struct{ protocol, phase string }{{"", "WaitingForDestination"}, {"", "WaitingForCapacity"}, {MoveProtocolPreparedV1, "WaitingForCapacity"}} {
+	for _, test := range []struct{ protocol, phase string }{{MoveProtocolPreparedV1, "WaitingForCapacity"}} {
 		t.Run(test.protocol+"/"+test.phase, func(t *testing.T) {
 			ctx := context.Background()
 			r, client, move, copy := sourceUsageFixture(t, test.protocol, test.phase)
@@ -126,6 +126,9 @@ func TestRecordSourceUsageRejectsChangedMoveAndAuthority(t *testing.T) {
 		},
 		"raw empty cleanup": func(_ *Move, m, _ *unstructured.Unstructured, _ *volume.CopyIdentity, _ *int64) {
 			_ = unstructured.SetNestedMap(m.Object, map[string]any{}, "status", "cleanup")
+		},
+		"missing recorded copy": func(_ *Move, m, _ *unstructured.Unstructured, _ *volume.CopyIdentity, _ *int64) {
+			unstructured.RemoveNestedField(m.Object, "status", "sourceCopy")
 		},
 		"different measured copy": func(_ *Move, _, _ *unstructured.Unstructured, c *volume.CopyIdentity, _ *int64) {
 			c.CopyID = "replacement"
@@ -188,7 +191,7 @@ func TestRecordSourceUsageRejectsChangedMoveAndAuthority(t *testing.T) {
 
 func TestRecordSourceUsageRejectsUnsupportedStage(t *testing.T) {
 	for _, test := range []struct{ protocol, phase string }{
-		{"future-v2", "WaitingForCapacity"}, {MoveProtocolPreparedV1, "WaitingForDestination"},
+		{"", "WaitingForDestination"}, {"", "WaitingForCapacity"}, {"future-v2", "WaitingForCapacity"}, {MoveProtocolPreparedV1, "WaitingForDestination"},
 		{MoveProtocolPreparedV1, "StartingDisruption"}, {"", "Copying"}, {"", "Blocked"},
 	} {
 		t.Run(test.protocol+"/"+test.phase, func(t *testing.T) {
@@ -204,7 +207,7 @@ func TestRecordSourceUsageRejectsUnsupportedStage(t *testing.T) {
 func TestRecordSourceUsageStopsAfterConflictOrResponseLoss(t *testing.T) {
 	for _, outcome := range []string{"conflict with cleanup", "response lost", "response pruned"} {
 		t.Run(outcome, func(t *testing.T) {
-			r, client, move, copy := sourceUsageFixture(t, "", "WaitingForDestination")
+			r, client, move, copy := sourceUsageFixture(t, MoveProtocolPreparedV1, "WaitingForCapacity")
 			writes := 0
 			lost := errors.New("usage response lost")
 			client.PrependReactor("update", "shiftpvmoves", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -261,7 +264,7 @@ func TestRecordSourceUsageStopsAfterConflictOrResponseLoss(t *testing.T) {
 }
 
 func TestMoveStatusWritersCannotEraseOrReplaceSourceUsage(t *testing.T) {
-	for _, protocol := range []string{"", MoveProtocolPreparedV1} {
+	for _, protocol := range []string{MoveProtocolPreparedV1} {
 		for _, bytes := range []int64{0, -1, 8192} {
 			t.Run(fmt.Sprintf("%s/%d", protocol, bytes), func(t *testing.T) {
 				r, client, move, copy := sourceUsageFixture(t, protocol, "WaitingForCapacity")
@@ -272,11 +275,7 @@ func TestMoveStatusWritersCannotEraseOrReplaceSourceUsage(t *testing.T) {
 				client.ClearActions()
 				next := stored.Status
 				next.SourceBytes = bytes
-				if protocol == "" {
-					err = r.SetMoveStatus(context.Background(), stored.Name, stored.UID, next)
-				} else {
-					_, err = r.CompareAndSetMoveStatus(context.Background(), stored, next)
-				}
+				_, err = r.CompareAndSetMoveStatus(context.Background(), stored, next)
 				if !errors.Is(err, ErrStateConflict) {
 					t.Fatalf("measurement rewritten: %v", err)
 				}

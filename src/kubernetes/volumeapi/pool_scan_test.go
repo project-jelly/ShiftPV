@@ -82,29 +82,28 @@ func TestRequestPoolScanRejectsChangedIdentityAndInvalidEpoch(t *testing.T) {
 }
 
 func TestRollbackGenerationSurvivesStatusWritesAndCannotBeReplaced(t *testing.T) {
-	object := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
-		"metadata": map[string]any{"name": "move", "uid": "move-uid"},
-		"spec":     map[string]any{"volumeID": "volume", "sourceNode": "source"},
-	}}
-	registry := &Registry{Client: fake.NewSimpleDynamicClient(runtime.NewScheme(), object)}
+	move := preparedMoveFixture()
+	move.Spec.Recovery = "ResumeOwner"
+	move.Status = approvedPreparation(move)
+	move.Status.Phase, move.Status.RecoveryPhase = "Blocked", "Retiring"
+	registry := &Registry{Client: fake.NewSimpleDynamicClient(runtime.NewScheme(), preparedMoveObject(move))}
 	ctx := context.Background()
-	status := MoveStatus{Phase: "Blocked", RecoveryPhase: "Retiring", CapacityApproved: true, RollbackRequiredGeneration: 5}
-	if err := registry.SetMoveStatus(ctx, "move", "move-uid", status); err != nil {
-		t.Fatal(err)
-	}
-	move, err := registry.GetMove(ctx, "move")
+	status := move.Status
+	status.RollbackRequiredGeneration = 5
+	move, err := registry.CompareAndSetMoveStatus(ctx, move, status)
 	if err != nil || move.Status.RollbackRequiredGeneration != 5 {
 		t.Fatalf("roundtrip=%+v err=%v", move.Status, err)
 	}
-	move.Status.RecoveryMessage = "waiting for scan"
-	if err := registry.SetMoveStatus(ctx, "move", "move-uid", move.Status); err != nil {
+	status = move.Status
+	status.RecoveryMessage = "waiting for scan"
+	move, err = registry.CompareAndSetMoveStatus(ctx, move, status)
+	if err != nil {
 		t.Fatal(err)
 	}
 	for _, generation := range []int64{0, 4, 6, -1} {
 		stale := move.Status
 		stale.RollbackRequiredGeneration = generation
-		if err := registry.SetMoveStatus(ctx, "move", "move-uid", stale); !errors.Is(err, ErrStateConflict) {
+		if _, err := registry.CompareAndSetMoveStatus(ctx, move, stale); !errors.Is(err, ErrStateConflict) {
 			t.Fatalf("replacement %d accepted: %v", generation, err)
 		}
 	}

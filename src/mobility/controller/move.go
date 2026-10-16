@@ -22,7 +22,6 @@ func lifecycleState(move volumeapi.Move) fsm.State {
 
 func lifecycleFacts(move volumeapi.Move, observed *observation) {
 	facts := &observed.FSM
-	facts.Prepared = move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1
 	facts.ProtectionPresent = slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer)
 	facts.SourcePlanRecorded = move.Status.SourceCopy != nil
 	facts.SourceClaimed = observed.Volume.ActiveMove == move.Name
@@ -33,15 +32,11 @@ func lifecycleFacts(move volumeapi.Move, observed *observation) {
 	facts.ConsumerExists = observed.Consumer != nil
 	facts.ReplacementExists = observed.Replacement != nil
 	facts.ReplacementHeld = observed.Replacement != nil && hasPlacementHold(observed.Replacement) && observed.Replacement.Spec.NodeName == ""
-	facts.PendingObsolete = observed.PendingObsolete
 	facts.RecoveryRequested = move.Spec.Recovery == "ResumeOwner"
 	facts.RecoveryOwnerIsDestination = observed.Volume.OwnerNode != "" && observed.Volume.OwnerNode == move.Status.DestinationNode
 }
 
 func preparationLifecycle(move volumeapi.Move) bool {
-	if move.Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 {
-		return false
-	}
 	switch fsm.Phase(move.Status.Phase) {
 	case "", fsm.PhasePending, fsm.PhasePreparing, fsm.PhaseStartingDisruption, fsm.PhaseCanceling, fsm.PhaseCancelled:
 		return true
@@ -57,7 +52,7 @@ func needsRecoveryObservation(move volumeapi.Move) bool {
 	if move.Status.Phase != string(fsm.PhaseBlocked) || move.Spec.Recovery != "ResumeOwner" || move.Status.RecoveryPhase == recoveryRecovered {
 		return false
 	}
-	return move.Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 || move.Status.CapacityApproved ||
+	return move.Status.CapacityApproved ||
 		!noDestinationEffectIntent(move) || move.Status.RecoveryPhase != ""
 }
 
@@ -93,7 +88,7 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 func (r *Reconciler) observeLifecycle(ctx context.Context, move volumeapi.Move) (observation, error) {
 	phase := fsm.Phase(move.Status.Phase)
 	switch {
-	case phase == "" && move.Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1, phase == fsm.PhaseSucceeded, phase == fsm.PhaseCancelled,
+	case phase == fsm.PhaseSucceeded, phase == fsm.PhaseCancelled,
 		phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered:
 		if phase == fsm.PhaseCancelled {
 			return r.observeCancellation(ctx, move)
@@ -107,17 +102,15 @@ func (r *Reconciler) observeLifecycle(ctx context.Context, move volumeapi.Move) 
 		}
 		return observation{}, nil
 	}
-	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 {
-		switch phase {
-		case "", fsm.PhasePending, fsm.PhasePreparing, fsm.PhaseStartingDisruption:
-			return r.observePreparation(ctx, move)
-		}
-		if err := validatePreparedStage(move); err != nil {
-			return observation{}, err
-		}
+	switch phase {
+	case "", fsm.PhasePending, fsm.PhasePreparing, fsm.PhaseStartingDisruption:
+		return r.observePreparation(ctx, move)
+	}
+	if err := validatePreparedStage(move); err != nil {
+		return observation{}, err
 	}
 	observed, err := r.observe(ctx, move)
-	if err == nil && move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && !move.Status.CapacityApproved && noDestinationEffectIntent(move) {
+	if err == nil && !move.Status.CapacityApproved && noDestinationEffectIntent(move) {
 		if move.Deleting {
 			observed.FSM.PreparationChangedReason = "MoveDeleting"
 		} else {
@@ -219,11 +212,6 @@ func actionComplete(err error) (bool, error) {
 
 func (r *Reconciler) executeLifecycle(ctx context.Context, move *volumeapi.Move, observed observation, decision fsm.Decision) (bool, error) {
 	switch decision.Action {
-	case fsm.ActionDiscardUnstartedMove:
-		if err := r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID); err != nil {
-			return false, err
-		}
-		return false, r.Repository.DeleteMove(ctx, move.Name, move.UID)
 	case fsm.ActionProtectMove:
 		return false, r.Repository.AddMoveFinalizer(ctx, move.Name, move.UID)
 	case fsm.ActionInitializePreparation:

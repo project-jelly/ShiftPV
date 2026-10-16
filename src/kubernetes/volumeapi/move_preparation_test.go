@@ -36,7 +36,7 @@ func preparedMoveObject(move Move) *unstructured.Unstructured {
 	object := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
 		"metadata": map[string]any{"name": move.Name, "uid": move.UID, "resourceVersion": move.ResourceVersion},
-		"spec":     map[string]any{"volumeID": move.Spec.VolumeID, "sourceNode": move.Spec.SourceNode},
+		"spec":     map[string]any{"volumeID": move.Spec.VolumeID, "sourceNode": move.Spec.SourceNode, "recovery": move.Spec.Recovery},
 	}}
 	object.SetFinalizers(move.Finalizers)
 	if move.Spec.ProtocolVersion != "" {
@@ -361,23 +361,6 @@ func TestCompareAndSetMoveStatusPreservesRawCleanup(t *testing.T) {
 	}
 }
 
-func TestLegacyMoveSetterRejectsVersionedAndPreparedState(t *testing.T) {
-	for _, protocol := range []string{MoveProtocolPreparedV1, "future-v2", ""} {
-		move := preparedMoveFixture()
-		move.Spec.ProtocolVersion = protocol
-		client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), preparedMoveObject(move))
-		registry := &Registry{Client: client}
-		if err := registry.SetMoveStatus(context.Background(), move.Name, move.UID, MoveStatus{Phase: "Succeeded"}); !errors.Is(err, ErrStateConflict) {
-			t.Fatalf("legacy writer accepted protocol %q/preparation: %v", protocol, err)
-		}
-		for _, action := range client.Actions() {
-			if action.GetVerb() == "update" {
-				t.Fatal("legacy writer erased prepared status")
-			}
-		}
-	}
-}
-
 func TestCreatePreparedMoveUsesStrictSchemaAndDetectsPruning(t *testing.T) {
 	for _, prune := range []bool{false, true} {
 		client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
@@ -421,31 +404,6 @@ func TestMoveCleanupSettledRetainsPreparedAndUnknownRecords(t *testing.T) {
 		if MoveCleanupSettled(move) {
 			t.Fatal("unknown protocol considered settled")
 		}
-	}
-}
-
-func TestLegacyMoveSetterRechecksProtocolAfterConflict(t *testing.T) {
-	move := preparedMoveFixture()
-	move.Spec.ProtocolVersion, move.Status.Preparation = "", nil
-	object := preparedMoveObject(move)
-	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
-	writes := 0
-	client.PrependReactor("update", "shiftpvmoves", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		writes++
-		changed := object.DeepCopy()
-		changed.SetResourceVersion("8")
-		changed.Object["spec"].(map[string]any)["protocolVersion"] = MoveProtocolPreparedV1
-		if err := client.Tracker().Update(MoveResource, changed, ""); err != nil {
-			t.Fatal(err)
-		}
-		return true, nil, apierrors.NewConflict(MoveResource.GroupResource(), move.Name, errors.New("concurrent protocol change"))
-	})
-	registry := &Registry{Client: client}
-	if err := registry.SetMoveStatus(context.Background(), move.Name, move.UID, move.Status); !errors.Is(err, ErrStateConflict) {
-		t.Fatalf("legacy retry ignored live protocol: %v", err)
-	}
-	if writes != 1 {
-		t.Fatalf("legacy writer replayed into prepared protocol: %d writes", writes)
 	}
 }
 

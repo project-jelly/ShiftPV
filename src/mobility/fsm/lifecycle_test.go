@@ -7,7 +7,7 @@ import (
 
 func preparedObservation() Observation {
 	return Observation{
-		Prepared: true, ProtectionPresent: true, SourcePlanRecorded: true, SourceClaimed: true,
+		ProtectionPresent: true, SourcePlanRecorded: true, SourceClaimed: true,
 		SourceHealthy: true, PreconditionsValid: true, PreparationReserved: true,
 	}
 }
@@ -46,7 +46,7 @@ func TestPreparedEntryPersistsIntentBeforeDisruption(t *testing.T) {
 			assertDecision(t, State{Phase: test.phase}, observation, State{Phase: test.next}, test.action)
 		})
 	}
-	assertDecision(t, State{}, Observation{Prepared: true}, State{Phase: PhasePending}, ActionProtectMove)
+	assertDecision(t, State{}, Observation{}, State{Phase: PhasePending}, ActionProtectMove)
 }
 
 func TestPreparedExecutionApprovalIsFreshlyObserved(t *testing.T) {
@@ -62,7 +62,7 @@ func TestPreparedEmptyPhaseCanInitializeItsObservedPlan(t *testing.T) {
 	observation := preparedObservation()
 	observation.SourcePlanRecorded, observation.SourceClaimed, observation.PreparationReserved = false, false, false
 	assertDecision(t, State{}, observation, State{Phase: PhasePreparing}, ActionInitializePreparation)
-	assertDecision(t, State{}, Observation{}, State{Phase: PhasePending}, ActionWait)
+	assertDecision(t, State{}, Observation{}, State{Phase: PhasePending}, ActionProtectMove)
 }
 
 func TestCancellationWinsOnlyBeforeDestinationAuthority(t *testing.T) {
@@ -103,7 +103,7 @@ func TestCancellationIntentDoesNotRequireLiveSourceClaimObservation(t *testing.T
 		t.Run(string(phase), func(t *testing.T) {
 			// An effect-time invalidation fences the Move writer before another
 			// Volume read. Missing live facts cannot authorize settlement.
-			observation := Observation{Prepared: true, PreparationReserved: true, PreparationChangedReason: "PlacementChanged"}
+			observation := Observation{PreparationReserved: true, PreparationChangedReason: "PlacementChanged"}
 			decision := assertDecision(t, State{Phase: phase}, observation, State{Phase: PhaseCanceling}, ActionWait)
 			observation.PreparationChangedReason = ""
 			observation.PlacementAbsent = true
@@ -118,7 +118,7 @@ func TestCancellationIntentDoesNotRequireLiveSourceClaimObservation(t *testing.T
 }
 
 func TestCancellationSettlesSourceThenPlacementThenHoldThenClaim(t *testing.T) {
-	observation := Observation{Prepared: true, SourcePlanRecorded: true}
+	observation := Observation{SourcePlanRecorded: true}
 	state := State{Phase: PhaseCanceling}
 	assertDecision(t, state, observation, state, ActionClaimSource)
 	observation.SourceClaimed, observation.SourceMoving = true, true
@@ -141,7 +141,7 @@ func TestCancellationSettlesSourceThenPlacementThenHoldThenClaim(t *testing.T) {
 
 func TestCancelledReentryStillSettlesDelayedWritesAndPlacement(t *testing.T) {
 	state := State{Phase: PhaseCancelled}
-	observation := Observation{Prepared: true, SourcePlanRecorded: true, SourceClaimed: true, SourceMoving: true,
+	observation := Observation{SourcePlanRecorded: true, SourceClaimed: true, SourceMoving: true,
 		SourceAuthorityInvalid: true, PreparationChangedReason: "MissingBinding"}
 	assertDecision(t, state, observation, state, ActionRestoreSource)
 	observation.SourceMoving = false
@@ -155,7 +155,7 @@ func TestCancelledReentryStillSettlesDelayedWritesAndPlacement(t *testing.T) {
 }
 
 func TestTerminalAndRecoveryRoutingPrecedesOrdinaryGuards(t *testing.T) {
-	observation := Observation{Prepared: true, SourceAuthorityInvalid: true, DestinationBlocked: true,
+	observation := Observation{SourceAuthorityInvalid: true, DestinationBlocked: true,
 		DestinationUnavailable: true, PreparationChangedReason: "MissingBinding", RecoveryRequested: true}
 	assertDecision(t, State{Phase: PhaseSucceeded}, observation, State{Phase: PhaseSucceeded}, ActionFinalizeHistory)
 	settled := State{Phase: PhaseBlocked, RecoveryPhase: RecoveryRecovered}
@@ -176,7 +176,7 @@ func TestRecoveryOwnerDeterminesCleanupPublicationOrder(t *testing.T) {
 			name = "destination"
 		}
 		t.Run(name, func(t *testing.T) {
-			observation := Observation{Prepared: true, CapacityApproved: true, DestinationIntentRecorded: true,
+			observation := Observation{CapacityApproved: true, DestinationIntentRecorded: true,
 				RecoveryRequested: true, RecoveryOwnerIsDestination: destination}
 			state := State{Phase: PhaseBlocked}
 			stages := []struct {
@@ -215,20 +215,19 @@ func TestRecoveryOwnerDeterminesCleanupPublicationOrder(t *testing.T) {
 }
 
 func TestRecoveryUnlockObservationIsScopedToCompleting(t *testing.T) {
-	observation := Observation{Prepared: true, RecoveryRequested: true, DestinationIntentRecorded: true, RecoveryUnlockObserved: true}
+	observation := Observation{RecoveryRequested: true, DestinationIntentRecorded: true, RecoveryUnlockObserved: true}
 	assertDecision(t, State{Phase: PhaseBlocked, RecoveryPhase: RecoveryCompleting}, observation,
 		State{Phase: PhaseBlocked, RecoveryPhase: RecoveryRecovered}, ActionWait)
 	assertDecision(t, State{Phase: PhaseBlocked, RecoveryPhase: RecoveryVerifying}, observation,
 		State{Phase: PhaseBlocked, RecoveryPhase: RecoveryRetiring}, ActionVerifyRecovery)
 }
 
-func TestDiscardObsoletePendingIsOnlyALegacyAction(t *testing.T) {
-	observation := Observation{PendingObsolete: true, SourceHealthy: true, PreconditionsValid: true}
-	assertDecision(t, State{Phase: PhasePending}, observation, State{Phase: PhasePending}, ActionDiscardUnstartedMove)
-	observation.Prepared = true
-	assertDecision(t, State{Phase: PhasePending}, observation, State{Phase: PhasePending}, ActionProtectMove)
-	observation.Prepared = false
-	assertDecision(t, State{Phase: PhaseLocking}, observation, State{Phase: PhaseLocking}, ActionLockVolume)
+func TestRetiredPhasesAreNotExecutable(t *testing.T) {
+	for _, phase := range []Phase{"Locking", "Evicting"} {
+		if decision, err := Decide(State{Phase: phase}, Observation{}); err == nil {
+			t.Fatalf("retired phase executed: %+v", decision)
+		}
+	}
 }
 
 func TestLifecycleRejectsIncompatibleStateAxes(t *testing.T) {
@@ -236,21 +235,16 @@ func TestLifecycleRejectsIncompatibleStateAxes(t *testing.T) {
 		state       State
 		observation Observation
 	}{
-		{State{Phase: PhaseLocking}, Observation{Prepared: true}},
-		{State{Phase: PhaseEvicting}, Observation{Prepared: true}},
-		{State{Phase: PhasePreparing}, Observation{}},
 		{State{Phase: PhaseStartingDisruption}, Observation{}},
-		{State{Phase: PhaseCanceling}, Observation{}},
-		{State{Phase: PhaseCancelled}, Observation{}},
-		{State{Phase: PhasePending}, Observation{Prepared: true, CapacityApproved: true}},
-		{State{Phase: PhasePreparing}, Observation{Prepared: true, CapacityApproved: true}},
-		{State{Phase: PhaseCanceling}, Observation{Prepared: true, DestinationIntentRecorded: true}},
-		{State{Phase: PhaseCancelled}, Observation{Prepared: true, PreparationReserved: true}},
-		{State{Phase: PhasePreparing}, Observation{Prepared: true, PreparationReserved: true, SourcePlanRecorded: true}},
-		{State{Phase: PhaseCanceling}, Observation{Prepared: true, PreparationReserved: true, SourcePlanRecorded: true}},
-		{State{Phase: PhaseStartingDisruption}, Observation{Prepared: true}},
+		{State{Phase: PhasePending}, Observation{CapacityApproved: true}},
+		{State{Phase: PhasePreparing}, Observation{CapacityApproved: true}},
+		{State{Phase: PhaseCanceling}, Observation{DestinationIntentRecorded: true}},
+		{State{Phase: PhaseCancelled}, Observation{PreparationReserved: true}},
+		{State{Phase: PhasePreparing}, Observation{PreparationReserved: true, SourcePlanRecorded: true}},
+		{State{Phase: PhaseCanceling}, Observation{PreparationReserved: true, SourcePlanRecorded: true}},
+		{State{Phase: PhaseStartingDisruption}, Observation{}},
 		{State{Phase: PhaseCopying, RecoveryPhase: RecoveryQuiescing}, Observation{}},
-		{State{Phase: PhaseCopying}, Observation{Prepared: true, SourceAuthorityInvalid: true}},
+		{State{Phase: PhaseCopying}, Observation{SourceAuthorityInvalid: true}},
 		{State{Phase: PhaseBlocked, RecoveryPhase: "Mystery"}, Observation{}},
 	} {
 		if decision, err := Decide(test.state, test.observation); err == nil {

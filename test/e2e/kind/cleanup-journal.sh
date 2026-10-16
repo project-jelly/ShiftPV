@@ -79,11 +79,6 @@ wait_for_cleanup_phase() {
 		--timeout="${timeout}"
 }
 
-cleanup_job_name() {
-	local resource=$1
-	kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.jobName}'
-}
-
 assert_cleanup_journal() {
 	local resource=$1 expected_reason=$2 expected_volume=$3 expected_copy=$4 expected_kind=$5
 	local parent_name parent_uid operation_id executor_uid executor_pod_uid receipt_executor_uid
@@ -95,26 +90,16 @@ assert_cleanup_journal() {
 	executor_uid=$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.jobUID}')
 	executor_pod_uid=$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.podUID}')
 	receipt_executor_uid=$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.receipt.executorUID}')
-	case "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.kind}')" in
-	Node)
-		case "${expected_kind}:${expected_reason}" in
-		ShiftPVVolume:VolumeDelete | ShiftPVMove:MoveSource | ShiftPVMove:MoveRollback) ;;
-		*) echo "unsupported Node cleanup authority/reason: ${expected_kind}/${expected_reason}" >&2; return 1 ;;
-		esac
-		test -z "$(cleanup_job_name "${resource}")"
-		test -z "${executor_uid}"
-		test -n "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.namespace}')"
-		test -n "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.podName}')"
-		executor_uid=${executor_pod_uid}
-		;;
-	"")
-		test -n "$(cleanup_job_name "${resource}")"
-		;;
-	*)
-		echo "unsupported cleanup executor in ${resource}" >&2
-		return 1
-		;;
+	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.kind}')" = Node
+	case "${expected_kind}:${expected_reason}" in
+	ShiftPVVolume:VolumeDelete | ShiftPVMove:MoveSource | ShiftPVMove:MoveRollback) ;;
+	*) echo "unsupported Node cleanup authority/reason: ${expected_kind}/${expected_reason}" >&2; return 1 ;;
 	esac
+	test -z "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.jobName}')"
+	test -z "${executor_uid}"
+	test -n "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.namespace}')"
+	test -n "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.executor.podName}')"
+	executor_uid=${executor_pod_uid}
 
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.status.phase}')" = Completed
 	test "$(kubectl get "${resource}" -o jsonpath='{.status.cleanup.spec.reason}')" = "${expected_reason}"

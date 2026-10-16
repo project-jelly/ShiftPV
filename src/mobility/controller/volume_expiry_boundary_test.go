@@ -21,29 +21,29 @@ import (
 
 // Wait outside the fake client's mutex: this is an actual caller deadline,
 // rather than an API timeout returned while the reconcile context stays live.
-type deadlineLegacyStatusRepository struct {
+type deadlineStatusRepository struct {
 	*volumeapi.Registry
 	accepted bool
 	attempts int
 }
 
-func (r *deadlineLegacyStatusRepository) SetMoveStatus(ctx context.Context, name, uid string, status volumeapi.MoveStatus) error {
+func (r *deadlineStatusRepository) CompareAndSetMoveStatus(ctx context.Context, expected volumeapi.Move, status volumeapi.MoveStatus) (volumeapi.Move, error) {
 	r.attempts++
 	if r.accepted {
-		if err := r.Registry.SetMoveStatus(ctx, name, uid, status); err != nil {
-			return err
+		if _, err := r.Registry.CompareAndSetMoveStatus(ctx, expected, status); err != nil {
+			return volumeapi.Move{}, err
 		}
 	}
 	<-ctx.Done()
-	return ctx.Err()
+	return volumeapi.Move{}, ctx.Err()
 }
 
-func TestVolumeExpiryLegacyRecoveryRequiresFreshObservation(t *testing.T) {
+func TestVolumeExpiryRecoveryRequiresFreshObservation(t *testing.T) {
 	for _, accepted := range []bool{false, true} {
 		t.Run(map[bool]string{false: "rejected", true: "accepted"}[accepted], func(t *testing.T) {
-			f, move := legacyRecoveryStatusFixture(t)
+			f, move := preparedRecoveryStatusFixture(t)
 			protected := f.state(t, 0)
-			repository := &deadlineLegacyStatusRepository{Registry: f.registry, accepted: accepted}
+			repository := &deadlineStatusRepository{Registry: f.registry, accepted: accepted}
 			f.reconciler.Repository = repository
 			ctx, cancel := context.WithTimeout(f.ctx, 250*time.Millisecond)
 			defer cancel()
@@ -139,21 +139,10 @@ func TestVolumeExpiryPreparedApprovalRetainsSingleReservation(t *testing.T) {
 }
 
 func TestVolumeExpirySourceUsageRetainsResultForFreshAttempt(t *testing.T) {
-	for _, protocol := range []string{"", volumeapi.MoveProtocolPreparedV1} {
+	for _, protocol := range []string{volumeapi.MoveProtocolPreparedV1} {
 		t.Run("protocol="+protocol, func(t *testing.T) {
 			f, move := preparationAtCapacity(t)
-			if protocol == "" {
-				object, err := f.dynamic.Resource(volumeapi.MoveResource).Get(f.ctx, move.Name, metav1.GetOptions{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				unstructured.RemoveNestedField(object.Object, "spec", "protocolVersion")
-				unstructured.RemoveNestedField(object.Object, "status", "preparation")
-				if _, err := f.commitDynamicUpdate(volumeapi.MoveResource, object); err != nil {
-					t.Fatal(err)
-				}
-				move = f.move(t, 0)
-			}
+
 			installSourceUsageRunner(f)
 			if err := f.reconciler.reconcileMove(f.ctx, move); err != nil {
 				t.Fatal(err)

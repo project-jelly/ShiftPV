@@ -132,7 +132,7 @@ func ownerPlacementHints(pods []*corev1.Pod, pvs []corev1.PersistentVolume) []vo
 // This only skips future, fully settled history. It never filters an authority
 // LIST used by discovery, capacity accounting or an owner-placement writer.
 func (r *Reconciler) moveNeedsWork(move volumeapi.Move, volumes map[string]volumeapi.State, volumesKnown bool) bool {
-	if !volumesKnown || !supportedMoveProtocol(move) || !volumeapi.MoveCleanupSettled(move) || moveCleanupPending(move) ||
+	if !volumesKnown || (!legacyMoveProtocol(move) && !supportedMoveProtocol(move)) || !volumeapi.MoveCleanupSettled(move) || moveCleanupPending(move) ||
 		len(move.Finalizers) != 0 || volumes[move.Spec.VolumeID].ActiveMove == move.Name {
 		return true
 	}

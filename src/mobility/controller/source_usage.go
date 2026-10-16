@@ -70,7 +70,7 @@ func sourceUsageCopy(move volumeapi.Move, state volumeapi.State) (volume.CopyIde
 		copy.VolumeID != move.Spec.VolumeID || copy.VolumeUID != state.UID {
 		return volume.CopyIdentity{}, fmt.Errorf("source volume has no locked unpublished serving-copy identity")
 	}
-	if move.Status.SourceCopy != nil && *move.Status.SourceCopy != *copy {
+	if move.Status.SourceCopy == nil || *move.Status.SourceCopy != *copy {
 		return volume.CopyIdentity{}, fmt.Errorf("source copy identity changed before capacity admission")
 	}
 	return *copy, nil

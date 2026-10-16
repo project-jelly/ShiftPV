@@ -25,9 +25,6 @@ type observation struct {
 	CandidateNodes  []string
 	Names           resourceNames
 	SourceCordoned  bool
-	// PendingObsolete marks an unstarted Move whose source is schedulable again.
-	// The reconciler deletes the transaction instead of deciding a next phase.
-	PendingObsolete bool
 }
 
 // observe builds the immutable snapshot the reconciler decides on. Each step
@@ -67,7 +64,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 // cleanup journal — is named after a Move that does not exist.
 func (r *Reconciler) preflightVolume(ctx context.Context, volumeID, sourceNode string) (valid bool, reason string, err error) {
 	var result observation
-	candidate := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: sourceNode}}
+	candidate := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: sourceNode, ProtocolVersion: volumeapi.MoveProtocolPreparedV1}}
 	if _, _, err := r.observeEligibility(ctx, candidate, &result); err != nil {
 		return false, "", err
 	}

@@ -19,10 +19,6 @@ func (r *Reconciler) execute(ctx context.Context, move *volumeapi.Move, observed
 	switch decision.Action {
 	case fsm.ActionWait:
 		return nil
-	case fsm.ActionLockVolume:
-		return r.lockVolume(ctx, move, observed)
-	case fsm.ActionEvictConsumer:
-		return r.evictConsumer(ctx, move, observed)
 	case fsm.ActionEnsurePlacement:
 		return r.ensurePlacement(ctx, move, observed)
 	case fsm.ActionEnsureCapacity:
@@ -48,54 +44,6 @@ func (r *Reconciler) execute(ctx context.Context, move *volumeapi.Move, observed
 	default:
 		return fmt.Errorf("unsupported mobility action %q", decision.Action)
 	}
-}
-
-func (r *Reconciler) lockVolume(ctx context.Context, move *volumeapi.Move, observed observation) error {
-	if observed.PV == nil || observed.Claim == nil || observed.Consumer == nil {
-		return fmt.Errorf("mobility binding or consumer disappeared before volume lock")
-	}
-	if observed.Volume.OwnerNode != move.Spec.SourceNode {
-		return fmt.Errorf("volume owner %q does not match move source %q", observed.Volume.OwnerNode, move.Spec.SourceNode)
-	}
-	if observed.Volume.CurrentCopy == nil || observed.Volume.CurrentCopy.Role != volume.RoleServing || observed.Volume.CurrentCopy.NodeName != move.Spec.SourceNode {
-		return fmt.Errorf("source volume has no exact serving-copy identity")
-	}
-	if move.Status.SourceCopy != nil && *move.Status.SourceCopy != *observed.Volume.CurrentCopy {
-		return fmt.Errorf("source copy identity changed before volume lock")
-	}
-	if observed.Volume.CurrentCopy != nil {
-		copy := *observed.Volume.CurrentCopy
-		move.Status.SourceCopy = &copy
-	}
-	if !observed.FSM.VolumeLocked {
-		next := volumeapi.State{
-			UID:            observed.Volume.UID,
-			Phase:          volumeapi.PhaseMoving,
-			OwnerNode:      move.Spec.SourceNode,
-			ActiveMove:     move.Name,
-			PublishedNodes: append([]string(nil), observed.Volume.PublishedNodes...),
-		}
-		err := r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseReady, "", move.Spec.SourceNode, next)
-		if err != nil && !errors.Is(err, volumeapi.ErrStateConflict) {
-			return err
-		}
-		if err != nil {
-			current, getErr := r.Repository.Get(ctx, move.Spec.VolumeID)
-			if getErr != nil {
-				return getErr
-			}
-			if current.Phase != volumeapi.PhaseMoving || current.ActiveMove != move.Name || current.OwnerNode != move.Spec.SourceNode {
-				return err
-			}
-		}
-	}
-	move.Status.PersistentVolumeName = observed.PV.Name
-	move.Status.ClaimNamespace = observed.Claim.Namespace
-	move.Status.ClaimName = observed.Claim.Name
-	move.Status.ConsumerName = observed.Consumer.Name
-	move.Status.ConsumerUID = string(observed.Consumer.UID)
-	move.Status.CandidateNodes = append([]string(nil), observed.CandidateNodes...)
-	return nil
 }
 
 func (r *Reconciler) evictConsumer(ctx context.Context, move *volumeapi.Move, observed observation) error {
@@ -173,14 +121,16 @@ func (r *Reconciler) ensureCopy(ctx context.Context, move *volumeapi.Move, obser
 	if !move.Status.CapacityApproved || move.Status.SourceBytes <= 0 {
 		return fmt.Errorf("destination capacity is not approved")
 	}
-	previous := move.Status
-	move.Status.DestinationNode = observed.DestinationNode
-	move.Status.ReplacementName = observed.Replacement.Name
-	move.Status.ReplacementUID = string(observed.Replacement.UID)
-	if err := r.prepareMoveCopyIdentities(ctx, move); err != nil {
+	if observed.DestinationNode != move.Status.DestinationNode {
+		return fmt.Errorf("observed destination differs from the approved plan")
+	}
+	if err := validatePreparedStage(*move); err != nil {
 		return err
 	}
-	// Persist the destination before starting disk-side work, including API retries.
+	previous := move.Status
+	move.Status.ReplacementName = observed.Replacement.Name
+	move.Status.ReplacementUID = string(observed.Replacement.UID)
+	// Persist the replacement identity before pinning or starting disk-side work.
 	if err := r.persistMoveStatus(ctx, move, previous); err != nil {
 		return err
 	}
@@ -192,8 +142,8 @@ func (r *Reconciler) ensureCopy(ctx context.Context, move *volumeapi.Move, obser
 
 func (r *Reconciler) ensurePromotion(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	previous := move.Status
-	if move.Status.DestinationNode == "" {
-		move.Status.DestinationNode = observed.DestinationNode
+	if move.Status.DestinationNode == "" || observed.DestinationNode != move.Status.DestinationNode {
+		return fmt.Errorf("observed destination differs from the approved plan")
 	}
 	move.Status.PromotionJobName = observed.Names.PromotionJob
 	if move.Status.IncomingCopy == nil || move.Status.DestinationCopy == nil || move.Status.PromotionOperationID == "" {
@@ -207,9 +157,6 @@ func (r *Reconciler) ensurePromotion(ctx context.Context, move *volumeapi.Move, 
 
 func (r *Reconciler) commitOwner(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	destination := move.Status.DestinationNode
-	if destination == "" {
-		destination = observed.DestinationNode
-	}
 	if destination == "" {
 		return fmt.Errorf("destination node is empty")
 	}
@@ -286,21 +233,6 @@ func (r *Reconciler) confirmCommitConflict(ctx context.Context, move volumeapi.M
 		return conflict
 	}
 	return nil
-}
-
-func (r *Reconciler) prepareMoveCopyIdentities(ctx context.Context, move *volumeapi.Move) error {
-	var pool volumeapi.Pool
-	pools, err := r.Repository.Pools(ctx)
-	if err != nil {
-		return err
-	}
-	for _, candidate := range pools {
-		if candidate.NodeName == move.Status.DestinationNode && candidate.UID == move.Status.DestinationPoolUID {
-			pool = candidate
-			break
-		}
-	}
-	return prepareMoveCopyIdentitiesForPool(move, pool)
 }
 
 // prepareMoveCopyIdentitiesForPool binds the full execution plan to the exact

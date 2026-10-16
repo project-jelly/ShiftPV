@@ -39,11 +39,8 @@ func TestMoveCleanupReentryRequiresLegacyWriterSettlement(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// The real helper creates and binds its deterministic Job. Simulate
-				// its later API receipt, followed by a controller process restart.
-				if _, err := helper.Reclaim(ctx, current, r.Cleanups); !errors.Is(err, context.DeadlineExceeded) {
-					t.Fatalf("expected live helper Job: %v", err)
-				}
+				// Seed a Job accepted by the previous controller; this candidate only observes it.
+				seedLegacyCleanupJob(t, r.Cleanups, kube, current, helper.Namespace)
 				current, err = r.Cleanups.Get(ctx, spec.Authority)
 				if err != nil {
 					t.Fatal(err)
@@ -201,10 +198,8 @@ func settleLegacyCleanupFixture(t *testing.T, r *Reconciler, kube *fake.Clientse
 	if err != nil {
 		t.Fatal(err)
 	}
-	helper := &helperpod.Runner{Client: kube, Namespace: "system", Pools: &volumeapi.Registry{Client: r.Cleanups.Client}, Image: "helper", Timeout: time.Second}
-	if _, ready, err := helper.AdvanceReclaim(ctx, current, r.Cleanups); err != nil || !ready {
-		t.Fatalf("compatible writer settlement: ready=%v err=%v", ready, err)
-	}
+	// The fixture models the old writer's final absence settlement after its
+	// Job has terminated. The candidate itself never advances legacy execution.
 	if err := r.driveCleanupAbsence(ctx, current); err != nil {
 		t.Fatal(err)
 	}
