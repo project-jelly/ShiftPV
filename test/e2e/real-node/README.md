@@ -18,9 +18,9 @@ has passed and all test resources have returned to the recorded baseline.
 3. **Operating-system reboot**: repeat the two boundaries with a forced worker
    reboot, prove the boot ID changed, and hold MicroK8s stopped after boot until
    the control plane has observed the node unavailable.
-4. **Soak**: alternate a synthetic volume between nodes for at least 100 moves
-   and 12 hours. Inject a controller restart every tenth move and a cleanup Pod
-   deletion every twentieth move.
+4. **Soak**: alternate a synthetic volume between nodes for at least 100
+   successful moves and 43,200 seconds. Inject a controller restart every tenth
+   move and a native cleanup Node Pod deletion every twentieth move.
 
 A physical power cut is an optional qualification for a specific host and
 filesystem, and requires an independently proven out-of-band power-on path.
@@ -145,20 +145,42 @@ demonstrated IPMI, managed-PDU, smart-plug, or other out-of-band power-on path.
 ## Soak
 
 `soak.sh` alternates one synthetic PVC between the two reviewed nodes while
-preserving its PVC/PV/ShiftPV identity and payload checksum. It proves the old
-copy is absent and the new serving copy is present after every move. Every
-tenth move restarts the controller; every twentieth move deletes the active
-cleanup Pod and requires the move to converge through retry.
+preserving its PVC/PV/ShiftPV identity and payload checksum. The initial payload
+includes a unique `RUN_ID`/`PVC_UID`/`VOLUME_UID` nonce to detect recreation. It
+proves the old copy is absent and the new serving copy is present after every
+move. Every tenth move restarts the controller. Every twentieth move exercises
+native cleanup across a Node Pod replacement:
+
+1. A Volume admission barrier prevents cleanup approval. Prove it active before
+   cordon: an unchanged server-side dry-run of the same test Volume's prior
+   settled `Succeeded` Move with `Completed` cleanup must be rejected; nothing is
+   saved. After source unpublish and destination ownership commit are proven,
+   acquire the
+   source volume's existing lock inode with `flock`, then release the barrier.
+2. Record the cleanup journal's bound Node Pod UID and delete that exact Pod
+   with a UID precondition. Preserve the operation and target while the journal
+   rebinds to a replacement Node Pod UID; then release the lock.
+3. Require the native receipt's `executorUID` to equal the replacement Pod UID.
+   Prove receipt acceptance and fresh source absence before capacity holds and
+   finalizers are released. No cleanup Job executes this fault path.
 
 `CONTROLLER_RESTART_EVERY` and `CLEANUP_POD_DELETE_EVERY` may lower those
-intervals for a short fault-injection smoke run. The release gate uses their
-defaults, 10 and 20.
+intervals for a short fault-injection smoke run. Native cleanup interval 1 is
+rejected because the barrier probe needs a prior settled Move; interval 0
+disables that fault and is smoke-only. Qualification requires defaults 10 and
+20 and the corresponding successful fault counts.
 
-The release gate requires both 100 successful moves and 12 elapsed hours. The
-script spaces moves across `MIN_DURATION_SECONDS=43200` by default and prints
-`REAL_NODE_SOAK_OK` only when both thresholds were actually met. Shorter runs
+The release gate requires both 100 successful moves and 43,200 elapsed seconds
+(12 hours), with the required restart and native cleanup faults. The script
+spaces moves across `MIN_DURATION_SECONDS=43200` by default and prints
+`REAL_NODE_SOAK_OK` only when these conditions were actually met. Shorter runs
 are smoke tests and print `REAL_NODE_SOAK_SMOKE_OK`; they are not release
+qualification. Static checks and mocked runs do not establish physical
 qualification.
+
+Success markers are printed only after owned locks and admission policy are
+released, nodes are uncordoned, and required final API evidence is captured.
+Interruptions exit non-zero: `INT` with 130 and `TERM` with 143.
 
 Because other controllers remain active during a long soak, the baseline gate
 compares non-test resource UID and spec rather than controller-owned mutable
@@ -191,7 +213,8 @@ MIN_DURATION_SECONDS=43200 \
 Every interruption and soak iteration must preserve all of these
 invariants:
 
-- PVC UID, PV name, and ShiftPV volume identity remain unchanged.
+- PVC UID, PV UID, ShiftPVVolume UID, PV name, and CSI `volumeHandle` remain
+  exactly unchanged.
 - Exactly one node is authoritative; no split ownership is observed.
 - The payload checksum after recovery equals the checksum before interruption.
 - Before ownership commit, recovery returns to the source. After commit, the
