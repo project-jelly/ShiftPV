@@ -177,7 +177,7 @@ func TestSingleLifecycleUnapprovedBlockedResumeOwnerCancelsWithoutRecoveryPrereq
 				t.Fatalf("pre-disk cancellation required execution-recovery prerequisites: %v", err)
 			}
 			canceling := f.move(t, 0)
-			if canceling.Status.Phase != "Canceling" || canceling.Status.RecoveryPhase != "" || canceling.Status.CapacityApproved ||
+			if canceling.Status.Phase != "Canceling" || canceling.Status.Reason != "UnapprovedMoveBlocked" || canceling.Status.RecoveryPhase != "" || canceling.Status.CapacityApproved ||
 				!reflect.DeepEqual(canceling.Status.Preparation, move.Status.Preparation) || !reflect.DeepEqual(source, f.state(t, 0)) {
 				t.Fatalf("ResumeOwner bypassed pre-disk cancellation: move=%+v source=%+v", canceling.Status, f.state(t, 0))
 			}
@@ -187,7 +187,7 @@ func TestSingleLifecycleUnapprovedBlockedResumeOwnerCancelsWithoutRecoveryPrereq
 			})
 			source.Phase, source.ActiveMove = volumeapi.PhaseReady, ""
 			settled := f.move(t, 0)
-			if !reflect.DeepEqual(source, f.state(t, 0)) || settled.Status.RecoveryPhase != "" || settled.Status.CapacityApproved ||
+			if !reflect.DeepEqual(source, f.state(t, 0)) || settled.Status.Reason != "UnapprovedMoveBlocked" || settled.Status.RecoveryPhase != "" || settled.Status.CapacityApproved ||
 				settled.Status.IncomingCopy != nil || settled.Status.DestinationCopy != nil || settled.Status.CleanupPhase != "" {
 				t.Fatalf("pre-disk settlement changed authority or invented execution evidence: move=%+v source=%+v", settled.Status, f.state(t, 0))
 			}

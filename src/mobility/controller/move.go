@@ -180,7 +180,7 @@ func (r *Reconciler) applyMoveDecision(move *volumeapi.Move, decision fsm.Decisi
 		move.Status.Message = recoveryPhaseMessage(move.Status.RecoveryPhase, move.Status.RecoveryOwner)
 		return
 	}
-	if before.Phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" {
+	if before.Phase == fsm.PhaseBlocked && decision.Next.Phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" {
 		return
 	}
 	if before.Phase == fsm.PhaseCanceling || before.Phase == fsm.PhaseCancelled {
