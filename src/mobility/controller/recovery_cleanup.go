@@ -366,12 +366,12 @@ func (r *Reconciler) settledRollbackJournal(ctx context.Context, move volumeapi.
 	if err != nil {
 		return false, err
 	}
-	if current.Status.Phase == cleanupapi.PhaseCompleted {
-		return true, nil
-	}
-	if current.Spec.Reason != "MoveRollback" || current.Spec.OperationID != volumeapi.MoveRollbackOperationID(move.UID) {
+	if current.Spec.Reason != "MoveRollback" || !cleanupIntentMatches(move, current.Spec) {
 		return false, r.reviewCleanupJournal(ctx, current, "CleanupIntentMismatch",
 			fmt.Sprintf("rollback settlement found cleanup operation %q for reason %q", current.Spec.OperationID, current.Spec.Reason))
+	}
+	if current.Status.Phase == cleanupapi.PhaseCompleted {
+		return r.observeCompletedCleanup(ctx, current)
 	}
 	// Recovery is still Retiring here, so the hold is intact and an executor may
 	// legitimately run; only a lost Pool identity is a contradiction.

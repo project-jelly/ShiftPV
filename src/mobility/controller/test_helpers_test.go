@@ -15,7 +15,6 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -47,7 +46,13 @@ func withTestCleanups() func(*Reconciler) {
 // actual live Job/Pod settlement is covered by cleanup_job_reentry_test.go.
 type recordingCleanupOperator struct{ reclaims, observations int }
 
-func (o *recordingCleanupOperator) AdvanceReclaim(_ context.Context, current cleanupapi.Cleanup, _ helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+func (o *recordingCleanupOperator) ObserveCompletedCleanup(_ context.Context, current cleanupapi.Cleanup) (bool, error) {
+	o.observations++
+	err := cleanupapi.ValidateSettled(current)
+	return err == nil, err
+}
+
+func (o *recordingCleanupOperator) AdvanceReclaim(_ context.Context, current cleanupapi.Cleanup, _ cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
 	if cleanupReceiptComplete(current, current.Spec) {
 		o.observations++
 		return current, true, nil

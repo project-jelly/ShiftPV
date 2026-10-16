@@ -67,8 +67,9 @@ func TestCreateObservationSeparatesNewAdmissionFromRetry(t *testing.T) {
 	}
 	if observations.count("create_resume") != 1 || observations.count("create_intent_read") != 2 ||
 		observations.count("create_intent_record") != 1 || observations.count("create_capacity_ledger") != 1 ||
-		observations.count("create_directory") != 2 || probe.callCount() != 1 {
-		t.Fatal("retry was hidden or re-entered new capacity admission")
+		observations.count("create_directory") != 1 || observations.count("create_complete") != 1 ||
+		observations.count("create_finalize") != 1 || observations.count("create_effect") != 1 || probe.callCount() != 1 {
+		t.Fatal("Ready retry was hidden or re-entered creation execution/admission")
 	}
 }
 

@@ -17,7 +17,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
@@ -48,6 +47,7 @@ type VolumeRegistry interface {
 	RemoveVolumeFinalizer(context.Context, string, string) error
 	PoolNodes(context.Context) ([]string, error)
 	PoolNodesForGroup(context.Context, string) ([]string, error)
+	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error)
 	BeginCreateInPool(context.Context, string, string, string, int64, string, string) (volumeapi.State, error)
 	CompleteCreate(context.Context, string, string, volume.CopyIdentity) error
@@ -59,7 +59,7 @@ type ProvisioningGate interface {
 }
 
 type cleanupOperator interface {
-	Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error)
+	Reclaim(context.Context, cleanupapi.Cleanup, cleanupapi.Journal) (cleanupapi.Cleanup, error)
 }
 
 type Service struct {
@@ -120,12 +120,14 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		}
 		return nil, kubernetesAPIError("record volume creation intent", beginErr)
 	}
-	if err := s.createServingCopy(ctx, request.id, state); err != nil {
-		return nil, err
+	responseNode := state.OwnerNode
+	if state.Phase != volumeapi.PhaseReady {
+		if err := s.createServingCopy(ctx, request.id, state); err != nil {
+			return nil, err
+		}
+		responseNode = state.InitialNode
 	}
-	// A compatible retry resumes the stored intent, not the latest preference.
-	request.nodeName, request.capacity = state.InitialNode, state.CapacityBytes
-	return s.createVolumeResponse(ctx, request.id, request.nodeName, request.capacity, req.GetParameters())
+	return s.createVolumeResponse(ctx, request.id, responseNode, state.CapacityBytes, req.GetParameters())
 }
 
 func (s *Service) createVolumeResponse(ctx context.Context, id, nodeName string, capacity int64, parameters map[string]string) (*csi.CreateVolumeResponse, error) {
@@ -233,10 +235,13 @@ func (s *Service) beginCreate(ctx context.Context, request createRequest, parame
 		}
 		return s.beginCreateWithinPool(ctx, request, parameters)
 	}
+	existing, err := s.Volumes.Get(ctx, request.id)
+	if err == nil && existing.Phase == volumeapi.PhaseReady {
+		return s.resumeReadyCreate(ctx, existing, request, parameters)
+	}
 	if requestedPoolGroup(parameters) != volumeapi.DefaultPoolGroup {
 		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "Pool group selection requires Pool capacity admission")
 	}
-	existing, err := s.Volumes.Get(ctx, request.id)
 	if err == nil {
 		if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
 			return volumeapi.State{}, err

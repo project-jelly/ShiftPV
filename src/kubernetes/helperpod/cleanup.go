@@ -25,15 +25,9 @@ const (
 	cleanupUIDLabel  = "shiftpv.io/cleanup-uid"
 )
 
-// CleanupJournal is the parent-owned journal access Reclaim needs.
-type CleanupJournal interface {
-	Get(context.Context, cleanupapi.Authority) (cleanupapi.Cleanup, error)
-	UpdateStatus(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error
-}
-
 // Reclaim preserves the synchronous CSI contract while sharing binding and
 // observation with the mobility controller's nonblocking advance operation.
-func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (cleanupapi.Cleanup, error) {
+func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, error) {
 	defer r.observeStep("reclaim_helper")()
 	current, job, done, err := r.prepareCleanup(ctx, cleanup, store)
 	if err != nil || done {
@@ -47,7 +41,7 @@ func (r *Runner) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store 
 
 // AdvanceReclaim starts or observes the exact bound Job once, without waiting
 // for it. A receipt is ready only after that Job and its owned Pods have settled.
-func (r *Runner) AdvanceReclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (result cleanupapi.Cleanup, ready bool, resultErr error) {
+func (r *Runner) AdvanceReclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal) (result cleanupapi.Cleanup, ready bool, resultErr error) {
 	defer r.observeStep("reclaim_helper")()
 	defer func() {
 		if errors.Is(resultErr, context.DeadlineExceeded) {
@@ -66,7 +60,7 @@ func (r *Runner) AdvanceReclaim(ctx context.Context, cleanup cleanupapi.Cleanup,
 
 // prepareCleanup re-reads the journal before any effect. Receipt-bearing
 // records, including historical absence fences, take the observe-only path.
-func (r *Runner) prepareCleanup(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal) (cleanupapi.Cleanup, *batchv1.Job, bool, error) {
+func (r *Runner) prepareCleanup(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, *batchv1.Job, bool, error) {
 	if r == nil || r.Client == nil || r.Pools == nil || r.Namespace == "" || r.Image == "" || r.Timeout <= 0 || store == nil || cleanup.UID == "" || cleanup.Name == "" || cleanup.Spec.Validate() != nil {
 		return cleanup, nil, false, fmt.Errorf("cleanup runner configuration is incomplete")
 	}
@@ -97,7 +91,7 @@ func (r *Runner) prepareCleanup(ctx context.Context, cleanup cleanupapi.Cleanup,
 
 // startCleanupExecutor binds exactly one suspended Job before starting it.
 // Running journals reuse their Job without submitting another create request.
-func (r *Runner) startCleanupExecutor(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, job *batchv1.Job) (cleanupapi.Cleanup, error) {
+func (r *Runner) startCleanupExecutor(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal, job *batchv1.Job) (cleanupapi.Cleanup, error) {
 	created, err := r.resolveCleanupJob(ctx, store, cleanup, job)
 	if err != nil {
 		return cleanup, err
@@ -122,7 +116,7 @@ func (r *Runner) startCleanupExecutor(ctx context.Context, cleanup cleanupapi.Cl
 	return cleanup, nil
 }
 
-func (r *Runner) resolveCleanupJob(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (*batchv1.Job, error) {
+func (r *Runner) resolveCleanupJob(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (*batchv1.Job, error) {
 	if cleanup.Status.Phase != cleanupapi.PhaseRunning {
 		return r.ensureJob(ctx, store, cleanup, expected)
 	}
@@ -163,7 +157,7 @@ func triageCleanup(current cleanupapi.Cleanup) (bool, cleanupapi.Cleanup, error)
 // approvedPool resolves the registered Pool the approved cleanup targets. Pool
 // identity drift and lost lifecycle protection are contradictions, not transient
 // failures, so they send the cleanup to review instead of retrying.
-func (r *Runner) approvedPool(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup) (volumeapi.Pool, error) {
+func (r *Runner) approvedPool(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup) (volumeapi.Pool, error) {
 	pool, err := r.Pools.PoolForIdentity(ctx, cleanup.Spec.Target.PoolName, cleanup.Spec.Target.PoolUID, cleanup.Spec.Target.NodeName)
 	if err != nil {
 		if errors.Is(err, volumeapi.ErrStateConflict) {
@@ -199,7 +193,7 @@ func (r *Runner) cleanupPoolReady(pool volumeapi.Pool) error {
 // ensureJob resolves exactly one suspended executor for the approved effect. An
 // accepted create whose response was lost is reacquired by name, and a Job under
 // that name that is not the approved effect sends the cleanup to review.
-func (r *Runner) ensureJob(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, job *batchv1.Job) (*batchv1.Job, error) {
+func (r *Runner) ensureJob(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup, job *batchv1.Job) (*batchv1.Job, error) {
 	jobs := r.Client.BatchV1().Jobs(r.Namespace)
 	created, err := jobs.Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) || isAmbiguousKubernetesError(err) {
@@ -224,7 +218,7 @@ func (r *Runner) ensureJob(ctx context.Context, store CleanupJournal, cleanup cl
 // bindExecutor makes the resolved Job UID durable before it may run. A Job that
 // is already running while the journal has not bound it, or a bound executor
 // that is not this one, is an identity contradiction.
-func (r *Runner) bindExecutor(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, created *batchv1.Job) (cleanupapi.Cleanup, error) {
+func (r *Runner) bindExecutor(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup, created *batchv1.Job) (cleanupapi.Cleanup, error) {
 	if (cleanup.Status.Phase == "" || cleanup.Status.Phase == cleanupapi.PhasePending) &&
 		(created.Spec.Suspend == nil || !*created.Spec.Suspend) {
 		return cleanupapi.Cleanup{}, r.needsReview(ctx, store, cleanup, "ExecutorStartedBeforeBinding", "cleanup Job started before its UID was bound to durable status")
@@ -244,7 +238,7 @@ func (r *Runner) bindExecutor(ctx context.Context, store CleanupJournal, cleanup
 // awaitReceipt watches the bound executor until the journal carries its receipt.
 // The journal decides settlement; the Job is read only to detect an executor
 // that disappeared, changed or terminated without writing one.
-func (r *Runner) awaitReceipt(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
+func (r *Runner) awaitReceipt(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
 	result := cleanup
 	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
 		current, ready, err := r.observeReceipt(pollCtx, store, cleanup, expected)
@@ -260,7 +254,7 @@ func (r *Runner) awaitReceipt(ctx context.Context, store CleanupJournal, cleanup
 	return result, nil
 }
 
-func (r *Runner) observeReceipt(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (cleanupapi.Cleanup, bool, error) {
+func (r *Runner) observeReceipt(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup, expected *batchv1.Job) (cleanupapi.Cleanup, bool, error) {
 	current, err := refreshCleanup(ctx, store, cleanup)
 	if err != nil {
 		return current, false, err
@@ -313,7 +307,7 @@ func cleanupJobOutcome(job *batchv1.Job) (complete bool, failure string, failed 
 	return complete, "", false
 }
 
-func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
+func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal, expected *batchv1.Job) (cleanupapi.Cleanup, error) {
 	result := cleanup
 	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, r.Timeout, true, func(pollCtx context.Context) (bool, error) {
 		current, ready, err := r.observeReceiptSettlement(pollCtx, cleanup, store, expected)
@@ -329,7 +323,7 @@ func (r *Runner) resumeVerifying(ctx context.Context, cleanup cleanupapi.Cleanup
 	return result, nil
 }
 
-func (r *Runner) observeReceiptSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (cleanupapi.Cleanup, bool, error) {
+func (r *Runner) observeReceiptSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal, expected *batchv1.Job) (cleanupapi.Cleanup, bool, error) {
 	if !boundReceipt(cleanup) {
 		return cleanup, false, r.needsReview(ctx, store, cleanup, "ReceiptInvalid", "cleanup receipt does not match the durable executor and intent")
 	}
@@ -348,7 +342,7 @@ func boundReceipt(cleanup cleanupapi.Cleanup) bool {
 
 // observeSettlement performs one poll of a cleanup that already holds its API
 // receipt, reporting settlement together with the journal to return.
-func (r *Runner) observeSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store CleanupJournal, expected *batchv1.Job) (bool, cleanupapi.Cleanup, error) {
+func (r *Runner) observeSettlement(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal, expected *batchv1.Job) (bool, cleanupapi.Cleanup, error) {
 	current, err := refreshCleanup(ctx, store, cleanup)
 	if err != nil {
 		return false, cleanupapi.Cleanup{}, err
@@ -408,7 +402,7 @@ func ownedByJob(pod *corev1.Pod, uid types.UID) bool {
 	return false
 }
 
-func refreshCleanup(ctx context.Context, store CleanupJournal, expected cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
+func refreshCleanup(ctx context.Context, store cleanupapi.Journal, expected cleanupapi.Cleanup) (cleanupapi.Cleanup, error) {
 	current, err := store.Get(ctx, expected.Spec.Authority)
 	if err != nil {
 		return cleanupapi.Cleanup{}, fmt.Errorf("read cleanup intent: %w", classifyKubernetesAPIError(err))
@@ -419,7 +413,7 @@ func refreshCleanup(ctx context.Context, store CleanupJournal, expected cleanupa
 	return current, nil
 }
 
-func (r *Runner) startCleanupJob(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, created, expected *batchv1.Job) error {
+func (r *Runner) startCleanupJob(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup, created, expected *batchv1.Job) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current, err := r.Client.BatchV1().Jobs(r.Namespace).Get(ctx, created.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -442,7 +436,7 @@ func (r *Runner) startCleanupJob(ctx context.Context, store CleanupJournal, clea
 	})
 }
 
-func (r *Runner) needsReview(ctx context.Context, store CleanupJournal, cleanup cleanupapi.Cleanup, reason, message string) error {
+func (r *Runner) needsReview(ctx context.Context, store cleanupapi.Journal, cleanup cleanupapi.Cleanup, reason, message string) error {
 	next := cleanup.Status
 	next.Phase, next.Reason, next.Message = cleanupapi.PhaseNeedsReview, reason, message
 	next.LastTransitionTime = ""

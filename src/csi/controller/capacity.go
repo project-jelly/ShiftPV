@@ -64,6 +64,9 @@ func poolGroup(pool volumeapi.Pool) string {
 
 func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) (volumeapi.State, error) {
 	defer s.observeStep("create_resume", request.id)()
+	if existing.Phase == volumeapi.PhaseReady {
+		return s.resumeReadyCreate(ctx, existing, request, parameters)
+	}
 	if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
 		return volumeapi.State{}, err
 	}
@@ -80,6 +83,36 @@ func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.S
 	}
 	// Keep the registry's exact identity checks and the original capacity hold.
 	return s.Volumes.BeginCreateInPool(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, pool.Name, pool.UID)
+}
+
+// resumeReadyCreate reads completed creation history and the current serving
+// Pool. It neither re-admits capacity nor executes creation at the old location.
+func (s *Service) resumeReadyCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) (volumeapi.State, error) {
+	if !volumeapi.ValidReadyCreationHistory(existing) || existing.CapacityBytes <= 0 || existing.CurrentCopy.VolumeID != request.id {
+		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "Ready volume identity or creation history is invalid")
+	}
+	if err := compatibleCreateRequest(existing, request); err != nil {
+		return volumeapi.State{}, err
+	}
+	copy := existing.CurrentCopy
+	readPool := s.Volumes.PoolForIdentity
+	if s.CapacityPools != nil {
+		readPool = s.CapacityPools.PoolForIdentity
+	}
+	pool, err := readPool(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
+	if err != nil {
+		if errors.Is(err, volumeapi.ErrStateConflict) {
+			return volumeapi.State{}, status.Errorf(codes.FailedPrecondition, "Ready volume Pool identity changed: %v", err)
+		}
+		return volumeapi.State{}, poolSelectionError(err)
+	}
+	if pool.Name != copy.PoolName || pool.UID != copy.PoolUID || pool.NodeName != copy.NodeName {
+		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "Ready volume Pool identity changed")
+	}
+	if poolGroup(pool) != requestedPoolGroup(parameters) {
+		return volumeapi.State{}, status.Errorf(codes.AlreadyExists, "volume %q belongs to Pool group %q", request.name, poolGroup(pool))
+	}
+	return existing, nil
 }
 
 func poolSelectionError(err error) error {

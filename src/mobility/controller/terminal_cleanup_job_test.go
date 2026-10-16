@@ -25,7 +25,7 @@ import (
 // Older releases could leave a receipt-bearing cleanup on a terminal Move
 // after releasing ActiveMove. Repair may observe its old Job; it cannot start
 // an executor or release protection while that executor is still present.
-func TestTerminalMoveJobReceiptWaitsForExecutorSettlement(t *testing.T) {
+func TestTerminalMoveJobReceiptRequiresCompatibleWriterSettlement(t *testing.T) {
 	for _, cleanupPhase := range []string{cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence} {
 		for _, phase := range []string{"Succeeded", "Blocked"} {
 			for _, settlement := range []string{"Job complete", "Job absent but Pod remains"} {
@@ -68,8 +68,8 @@ func TestTerminalMoveJobReceiptWaitsForExecutorSettlement(t *testing.T) {
 					kube.ClearActions()
 					assertHeld := func() {
 						t.Helper()
-						if err := reconcile(); err != nil {
-							t.Fatalf("terminal repair did not return normal pending: %v", err)
+						if err := reconcile(); !errors.Is(err, nodeexecutor.ErrLegacyExecution) {
+							t.Fatalf("unsettled legacy journal was not reported: %v", err)
 						}
 						current, err := r.Cleanups.Get(ctx, spec.Authority)
 						if err != nil || !reflect.DeepEqual(current.Status, before.Status) {
@@ -111,16 +111,19 @@ func TestTerminalMoveJobReceiptWaitsForExecutorSettlement(t *testing.T) {
 						}
 					}
 					kube.ClearActions()
+					assertHeld()
+					settleLegacyCleanupFixture(t, r, kube, spec)
+					settledHistory := listedJournal(t, r, move)
+					kube.ClearActions()
 					if err := reconcile(); err != nil {
 						t.Fatal(err)
 					}
-					current, err := r.Cleanups.Get(ctx, spec.Authority)
-					if err != nil || current.Status.Phase != cleanupapi.PhaseCompleted || current.Status.AbsenceProof == nil {
-						t.Fatalf("terminal cleanup did not settle: %+v %v", current, err)
+					current := listedJournal(t, r, move)
+					if err := cleanupapi.ValidateSettled(current); err != nil || !reflect.DeepEqual(current, settledHistory) {
+						t.Fatalf("terminal history lost settled evidence: %+v %v", current, err)
 					}
-					if err := reconcile(); err != nil {
-						t.Fatal(err)
-					}
+					// The compatible writer already settled the journal. This
+					// observation can release protection without another scan pass.
 					if slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) || repo.moves[0].Status.CapacityApproved || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
 						t.Fatal("terminal settlement changed released authority or retained protection")
 					}
@@ -135,7 +138,7 @@ func TestTerminalMoveJobReceiptWaitsForExecutorSettlement(t *testing.T) {
 	}
 }
 
-func TestTerminalJobObservationDistinguishesLostPoolFromTransientRead(t *testing.T) {
+func TestTerminalNativeReceiptDistinguishesLostPoolFromTransientRead(t *testing.T) {
 	for _, missing := range []bool{true, false} {
 		name := "transient Pool read"
 		if missing {
@@ -148,8 +151,7 @@ func TestTerminalJobObservationDistinguishesLostPoolFromTransientRead(t *testing
 			repo.moves[0] = move
 			spec := rollbackCleanupSpec(move, incoming)
 			kube := r.Client.(*fake.Clientset)
-			assignJobUIDs(kube)
-			terminalVerifyingJob(t, r, kube, spec)
+			seedNativeCleanupReceipt(t, r, spec)
 			before, err := r.Cleanups.Get(ctx, spec.Authority)
 			if err != nil {
 				t.Fatal(err)
@@ -165,14 +167,6 @@ func TestTerminalJobObservationDistinguishesLostPoolFromTransientRead(t *testing
 					return true, nil, readFailure
 				})
 			}
-			// The real observer preserves its current journal on either error.
-			observed, _, err := r.CleanupOperator.AdvanceReclaim(ctx, before, r.Cleanups)
-			if err == nil || !reflect.DeepEqual(observed, before) || missing && !errors.Is(err, volumeapi.ErrPoolNotFound) || !missing && !errors.Is(err, readFailure) {
-				t.Fatalf("unexpected observer error/result: %+v %v", observed, err)
-			}
-			// An observer is still allowed to return zero with an error. Ensure
-			// classification uses the caller's original exact journal in that case.
-			r.CleanupOperator = zeroCleanupOnError{r.CleanupOperator.AdvanceReclaim}
 			kube.ClearActions()
 			if err := r.settleTerminalCleanup(ctx, move); err == nil {
 				t.Fatal("observation error was hidden")
@@ -209,16 +203,25 @@ func TestTerminalJobObservationDistinguishesLostPoolFromTransientRead(t *testing
 	}
 }
 
-type zeroCleanupOnError struct {
-	observe func(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error)
-}
-
-func (o zeroCleanupOnError) AdvanceReclaim(ctx context.Context, expected cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
-	current, ready, err := o.observe(ctx, expected, store)
+func seedNativeCleanupReceipt(t *testing.T, r *Reconciler, spec cleanupapi.Spec) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := r.Cleanups.Ensure(ctx, spec)
 	if err != nil {
-		return cleanupapi.Cleanup{}, false, err
+		t.Fatal(err)
 	}
-	return current, ready, nil
+	executor := &cleanupapi.Executor{Kind: cleanupapi.ExecutorNode, Namespace: "system", PodName: "node-executor", PodUID: "node-pod-uid", NodeName: spec.Target.NodeName}
+	if err := r.Cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
+		t.Fatal(err)
+	}
+	current, err = r.Cleanups.Get(ctx, spec.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := &cleanupapi.Receipt{OperationID: spec.OperationID, ExecutorUID: executor.PodUID, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Retired: true, Purged: true, LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+	if err := r.Cleanups.UpdateStatus(ctx, current, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func terminalVerifyingJob(t *testing.T, r *Reconciler, kube *fake.Clientset, spec cleanupapi.Spec) *batchv1.Job {
@@ -231,7 +234,7 @@ func verifyingCleanupJob(t *testing.T, r *Reconciler, kube *fake.Clientset, spec
 	prepareLegacyCleanupPool(t, r.Cleanups, spec.Target.PoolName)
 	registry := &volumeapi.Registry{Client: r.Cleanups.Client}
 	helper := &helperpod.Runner{Client: kube, Namespace: "system", Pools: registry, Image: "helper", Timeout: timeout}
-	r.CleanupOperator = &nodeexecutor.Client{Volumes: registry, Fallback: helper, Timeout: helper.Timeout}
+	r.CleanupOperator = &nodeexecutor.Client{Volumes: registry, Inspector: &helperpod.Inspector{Client: helper.Client, Namespace: helper.Namespace}, Timeout: helper.Timeout}
 	current, err := r.Cleanups.Ensure(ctx, spec)
 	if err != nil {
 		t.Fatal(err)

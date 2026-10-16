@@ -13,7 +13,6 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
@@ -62,7 +61,12 @@ type expiryCleanupObserver struct {
 	cause  error
 }
 
-func (o expiryCleanupObserver) AdvanceReclaim(_ context.Context, current cleanupapi.Cleanup, _ helperpod.CleanupJournal) (cleanupapi.Cleanup, bool, error) {
+func (o expiryCleanupObserver) ObserveCompletedCleanup(context.Context, cleanupapi.Cleanup) (bool, error) {
+	o.cancel()
+	return false, o.cause
+}
+
+func (o expiryCleanupObserver) AdvanceReclaim(_ context.Context, current cleanupapi.Cleanup, _ cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
 	o.cancel()
 	return current, false, o.cause
 }

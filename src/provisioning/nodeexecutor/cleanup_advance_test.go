@@ -2,6 +2,7 @@ package nodeexecutor
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -10,7 +11,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestCleanupAdvanceNodeWaitsForWatchReceiptWithoutRPC(t *testing.T) {
@@ -45,7 +45,7 @@ func TestCleanupAdvanceBindingResponseLossDoesNotReplayOrFallback(t *testing.T) 
 	f := newMoveClientFixture(t, "MoveRollback")
 	ctx := context.Background()
 	writes := 0
-	journal := moveClientJournal{CleanupJournal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
+	journal := moveClientJournal{Journal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
 		writes++
 		if err := f.store.UpdateStatus(ctx, current, next); err != nil {
 			return err
@@ -73,24 +73,13 @@ func TestCleanupAdvanceBindingResponseLossDoesNotReplayOrFallback(t *testing.T) 
 	f.assertNoJobs(t)
 }
 
-func TestCleanupAdvanceAdoptsAcceptedJobAndWaitsForSettlement(t *testing.T) {
+func TestCleanupAdvancePreservesLegacyReceiptAndFenceAsCompatibilityBlocker(t *testing.T) {
 	for _, phase := range []string{cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence} {
 		t.Run(phase, func(t *testing.T) {
 			f := newMoveClientFixture(t, "MoveSource")
 			ctx := context.Background()
-			job := f.acceptedJob(t)
-			current, ready, err := f.client.AdvanceReclaim(ctx, f.cleanup, f.store)
-			if err != nil || ready || current.Status.Executor == nil || current.Status.Executor.JobUID != string(job.UID) || current.Status.Executor.Kind != "" {
-				t.Fatalf("accepted suspended Job was replaced: %+v ready=%v err=%v", current, ready, err)
-			}
-			next := current.Status
-			executor := *next.Executor
-			executor.PodUID = "helper-pod-uid"
-			next.Executor = &executor
-			if err := f.store.UpdateStatus(ctx, current, next); err != nil {
-				t.Fatal(err)
-			}
-			current = f.current(t)
+			job := f.boundLegacyJob(t)
+			current := f.current(t)
 			if err := f.store.UpdateStatus(ctx, current, cleanupReceipt(current)); err != nil {
 				t.Fatal(err)
 			}
@@ -98,33 +87,28 @@ func TestCleanupAdvanceAdoptsAcceptedJobAndWaitsForSettlement(t *testing.T) {
 			if phase == cleanupapi.PhaseConfirmingAbsence {
 				next := current.Status
 				next.Phase = phase
-				next.AbsenceProof = &cleanupapi.AbsenceProof{RequestID: "old-fence", PoolName: current.Spec.Target.PoolName,
-					PoolUID: current.Spec.Target.PoolUID, RequiredGeneration: 2}
+				next.AbsenceProof = &cleanupapi.AbsenceProof{RequestID: "old-fence", PoolName: current.Spec.Target.PoolName, PoolUID: current.Spec.Target.PoolUID, RequiredGeneration: 2}
 				if err := f.store.UpdateStatus(ctx, current, next); err != nil {
 					t.Fatal(err)
 				}
 				current = f.current(t)
 			}
 			f.kube.ClearActions()
-			observed, ready, err := f.client.AdvanceReclaim(ctx, f.cleanup, f.store)
-			if err != nil || ready || !reflect.DeepEqual(observed, current) {
-				t.Fatalf("Job receipt alone completed: %+v ready=%v err=%v", observed, ready, err)
-			}
-			job, err = f.kube.BatchV1().Jobs(job.Namespace).Get(ctx, job.Name, metav1.GetOptions{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
-			if err := f.kube.Tracker().Update(batchv1.SchemeGroupVersion.WithResource("jobs"), job, job.Namespace); err != nil {
-				t.Fatal(err)
-			}
-			observed, ready, err = f.client.AdvanceReclaim(ctx, f.cleanup, f.store)
-			if err != nil || !ready || !reflect.DeepEqual(observed, current) {
-				t.Fatalf("settled Job did not preserve exact receipt/fence: %+v ready=%v err=%v", observed, ready, err)
+			for _, terminal := range []bool{false, true} {
+				if terminal {
+					job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+					if err := f.kube.Tracker().Update(batchv1.SchemeGroupVersion.WithResource("jobs"), job, job.Namespace); err != nil {
+						t.Fatal(err)
+					}
+				}
+				observed, ready, err := f.client.AdvanceReclaim(ctx, f.cleanup, f.store)
+				if !errors.Is(err, ErrLegacyExecution) || ready || !reflect.DeepEqual(observed, current) || !reflect.DeepEqual(f.current(t), current) {
+					t.Fatalf("candidate advanced old receipt/fence (Job terminal=%v): current=%+v ready=%v error=%v", terminal, observed, ready, err)
+				}
 			}
 			for _, action := range f.kube.Actions() {
 				if action.GetVerb() != "get" && action.GetVerb() != "list" {
-					t.Fatalf("receipt reentry submitted executor mutation: %+v", action)
+					t.Fatalf("compatibility observation mutated executor: %#v", action)
 				}
 			}
 		})

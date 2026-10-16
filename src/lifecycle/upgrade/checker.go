@@ -143,26 +143,10 @@ func volumeBlocker(id string, state volumeapi.State) string {
 			return "PublicationOwnerMismatch"
 		}
 	}
-	if !readyCreationSettled(state) {
+	if !volumeapi.ValidReadyCreationHistory(state) {
 		return "CreationEvidenceInvalid"
 	}
 	return ""
-}
-
-func readyCreationSettled(state volumeapi.State) bool {
-	// Older Ready Volumes need neither a PV nor a native creation receipt.
-	if state.CreationExecutor == nil && state.CreationReceipt == nil {
-		return true
-	}
-	if state.CreationExecutor == nil || state.CurrentCopy == nil {
-		return false
-	}
-	// Mobility retains the original creator's receipt after owner transfer.
-	// Check its internal creation identity without equating creator and owner.
-	copy := *state.CurrentCopy
-	copy.NodeName = state.CreationExecutor.NodeName
-	state.CurrentCopy = &copy
-	return volumeapi.ValidCreationReceipt(state)
 }
 
 func historyBlockers(s snapshot) []Blocker {

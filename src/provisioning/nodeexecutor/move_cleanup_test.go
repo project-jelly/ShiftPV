@@ -65,7 +65,6 @@ func newMoveClientFixture(t *testing.T, reason string) moveClientFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.Fallback.Timeout = 10 * time.Millisecond
 	f := moveClientFixture{client: client, node: node, dynamic: dynamic, kube: kube, store: store, cleanup: cleanup}
 	f.changePod(t, func(pod *corev1.Pod) { pod.Annotations[volumeapi.NodeMoveCleanupAnnotation] = "v1" })
 	return f
@@ -109,7 +108,7 @@ func (f moveClientFixture) assignJobUIDs() {
 }
 
 type moveClientJournal struct {
-	helperpod.CleanupJournal
+	cleanupapi.Journal
 	write func(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error
 }
 
@@ -118,19 +117,41 @@ func (j moveClientJournal) UpdateStatus(ctx context.Context, current cleanupapi.
 }
 
 // Use the real helper to create its exact deterministic suspended Job, but lose
-// the following binding write. A new controller must adopt this accepted Job.
+// the following binding write. The resident-only client must report this old
+// responsibility without adopting, starting or deleting its Job.
 func (f moveClientFixture) acceptedJob(t *testing.T) *batchv1.Job {
 	t.Helper()
 	f.assignJobUIDs()
-	journal := moveClientJournal{CleanupJournal: f.store, write: func(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error {
+	journal := moveClientJournal{Journal: f.store, write: func(context.Context, cleanupapi.Cleanup, cleanupapi.Status) error {
 		return apierrors.NewTimeoutError("binding response unavailable", 1)
 	}}
-	if _, err := f.client.Fallback.Reclaim(context.Background(), f.cleanup, journal); err == nil {
+	legacy := &helperpod.Runner{Client: f.kube, Namespace: "shiftpv", Pools: f.client.Volumes, Image: "helper:test", Timeout: 10 * time.Millisecond}
+	if _, err := legacy.Reclaim(context.Background(), f.cleanup, journal); err == nil {
 		t.Fatal("expected interrupted Job binding")
 	}
 	job, err := f.kube.BatchV1().Jobs("shiftpv").Get(context.Background(), f.cleanup.Name+"-effect", metav1.GetOptions{})
 	if err != nil || job.Spec.Suspend == nil || !*job.Spec.Suspend || f.current(t).Status.Executor != nil {
 		t.Fatalf("accepted suspended Job setup: job=%+v err=%v", job, err)
+	}
+	return job
+}
+
+// This is input produced by the previous writer, never a resident-client
+// execution path. Its exact binding remains immutable during compatibility observation.
+func (f moveClientFixture) boundLegacyJob(t *testing.T) *batchv1.Job {
+	t.Helper()
+	job := f.acceptedJob(t)
+	current := f.current(t)
+	next := current.Status
+	next.Phase = cleanupapi.PhaseRunning
+	next.Executor = &cleanupapi.Executor{JobName: job.Name, JobUID: string(job.UID), PodUID: "helper-pod-uid", NodeName: current.Spec.Target.NodeName}
+	if err := f.store.UpdateStatus(context.Background(), current, next); err != nil {
+		t.Fatal(err)
+	}
+	running := false
+	job.Spec.Suspend = &running
+	if err := f.kube.Tracker().Update(batchv1.SchemeGroupVersion.WithResource("jobs"), job, job.Namespace); err != nil {
+		t.Fatal(err)
 	}
 	return job
 }
@@ -193,22 +214,38 @@ func TestMoveCleanupBindsBothReasonsToNode(t *testing.T) {
 	}
 }
 
-func TestMoveCleanupLegacyJobSelection(t *testing.T) {
+func TestMoveCleanupMissingCapabilityOrUnboundJobNeverSelectsLegacy(t *testing.T) {
 	for _, accepted := range []bool{false, true} {
 		t.Run(map[bool]string{false: "old Node", true: "accepted suspended Job"}[accepted], func(t *testing.T) {
 			f := newMoveClientFixture(t, "MoveSource")
+			var job *batchv1.Job
 			if accepted {
-				f.acceptedJob(t)
+				job = f.acceptedJob(t)
 			} else {
-				f.assignJobUIDs()
 				f.changePod(t, func(p *corev1.Pod) { delete(p.Annotations, volumeapi.NodeMoveCleanupAnnotation) })
 			}
-			if _, err := f.client.Reclaim(context.Background(), f.cleanup, f.store); !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("helper wait=%v", err)
+			before := f.current(t)
+			f.kube.ClearActions()
+			_, err := f.client.Reclaim(context.Background(), f.cleanup, f.store)
+			var retryable interface{ Retryable() bool }
+			if err == nil || !errors.As(err, &retryable) || !retryable.Retryable() || accepted && !errors.Is(err, ErrLegacyExecution) {
+				t.Fatalf("unavailable resident execution not retained for retry: %v", err)
 			}
-			current := f.current(t)
-			if current.Status.Phase != cleanupapi.PhaseRunning || current.Status.Executor == nil || current.Status.Executor.Kind != "" || current.Status.Executor.JobUID != "job-uid" {
-				t.Fatalf("legacy backend changed: %+v", current)
+			if !reflect.DeepEqual(before, f.current(t)) {
+				t.Fatal("blocked selection changed journal or intent")
+			}
+			for _, action := range f.kube.Actions() {
+				if action.GetVerb() != "get" && action.GetVerb() != "list" {
+					t.Fatalf("blocked selection mutated executor: %#v", action)
+				}
+			}
+			if job != nil {
+				stored, err := f.kube.BatchV1().Jobs(job.Namespace).Get(context.Background(), job.Name, metav1.GetOptions{})
+				if err != nil || !reflect.DeepEqual(stored, job) {
+					t.Fatalf("accepted suspended Job was adopted or changed: %+v %v", stored, err)
+				}
+			} else {
+				f.assertNoJobs(t)
 			}
 		})
 	}
@@ -261,7 +298,7 @@ func TestMoveCleanupBindingResponseLossRequiresReobservation(t *testing.T) {
 	f := newMoveClientFixture(t, "MoveRollback")
 	ctx := context.Background()
 	writes := 0
-	journal := moveClientJournal{CleanupJournal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
+	journal := moveClientJournal{Journal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
 		writes++
 		if err := f.store.UpdateStatus(ctx, current, next); err != nil {
 			return err
@@ -291,7 +328,7 @@ func TestMoveCleanupFreshObservationRejectsChangedJournal(t *testing.T) {
 			reply := &cleanupRPCReply{f: f}
 			attachCleanupRPC(t, f, reply)
 			ctx := context.Background()
-			journal := moveClientJournal{CleanupJournal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
+			journal := moveClientJournal{Journal: f.store, write: func(ctx context.Context, current cleanupapi.Cleanup, next cleanupapi.Status) error {
 				if err := f.store.UpdateStatus(ctx, current, next); err != nil {
 					return err
 				}
@@ -347,8 +384,11 @@ func TestMoveCleanupFreshLegacyWinnerIsNotInvokedAsNode(t *testing.T) {
 		err := f.store.UpdateStatus(ctx, f.cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &cleanupapi.Executor{JobName: job.Name, JobUID: string(job.UID), NodeName: "worker-a"}})
 		return false, nil, err
 	})
-	if _, err := f.client.Reclaim(ctx, f.cleanup, f.store); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("concurrent helper winner=%v", err)
+	if _, err := f.client.Reclaim(ctx, f.cleanup, f.store); err == nil {
+		t.Fatal("concurrent helper winner did not block")
+	}
+	if _, err := f.client.Reclaim(ctx, f.cleanup, f.store); !errors.Is(err, ErrLegacyExecution) {
+		t.Fatalf("fresh legacy binding not reported: %v", err)
 	}
 	current := f.current(t)
 	if current.Status.Executor == nil || current.Status.Executor.Kind != "" || current.Status.Executor.JobUID != string(job.UID) || current.Status.Phase != cleanupapi.PhaseRunning {
@@ -356,42 +396,31 @@ func TestMoveCleanupFreshLegacyWinnerIsNotInvokedAsNode(t *testing.T) {
 	}
 }
 
-func TestMoveCleanupJobReceiptStillWaitsForExecutorTermination(t *testing.T) {
+func TestMoveCleanupLegacyReceiptCannotAdvanceAfterExecutorTermination(t *testing.T) {
 	f := newMoveClientFixture(t, "MoveSource")
 	ctx := context.Background()
-	job := f.acceptedJob(t)
-	if _, err := f.client.Reclaim(ctx, f.cleanup, f.store); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal(err)
-	}
+	job := f.boundLegacyJob(t)
 	current := f.current(t)
-	// The helper Pod records its identity before the receipt, as in production.
-	next := current.Status
-	e := *next.Executor
-	e.PodUID = "helper-pod-uid"
-	next.Executor = &e
-	if err := f.store.UpdateStatus(ctx, current, next); err != nil {
-		t.Fatal(err)
-	}
-	current = f.current(t)
 	if err := f.store.UpdateStatus(ctx, current, cleanupReceipt(current)); err != nil {
 		t.Fatal(err)
 	}
 	verified := f.current(t)
-	if _, err := f.client.Reclaim(ctx, f.cleanup, f.store); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("live Job receipt bypassed termination: %v", err)
+	f.kube.ClearActions()
+	for _, terminal := range []bool{false, true} {
+		if terminal {
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			if err := f.kube.Tracker().Update(batchv1.SchemeGroupVersion.WithResource("jobs"), job, job.Namespace); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := f.client.Reclaim(ctx, f.cleanup, f.store)
+		if !errors.Is(err, ErrLegacyExecution) || !reflect.DeepEqual(result, verified) || !reflect.DeepEqual(verified, f.current(t)) {
+			t.Fatalf("candidate settled old receipt (terminal=%v): %+v %v", terminal, result, err)
+		}
 	}
-	if !reflect.DeepEqual(verified, f.current(t)) {
-		t.Fatal("waiting changed receipt")
-	}
-	job, err := f.kube.BatchV1().Jobs("shiftpv").Get(ctx, job.Name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
-	if _, err := f.kube.BatchV1().Jobs("shiftpv").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if result, err := f.client.Reclaim(ctx, f.cleanup, f.store); err != nil || !reflect.DeepEqual(result, verified) {
-		t.Fatalf("terminal Job not accepted: %+v %v", result, err)
+	for _, action := range f.kube.Actions() {
+		if action.GetVerb() != "get" && action.GetVerb() != "list" {
+			t.Fatalf("legacy observation wrote executor: %#v", action)
+		}
 	}
 }

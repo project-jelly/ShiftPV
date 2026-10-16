@@ -599,6 +599,7 @@ func TestReconcileAllReleasesOnlySettledMoveFinalizer(t *testing.T) {
 				}},
 			}
 			reconciler := newTestReconciler(fake.NewSimpleClientset(), repository)
+			seedSettledFinalizerHistory(t, reconciler, repository)
 			err := reconciler.ReconcileAll(context.Background())
 			if (err != nil) != test.wantError {
 				t.Fatalf("ReconcileAll error = %v, wantError=%t", err, test.wantError)
@@ -671,6 +672,7 @@ func TestReconcileAllGarbageCollectsOnlyExpiredSettledMoveJournals(t *testing.T)
 			reconciler := newTestReconciler(fake.NewSimpleClientset(), repository, func(r *Reconciler) {
 				r.MoveJournalRetention, r.Now = retention, func() time.Time { return now }
 			})
+			seedSettledFinalizerHistory(t, reconciler, repository)
 			err := reconciler.ReconcileAll(context.Background())
 			if (err != nil) != test.wantError {
 				t.Fatalf("ReconcileAll error = %v, wantError=%t", err, test.wantError)
@@ -693,6 +695,7 @@ func TestReconcileAllSeparatesFinalizerReleaseFromJournalDeletion(t *testing.T) 
 		},
 	}}}
 	reconciler := newTestReconciler(fake.NewSimpleClientset(), repository, func(r *Reconciler) { r.Now = func() time.Time { return now } })
+	seedSettledFinalizerHistory(t, reconciler, repository)
 
 	if err := reconciler.ReconcileAll(context.Background()); err != nil {
 		t.Fatal(err)

@@ -51,6 +51,27 @@ func ValidCreationReceipt(s State) bool {
 		receipt.OperationID == operation && receipt.OperationID == s.CreationOperationID && receipt.ExecutorUID == s.CreationExecutor.PodUID && s.CreationExecutor.NodeName == s.CurrentCopy.NodeName
 }
 
+// ValidReadyCreationHistory validates a settled creation without authorizing a
+// new effect. Older Ready Volumes have no native receipt; mobility retains the
+// original creator's receipt even after the serving copy changes owners.
+func ValidReadyCreationHistory(s State) bool {
+	if s.Phase != PhaseReady || s.Deleting || s.DeletionOperationID != "" || s.HasCleanup ||
+		s.CurrentCopy == nil || s.CurrentCopy.Validate() != nil || s.CurrentCopy.Role != volume.RoleServing ||
+		s.CurrentCopy.VolumeUID != s.UID || s.CurrentCopy.NodeName != s.OwnerNode {
+		return false
+	}
+	if s.CreationExecutor == nil && s.CreationReceipt == nil {
+		return true
+	}
+	if s.CreationExecutor == nil {
+		return false
+	}
+	copy := *s.CurrentCopy
+	copy.NodeName = s.CreationExecutor.NodeName
+	s.CurrentCopy = &copy
+	return ValidCreationReceipt(s)
+}
+
 // CreationPoolForIdentity checks an already-approved native creation's protected
 // Pool and fresh backing observation. The executor must verify the live operation,
 // Pod and anchored backing; new placement still requires current-generation inventory.

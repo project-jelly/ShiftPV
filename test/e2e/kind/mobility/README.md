@@ -10,8 +10,11 @@ The suite exercises the product admission, controller, scheduler and node paths 
 API receipt writes, postcommit source drain, Node Pod replacement and controller
 restart. It requires the same local receipt and operation to finish with a later
 absence scan, unchanged PVC/PV/checksum, and no cleanup Job. The `g2` completion
-and `g3` cleanup-failure cases explicitly select legacy Jobs to retain backend
-compatibility coverage.
+case replaces the completed Node executor while terminal status writes fail and
+CSI deletion races. The `g3` case supplies an invalid local receipt before cleanup,
+then requires real Node NeedsReview, preserved source data and capacity hold.
+The restart suite also replaces a pre-receipt Node while its existing volume
+lock is held; the same operation must complete after the lock is released.
 
 `g1` also exercises an early targeted drain with no eligible destination: admission
 holds the replacement, and uncordon must recover that same Pod UID without a Move.

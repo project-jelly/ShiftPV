@@ -129,9 +129,12 @@ service-account/resource/timeout profile도 유지한다. 빈 값은 controller 
 기존 source Pod와 Job은 image·command·실행 조건이 달라지면 채택을 거부한다. 읽기 전용
 usage Pod의 명시적 폐기·재측정 경로를 다른 helper에도 적용된다고 가정하지 않는다.
 
-기존 Job-bound cleanup은 Job으로, Node-bound cleanup은 호환 Node로 정산한다. timeout이나
-capability 부재는 backend를 바꿀 근거가 아니다. Job receipt 뒤에도 Job 완료, 또는 Job과 해당
-executor/owned Pods의 부재를 확인한 후 fresh absence를 소비한다.
+신규 생성·삭제·이동 cleanup은 resident Node만 실행한다. 필요한 capability가 없으면 같은
+intent·예약을 유지하며 재시도하고 Job을 만들지 않는다. 이전 생성 Pod나 미정산 Job-bound
+cleanup이 발견되면 기존 writer로 정산한 뒤 전환한다. 새 writer는 이전 Job을 실행하거나
+Node로 재바인딩하지 않으며, 완료 journal·absence 증거와 실행 종료를 확인한 이력만 읽는다.
+정상 Ready Volume의 생성 재호출은 현재 owner·Pool group·요청 호환성·생성 이력을 검증하고
+효과 없이 응답한다. 최초 Pool이나 생성 Node가 계속 존재할 필요는 없다.
 
 `prepared-v1` 기록이 남아 있으면 보존 중 terminal 기록까지 이해하는 controller가 필요하다.
 이를 모르는 구 controller와 공존하거나 downgrade하지 않는다. rollback 시 CRD를 축소하거나

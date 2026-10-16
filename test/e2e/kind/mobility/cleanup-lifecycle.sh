@@ -3,7 +3,7 @@
 
 verify_cleanup_lifecycle() {
 	local move=$1 node=$2 root=$3 checksum=$4 pod=$5
-	local source_copy cleanup_job controller_uid denial deadline release_revision release_status
+	local source_copy node_pod node_uid controller_uid denial deadline release_revision release_status
 	test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
 	source_copy=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.sourceCopy.copyID}')
 	test -n "${source_copy}"
@@ -12,10 +12,14 @@ verify_cleanup_lifecycle() {
 	test "$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.cleanup.spec.target.copyID}')" = "${source_copy}"
 	docker exec "${node}" test -f "${root}/volumes/${VOLUME_ID}/payload"
 
-	# A permanent helper failure converges to review and never replays by itself.
-	cleanup_job=$(cleanup_job_name "shiftpvmove/${move}")
-	test -n "${cleanup_job}"
-	kubectl -n shiftpv-system delete "job/${cleanup_job}" --ignore-not-found --wait=true --timeout=120s
+	# Review survives a real executor replacement without replaying the effect.
+	node_pod=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.cleanup.status.executor.podName}')
+	node_uid=$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.cleanup.status.executor.podUID}')
+	test -n "${node_pod}"
+	test "$(kubectl -n shiftpv-system get "pod/${node_pod}" -o jsonpath='{.metadata.uid}')" = "${node_uid}"
+	assert_no_cleanup_job "${move}"
+	kubectl -n shiftpv-system delete "pod/${node_pod}" --wait=true --timeout=120s
+	kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=180s
 	controller_uid=$(kubectl -n shiftpv-system get pod -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.uid}')
 	kubectl -n shiftpv-system delete pod -l app.kubernetes.io/component=controller --wait=true --timeout=120s
 	kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=180s
@@ -23,7 +27,7 @@ verify_cleanup_lifecycle() {
 	deadline=$((SECONDS + 45))
 	while ((SECONDS < deadline)); do
 		test "$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.status.cleanup.status.phase}')" = NeedsReview
-		test -z "$(kubectl -n shiftpv-system get "job/${cleanup_job}" --ignore-not-found -o name)"
+		assert_no_cleanup_job "${move}"
 		docker exec "${node}" test -f "${root}/volumes/${VOLUME_ID}/payload"
 		sleep 5
 	done

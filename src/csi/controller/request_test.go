@@ -100,6 +100,10 @@ func TestCreateRetryUsesCompatibilityWithoutChangingIntent(t *testing.T) {
 			{"changed Pool group", func(r *csi.CreateVolumeRequest) { r.Parameters[PoolGroupKey] = "other" }, codes.AlreadyExists},
 		} {
 			t.Run(phase+"/"+tc.name, func(t *testing.T) {
+				want := tc.want
+				if phase == volumeapi.PhaseReady && tc.name == "selected node changed" {
+					want = codes.OK // Preferred alone does not constrain completed volumes.
+				}
 				probe := &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{TotalBytes: 1 << 30, AvailableBytes: 1 << 30}}
 				s := capacityService(fake.NewClientset(), "128Mi", nil, probe)
 				r := validCreateRequest("worker-a")
@@ -126,17 +130,20 @@ func TestCreateRetryUsesCompatibilityWithoutChangingIntent(t *testing.T) {
 				calls := probe.callCount()
 				tc.change(r)
 				second, err := s.CreateVolume(context.Background(), r)
-				if status.Code(err) != tc.want {
-					t.Fatalf("response=%v err=%v want=%s", second, err, tc.want)
+				if status.Code(err) != want {
+					t.Fatalf("response=%v err=%v want=%s", second, err, want)
 				}
 				expected := stored
-				if tc.want == codes.OK {
+				if want == codes.OK {
 					expected.Phase = volumeapi.PhaseReady
 					if !reflect.DeepEqual(first, second) {
 						t.Fatalf("retry changed actual capacity, owner or volume ID: first=%v second=%v", first, second)
 					}
 				} else if s.Operator.(*fakeDirectoryOperator).createCalls != 0 {
 					t.Fatal("incompatible request ran an effect")
+				}
+				if phase == volumeapi.PhaseReady && s.Operator.(*fakeDirectoryOperator).createCalls != 0 {
+					t.Fatal("completed volume retry ran an effect")
 				}
 				if len(registry.volumes) != 1 || !reflect.DeepEqual(expected, registry.volumes[id]) || probe.callCount() != calls {
 					t.Fatal("retry changed stored Pool, copy, UID, operation or capacity hold")
@@ -179,6 +186,9 @@ func TestCompatibleTopologyRetryChecksInjectedPVCPlacement(t *testing.T) {
 			}
 			registry := s.Volumes.(*capacityTrackingVolumeRegistry)
 			before := registry.volumes[first.Volume.VolumeId]
+			// Placement inspection belongs to an unfinished creation retry.
+			before.Phase = volumeapi.PhasePending
+			registry.volumes[first.Volume.VolumeId] = before
 			s.Operator.(*fakeDirectoryOperator).createCalls = 0
 			inspection := &placementStub{result: consumer.Result{Placement: tc.result}, err: tc.err}
 			s.ConsumerPlacement = inspection
@@ -194,7 +204,11 @@ func TestCompatibleTopologyRetryChecksInjectedPVCPlacement(t *testing.T) {
 				t.Fatalf("response=%v err=%v", second, err)
 			}
 			expected := consumer.Request{Namespace: "test", Name: "claim", UID: "uid", Node: "worker-a"}
-			if len(inspection.calls) != 1 || inspection.calls[0] != expected || !reflect.DeepEqual(before, registry.volumes[first.Volume.VolumeId]) {
+			after := before
+			if tc.want == codes.OK {
+				after.Phase = volumeapi.PhaseReady
+			}
+			if len(inspection.calls) != 1 || inspection.calls[0] != expected || !reflect.DeepEqual(after, registry.volumes[first.Volume.VolumeId]) {
 				t.Fatal("retry bypassed placement identity or changed its intent")
 			}
 			if tc.want == codes.OK {

@@ -32,13 +32,7 @@ assert_pending_receipt() {
 		.status.cleanup.status.executor.kind == "Node" and
 		.status.cleanup.status.phase == "Running" and .status.cleanup.status.receipt == null' >/dev/null
 	test "$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.activeMove}')" = "${MOVE}"
-	assert_no_cleanup_job
-}
-
-assert_no_cleanup_job() {
-	kubectl -n shiftpv-system get jobs -o json | jq -e --arg uid "${MOVE_UID}" '
-		[.items[] | select(.metadata.labels["app.kubernetes.io/component"] == "cleanup-helper") |
-		 select(any(.metadata.ownerReferences[]?; .uid == $uid))] | length == 0' >/dev/null
+	assert_no_cleanup_job "${MOVE}"
 }
 
 sed 's/shiftpv-mobility-test/shiftpv-native-cleanup-test/g' \
@@ -50,6 +44,9 @@ PV_UID=$(kubectl get "pv/${PV}" -o jsonpath='{.metadata.uid}')
 VOLUME=$(kubectl get "pv/${PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 SOURCE=$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.ownerNode}')
 SOURCE_POOL=$(pool_mount_for_node "${SOURCE}")
+# Write unique source content after startup so an empty destination cannot pass.
+# shellcheck disable=SC2016
+kubectl -n "${NAMESPACE}" exec deployment/wffc -- sh -ec 'printf "%s\n" "$1" > /data/payload; sync' sh "native-cleanup-${VOLUME}"
 CHECKSUM=$(pod_sha256 "${NAMESPACE}" deployment/wffc /data/payload)
 kubectl patch "pv/${PV}" --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
 NODE_POD=$(node_pod)
@@ -138,7 +135,7 @@ kubectl delete validatingadmissionpolicybinding "${POLICY}"
 kubectl delete validatingadmissionpolicy "${POLICY}"
 kubectl wait "shiftpvmove/${MOVE}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s
 assert_cleanup_journal "shiftpvmove/${MOVE}" MoveSource "${VOLUME}" "${SOURCE_COPY}" ShiftPVMove
-assert_no_cleanup_job
+assert_no_cleanup_job "${MOVE}"
 test "$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.metadata.uid}')" = "${MOVE_UID}"
 test "$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.activeMove}')" = ""
 test "$(kubectl -n "${NAMESPACE}" get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"

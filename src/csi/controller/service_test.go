@@ -22,7 +22,6 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -118,6 +117,10 @@ func (r *retryDeleteVolumeRegistry) PoolNodesForGroup(ctx context.Context, _ str
 	return r.PoolNodes(ctx)
 }
 
+func (r *retryDeleteVolumeRegistry) PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error) {
+	return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
+}
+
 func (f *fakeVolumeRegistry) Get(_ context.Context, id string) (volumeapi.State, error) {
 	if f.state.UID == "" && f.state.Phase == "" && f.state.CurrentCopy == nil && f.state.CapacityBytes == 0 {
 		return volumeapi.State{}, apierrors.NewNotFound(schema.GroupResource{Group: "shiftpv.io", Resource: "shiftpvvolumes"}, id)
@@ -145,6 +148,14 @@ func (f *fakeVolumeRegistry) PoolNodes(context.Context) ([]string, error) {
 
 func (f *fakeVolumeRegistry) PoolNodesForGroup(ctx context.Context, _ string) ([]string, error) {
 	return f.PoolNodes(ctx)
+}
+
+func (f *fakeVolumeRegistry) PoolForIdentity(_ context.Context, name, uid, node string) (volumeapi.Pool, error) {
+	copy := f.state.CurrentCopy
+	if copy == nil || copy.PoolName != name || copy.PoolUID != uid || copy.NodeName != node {
+		return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
+	}
+	return volumeapi.Pool{Name: name, UID: uid, NodeName: node, PoolGroup: volumeapi.DefaultPoolGroup}, nil
 }
 
 func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, requestName, nodeName string, capacityBytes int64) (volumeapi.State, error) {
@@ -227,7 +238,10 @@ type identityCreateOperator struct {
 	finalizeErr error
 }
 
-type receiptCleanupOperator struct{ calls int }
+type receiptCleanupOperator struct {
+	calls        int // Physical executions; receipt observation is not an effect.
+	observations int
+}
 
 type verifyingCleanupOperator struct{ calls int }
 
@@ -251,7 +265,7 @@ type blockingCleanupOperator struct {
 	delegate receiptCleanupOperator
 }
 
-func (o *blockingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (o *blockingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, error) {
 	if o.calls.Add(1) == 1 {
 		o.started <- struct{}{}
 		<-o.release
@@ -276,11 +290,12 @@ func configuredService(service *Service) *Service {
 	return service
 }
 
-func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
-	o.calls++
-	if cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseCompleted {
+func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, error) {
+	o.observations++
+	if cleanup.Status.Phase == cleanupapi.PhaseVerifying || cleanup.Status.Phase == cleanupapi.PhaseConfirmingAbsence || cleanup.Status.Phase == cleanupapi.PhaseCompleted {
 		return cleanup, nil
 	}
+	o.calls++
 	executor := &cleanupapi.Executor{JobName: "job", JobUID: "job-uid", PodUID: "pod-uid", NodeName: cleanup.Spec.Target.NodeName}
 	if err := store.UpdateStatus(ctx, cleanup, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
 		return cleanupapi.Cleanup{}, err
@@ -328,7 +343,7 @@ func (o *receiptCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi
 	return store.Get(ctx, cleanup.Spec.Authority)
 }
 
-func (o *verifyingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (o *verifyingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, error) {
 	// This stub represents a terminated executor. Re-entry observes the same
 	// receipt; only an initial effect increments calls. Live Jobs use the real
 	// Runner/Client in cleanup_job_reentry_test.go.
@@ -549,8 +564,8 @@ func TestDeleteVolumeConvergesAfterAcceptedVolumeStateDeleteTimeout(t *testing.T
 	if _, err := service.DeleteVolume(ctx, request); err != nil {
 		t.Fatalf("retry did not converge: %v", err)
 	}
-	if registry.exists || reclaimer.calls != 1 {
-		t.Fatalf("exists=%t cleanup calls=%d", registry.exists, reclaimer.calls)
+	if registry.exists || reclaimer.calls != 1 || reclaimer.observations != 2 {
+		t.Fatalf("exists=%t physical cleanup effects=%d observations=%d", registry.exists, reclaimer.calls, reclaimer.observations)
 	}
 }
 
@@ -896,11 +911,12 @@ func TestCreateVolumeWithoutProvisionerMetadataStaysOwnerLocal(t *testing.T) {
 	}
 }
 
-func TestCreateVolumeRejectsChangedSelectedNode(t *testing.T) {
+func TestUnfinishedCreateVolumeRejectsChangedSelectedNode(t *testing.T) {
 	service := configuredService(&Service{Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}})
 	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a")); err != nil {
 		t.Fatal(err)
 	}
+	service.Volumes.(*fakeVolumeRegistry).state.Phase = volumeapi.PhasePending
 	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b"))
 	if status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("expected AlreadyExists, got %v", err)

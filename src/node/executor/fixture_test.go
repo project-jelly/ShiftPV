@@ -47,7 +47,7 @@ func fixture(t *testing.T) (*Client, *Node, *dynamicfake.FakeDynamicClient, *kub
 	registry := &volumeapi.Registry{Client: dynamic}
 	discovery := nodeexecutor.Discovery{Client: kube, Namespace: "shiftpv", DaemonSet: ds.Name}
 	helper := &helperpod.Runner{Client: kube, Namespace: "shiftpv", Pools: registry, Image: "helper:test", Timeout: time.Second}
-	client := &Client{Discovery: discovery, Volumes: registry, Fallback: helper, Timeout: 10 * time.Millisecond}
+	client := &Client{Discovery: discovery, Volumes: registry, Inspector: &helperpod.Inspector{Client: helper.Client, Namespace: helper.Namespace}, Timeout: 10 * time.Millisecond}
 	node := &Node{Identity: executor, Pods: kube.CoreV1().Pods(executor.Namespace), Volumes: registry, Cleanups: &cleanupapi.Store{Client: dynamic}, HostRoot: "/host"}
 	state, err := registry.Get(context.Background(), testID)
 	if err != nil {

@@ -25,12 +25,12 @@ SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
 SOURCE_MOUNT=$(pool_mount_for_node "${SOURCE_NODE}")
 DESTINATION_MOUNT=$(pool_mount_for_node "${DESTINATION_NODE}")
-MOVE_CLEANUP_CAPABILITY=""
+LOCK_RELEASE=""
 
 cleanup() {
 	local result_code=$?
-	if [[ -n "${MOVE_CLEANUP_CAPABILITY}" ]]; then
-		restore_move_cleanup_capability "${MOVE_CLEANUP_CAPABILITY}" || result_code=1
+	if [[ -n "${LOCK_RELEASE}" ]]; then
+		docker exec "${SOURCE_NODE}" touch -- "${LOCK_RELEASE}" || result_code=1
 	fi
 	kubectl uncordon "${SOURCE_NODE}" >/dev/null 2>&1 || true
 	kubectl uncordon "${DESTINATION_NODE}" >/dev/null 2>&1 || true
@@ -38,12 +38,6 @@ cleanup() {
 	return "${result_code}"
 }
 trap cleanup EXIT
-
-cleanup_pod_name_for_uid() {
-	local job_name=$1 pod_uid=$2
-	kubectl -n shiftpv-system get pods -l "job-name=${job_name}" \
-		-o jsonpath="{.items[?(@.metadata.uid=='${pod_uid}')].metadata.name}" 2>/dev/null || true
-}
 
 for command in docker kubectl awk jq; do
 	command -v "${command}" >/dev/null || {
@@ -99,7 +93,7 @@ spec:
           image: busybox:1.37
           command: [sh, -ec]
           args:
-            - printf 'ShiftPV cleanup Job retry Pod rebind\n' > /data/payload; sleep 3600
+            - if [ ! -f /data/payload ]; then printf 'initial cleanup Node retry payload\n' > /data/payload; fi; sleep 3600
           volumeMounts:
             - name: data
               mountPath: /data
@@ -117,83 +111,77 @@ VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 SOURCE_POD=$(kubectl -n "${NAMESPACE}" get pod -l "app=${NAMESPACE}" -o jsonpath='{.items[0].metadata.name}')
 test "$(kubectl -n "${NAMESPACE}" get "pod/${SOURCE_POD}" -o jsonpath='{.spec.nodeName}')" = "${SOURCE_NODE}"
 
-# Slow source cleanup enough to kill the first cleanup executor after it durably
-# binds its Pod UID but before it writes a receipt.
+# A blank destination must not regenerate the source's unique test content.
 # shellcheck disable=SC2016
-kubectl -n "${NAMESPACE}" exec "${SOURCE_POD}" -- sh -ec '
-	i=0
-	while [ "${i}" -lt 20000 ]; do
-		printf "cleanup-retry-%05d\n" "${i}" >"/data/retry-${i}"
-		i=$((i + 1))
-	done
-	sync
-'
+kubectl -n "${NAMESPACE}" exec "${SOURCE_POD}" -- sh -ec 'printf "%s\n" "$1" > /data/payload; sync' sh "cleanup-retry-${PVC_UID}-${VOLUME_ID}"
 SOURCE_CHECKSUM=$(pod_sha256 "${NAMESPACE}" "${SOURCE_POD}" /data/payload)
-
+POLICY=shiftpv-cleanup-retry-barrier
+hold_cleanup_admission "${POLICY}" "${VOLUME_ID}"
 kubectl uncordon "${DESTINATION_NODE}"
-# This case must exercise Job Pod rebinding even when resident cleanup is
-# available. Restore the capability once this Move has bound its Job.
-MOVE_CLEANUP_CAPABILITY=$(suspend_move_cleanup_capability "${SOURCE_NODE}")
 kubectl cordon "${SOURCE_NODE}"
 MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 180)
-
-killed_pod_uid=""
-killed_pod_name=""
-cleanup_job=""
-cleanup_job_uid_before=""
-for _ in {1..900}; do
-	phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-	if [[ "${phase}" == "Blocked" || "${phase}" == "Succeeded" ]]; then
-		echo "Move reached terminal phase before cleanup Pod retry injection: ${phase}" >&2
-		kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2 || true
-		exit 1
-	fi
-	cleanup_job=$(cleanup_job_name "shiftpvmove/${MOVE_NAME}" 2>/dev/null || true)
-	killed_pod_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.executor.podUID}' 2>/dev/null || true)
-	receipt=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.receipt.operationID}' 2>/dev/null || true)
-	if [[ -n "${cleanup_job}" && -n "${killed_pod_uid}" && -z "${receipt}" ]]; then
-		cleanup_job_uid_before=$(kubectl -n shiftpv-system get "job/${cleanup_job}" -o jsonpath='{.metadata.uid}')
-		killed_pod_name=$(cleanup_pod_name_for_uid "${cleanup_job}" "${killed_pod_uid}")
-		if [[ -n "${killed_pod_name}" ]]; then
-			kubectl -n shiftpv-system delete "pod/${killed_pod_name}" --grace-period=0 --force --wait=true
-			break
-		fi
-	fi
-	sleep 0.2
+wait_for_cleanup_barrier "${MOVE_NAME}" "${VOLUME_ID}" "${SOURCE_NODE}"
+MOVE_UID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.metadata.uid}')
+LOCK_PATH="${SOURCE_MOUNT}/.shiftpv/lock-${VOLUME_ID}"
+LOCK_READY="/tmp/shiftpv-cleanup-${MOVE_UID}-ready"
+LOCK_RELEASE="/tmp/shiftpv-cleanup-${MOVE_UID}-release"
+docker exec "${SOURCE_NODE}" test -f "${LOCK_PATH}"
+docker exec "${SOURCE_NODE}" test ! -e "${LOCK_READY}"
+docker exec "${SOURCE_NODE}" test ! -e "${LOCK_RELEASE}"
+docker exec "${SOURCE_NODE}" sh -ec 'command -v flock; command -v timeout' >/dev/null
+# Hold the existing inode: no replacement lock or fake execution receipt.
+# shellcheck disable=SC2016
+docker exec -d "${SOURCE_NODE}" timeout 600 sh -ec '
+ exec 9<"$1"
+ flock -n 9
+ umask 077
+ set -C
+ : >"$2"
+ while [ ! -e "$3" ]; do sleep 0.1; done
+' sh "${LOCK_PATH}" "${LOCK_READY}" "${LOCK_RELEASE}"
+for _ in {1..100}; do
+ if docker exec "${SOURCE_NODE}" test -f "${LOCK_READY}"; then break; fi
+ sleep 0.1
 done
-if [[ -z "${killed_pod_name}" ]]; then
-	echo "cleanup executor did not expose a killable pre-receipt Pod" >&2
-	kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2 || true
-	exit 1
-fi
-restore_move_cleanup_capability "${MOVE_CLEANUP_CAPABILITY}"
-MOVE_CLEANUP_CAPABILITY=""
-
+docker exec "${SOURCE_NODE}" test -f "${LOCK_READY}"
+release_cleanup_admission "${POLICY}"
+kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.cleanup.status.phase}'=Running --timeout=120s
+JOURNAL=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o json)
+jq -e '.status.cleanup.status.executor.kind == "Node" and .status.cleanup.status.receipt == null' <<<"${JOURNAL}" >/dev/null
+killed_pod_uid=$(jq -er '.status.cleanup.status.executor.podUID' <<<"${JOURNAL}")
+killed_pod_name=$(jq -er '.status.cleanup.status.executor.podName' <<<"${JOURNAL}")
+OPERATION=$(jq -er '.status.cleanup.spec.operationID' <<<"${JOURNAL}")
+TARGET=$(jq -c '.status.cleanup.spec.target' <<<"${JOURNAL}")
+RECEIPT_HASH=$(printf '%s' "${OPERATION}" | shasum -a 256 | cut -c1-32)
+RECEIPT_PATH="${SOURCE_MOUNT}/.shiftpv/receipt-${RECEIPT_HASH}.json"
+docker exec "${SOURCE_NODE}" test ! -e "${RECEIPT_PATH}"
+assert_no_cleanup_job "${MOVE_NAME}"
+test "$(kubectl -n shiftpv-system get "pod/${killed_pod_name}" -o jsonpath='{.metadata.uid}')" = "${killed_pod_uid}"
+kubectl -n shiftpv-system delete "pod/${killed_pod_name}" --wait=true --timeout=120s
+kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=180s
 retry_pod_uid=""
-for _ in {1..300}; do
-	retry_pod_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.executor.podUID}' 2>/dev/null || true)
-	receipt=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.receipt.operationID}' 2>/dev/null || true)
-	if [[ -n "${retry_pod_uid}" && "${retry_pod_uid}" != "${killed_pod_uid}" && -z "${receipt}" ]]; then
-		break
-	fi
-	sleep 1
+for _ in {1..120}; do
+ JOURNAL=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o json)
+ retry_pod_uid=$(jq -r '.status.cleanup.status.executor.podUID // ""' <<<"${JOURNAL}")
+ if [[ -n "${retry_pod_uid}" && "${retry_pod_uid}" != "${killed_pod_uid}" ]]; then break; fi
+ sleep 1
 done
-if [[ -z "${retry_pod_uid}" || "${retry_pod_uid}" == "${killed_pod_uid}" ]]; then
-	echo "cleanup executor did not rebind from failed Pod ${killed_pod_uid}" >&2
-	kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2 || true
-	kubectl -n shiftpv-system get pods -l "job-name=${cleanup_job}" -o wide >&2 || true
-	exit 1
-fi
-
-kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=900s
-cleanup_job_uid_after=$(kubectl -n shiftpv-system get "job/${cleanup_job}" -o jsonpath='{.metadata.uid}')
+test -n "${retry_pod_uid}"
+test "${retry_pod_uid}" != "${killed_pod_uid}"
+jq -e --arg uid "${MOVE_UID}" --arg operation "${OPERATION}" --argjson target "${TARGET}" '
+ .metadata.uid == $uid and .status.cleanup.spec.operationID == $operation and
+ .status.cleanup.spec.target == $target and .status.cleanup.status.phase == "Running" and
+ .status.cleanup.status.executor.kind == "Node" and .status.cleanup.status.receipt == null' <<<"${JOURNAL}" >/dev/null
+docker exec "${SOURCE_NODE}" test ! -e "${RECEIPT_PATH}"
+docker exec "${SOURCE_NODE}" touch -- "${LOCK_RELEASE}"
+LOCK_RELEASE=""
+kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s
 final_pod_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.executor.podUID}')
 receipt_executor_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.receipt.executorUID}')
-test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.cleanup.status.executor.kind}')" = ""
-test "${cleanup_job_uid_after}" = "${cleanup_job_uid_before}"
 test "${final_pod_uid}" = "${retry_pod_uid}"
-test "${final_pod_uid}" != "${killed_pod_uid}"
-test "${receipt_executor_uid}" = "${cleanup_job_uid_before}"
+test "${receipt_executor_uid}" = "${retry_pod_uid}"
+test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.metadata.uid}')" = "${MOVE_UID}"
+assert_no_cleanup_job "${MOVE_NAME}"
 
 test "$(kubectl -n "${NAMESPACE}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 test "$(kubectl -n "${NAMESPACE}" get pvc/data -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
@@ -212,4 +200,4 @@ assert_cleanup_journal "shiftpvmove/${MOVE_NAME}" MoveSource "${VOLUME_ID}" "${s
 
 trap - EXIT
 cleanup
-echo "ShiftPV cleanup Job retry Pod rebind passed: move=${MOVE_NAME} job=${cleanup_job} jobUID=${cleanup_job_uid_before} killedPodUID=${killed_pod_uid} retryPodUID=${retry_pod_uid}"
+echo "ShiftPV cleanup Node retry passed: move=${MOVE_NAME} operation=${OPERATION} killedPodUID=${killed_pod_uid} retryPodUID=${retry_pod_uid}"
