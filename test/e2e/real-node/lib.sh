@@ -12,11 +12,17 @@ k() {
 # reports, so a stage can only ever reach the two identities the preflight
 # approved.
 ssh_node() {
+	(exec_ssh_node "$@")
+}
+
+# Only background owners call this directly: exec makes their $! the actual
+# SSH process. Foreground callers use ssh_node so their script can continue.
+exec_ssh_node() {
 	local role=$1
 	shift
 	case "${role}" in
-	source) ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "${SOURCE_SSH_TARGET}" "$@" ;;
-	destination) ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "${DESTINATION_SSH_TARGET}" "$@" ;;
+	source) exec ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "${SOURCE_SSH_TARGET}" "$@" ;;
+	destination) exec ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "${DESTINATION_SSH_TARGET}" "$@" ;;
 	*)
 		echo "unknown ssh node role: ${role}" >&2
 		return 1

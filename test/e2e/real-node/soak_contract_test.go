@@ -170,7 +170,14 @@ func (f *soakFixture) run(t *testing.T, command string) (string, error) {
 	if err := os.MkdirAll(bin, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for name, script := range map[string]string{"kubectl": kubectlStub, "ssh": "#!/usr/bin/env bash\necho SSH >>\"${FIXTURE}/calls\"\nexit 91\n"} {
+	for name, script := range map[string]string{"kubectl": kubectlStub, "ssh": `#!/usr/bin/env bash
+echo SSH >>"${FIXTURE}/calls"
+if [[ ${STUB_SSH_SLEEP:-0} == 1 ]]; then
+ printf '%s\n' "$$" >"${FIXTURE}/ssh-pid"
+ exec sleep 30
+fi
+exit 91
+`} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -467,17 +474,56 @@ install_soak_traps
 	}
 }
 
-func TestCleanupLocalProcessWaitIsBounded(t *testing.T) {
-	f := newSoakFixture(t)
-	start := time.Now()
-	out, err := f.run(t, `sleep 30 &
+func TestCleanupBackgroundSSHOwnsTheBoundedProcess(t *testing.T) {
+	for _, role := range []string{"source", "destination"} {
+		t.Run(role, func(t *testing.T) {
+			f := newSoakFixture(t)
+			t.Setenv("STUB_SSH_SLEEP", "1")
+			start := time.Now()
+			out, err := f.run(t, `exec_ssh_node `+role+` ignored &
 pid=$!
+ssh_pid=''
+cleanup() {
+ kill -KILL "$pid" ${ssh_pid:+"$ssh_pid"} 2>/dev/null || true
+ wait "$pid" 2>/dev/null || true
+}
+
+trap cleanup EXIT
+for _ in {1..100}; do
+ if [[ -s "$FIXTURE/ssh-pid" ]]; then break; fi
+ sleep 0.01
+done
+ssh_pid=$(cat "$FIXTURE/ssh-pid")
 if wait_cleanup_process "$pid" 1; then exit 1; fi
-! kill -0 "$pid" 2>/dev/null`)
-	if err != nil || !strings.Contains(out, "exceeded local 1s budget") || time.Since(start) > 5*time.Second {
-		t.Fatalf("local holder timeout failed: %v %s (elapsed %s)", err, out, time.Since(start))
+
+# A shell wrapper is insufficient: the actual SSH process must be the owned
+# background PID, and it must be gone when the bounded wait returns.
+if [[ "$pid" != "$ssh_pid" ]]; then
+ echo "async PID $pid differs from SSH PID $ssh_pid" >&2
+ exit 1
+fi
+if kill -0 "$ssh_pid" 2>/dev/null; then
+ echo "SSH PID $ssh_pid survived the deadline" >&2
+ exit 1
+fi`)
+			if err != nil || !strings.Contains(out, "exceeded local 1s budget") || time.Since(start) > 5*time.Second {
+				t.Fatalf("background SSH timeout failed: %v %s (elapsed %s)", err, out, time.Since(start))
+			}
+			calls, _ := os.ReadFile(filepath.Join(f.dir, "calls"))
+			if strings.TrimSpace(string(calls)) != "SSH" {
+				t.Fatalf("unexpected API/effect calls: %s", calls)
+			}
+		})
 	}
-	f.noEffects(t)
+}
+
+func TestForegroundSSHReturnsToItsCaller(t *testing.T) {
+	f := newSoakFixture(t)
+	out, err := f.run(t, `if ssh_node source ignored; then exit 1; else test "$?" = 91; fi
+printf 'caller continued\n'`)
+	if err != nil || out != "caller continued\n" {
+		t.Fatalf("foreground SSH replaced its caller or lost the status: %v %q", err, out)
+	}
 }
 
 func TestControllerFaultRequiresExactDeploymentOwnerAndNewUID(t *testing.T) {

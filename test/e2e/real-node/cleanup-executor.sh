@@ -223,7 +223,7 @@ wait_cleanup_process() {
 release_cleanup_lock() {
 	local release_pid
 	if [[ -n ${CLEANUP_LOCK_ROLE:-} ]]; then
-		ssh_node "${CLEANUP_LOCK_ROLE}" "sudo -n timeout -k 5 10 sh -c $(jq -nr --arg command 'if test -e "$1" && test ! -e "$2"; then set -C; : >"$2"; fi' '$command|@sh') sh $(jq -nr --arg p "${CLEANUP_LOCK_READY}" '$p|@sh') $(jq -nr --arg p "${CLEANUP_LOCK_RELEASE}" '$p|@sh')" >"${ARTIFACT_DIR}/cleanup-lock-release.log" 2>&1 &
+		exec_ssh_node "${CLEANUP_LOCK_ROLE}" "sudo -n timeout -k 5 10 sh -c $(jq -nr --arg command 'if test -e "$1" && test ! -e "$2"; then set -C; : >"$2"; fi' '$command|@sh') sh $(jq -nr --arg p "${CLEANUP_LOCK_READY}" '$p|@sh') $(jq -nr --arg p "${CLEANUP_LOCK_RELEASE}" '$p|@sh')" >"${ARTIFACT_DIR}/cleanup-lock-release.log" 2>&1 &
 		release_pid=$!
 		if ! wait_cleanup_process "${release_pid}" 15; then
 			kill -KILL "${CLEANUP_LOCK_PID}" 2>/dev/null || true
@@ -274,7 +274,7 @@ fault_native_cleanup() {
 	command="sudo -n timeout -k 5 ${MOVE_TIMEOUT_SECONDS} sh -s -- $(jq -nr --arg p "${pool}/.shiftpv/lock-${VOLUME_ID}" '$p|@sh') $(jq -nr --arg p "${CLEANUP_LOCK_READY}" '$p|@sh') $(jq -nr --arg p "${CLEANUP_LOCK_RELEASE}" '$p|@sh')"
 	CLEANUP_LOCK_ROLE=${role}
 	# Existing inode only. The ready marker is removed whenever the holder exits.
-	ssh_node "${role}" "${command}" >"${ARTIFACT_DIR}/${move}-lock.log" 2>&1 <<'REMOTE' &
+	exec_ssh_node "${role}" "${command}" >"${ARTIFACT_DIR}/${move}-lock.log" 2>&1 <<'REMOTE' &
 set -eu
 test -f "$1"; test ! -L "$1"; test ! -e "$2"; test ! -e "$3"
 exec 9<"$1"
