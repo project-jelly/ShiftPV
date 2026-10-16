@@ -8,7 +8,6 @@ import (
 	"sort"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 )
 
@@ -20,11 +19,6 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 		return fmt.Errorf("destination capacity admission is not configured")
 	}
 	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && move.Status.Preparation != nil {
-		// The legacy FSM may ask for capacity while entering this stage. The
-		// prepared CAS converts only an already observed WaitingForCapacity.
-		if move.Status.Phase != string(fsm.PhaseWaitingForCapacity) {
-			return nil
-		}
 		return r.convertPreparation(ctx, move)
 	}
 	if err := r.measureSourceCopy(ctx, move); err != nil {

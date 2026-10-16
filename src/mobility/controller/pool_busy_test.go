@@ -15,7 +15,7 @@ import (
 func TestPreparationPoolBusyPreservesPlacementAndServingSource(t *testing.T) {
 	f := newPreparationRegistryFixture(t, 1)
 	for range 3 {
-		if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 			t.Fatal(err)
 		}
 		f.schedulePlacements(t)
@@ -26,7 +26,7 @@ func TestPreparationPoolBusyPreservesPlacementAndServingSource(t *testing.T) {
 		t.Fatalf("fixture did not reach scheduled pre-grant placement: pod=%+v move=%+v err=%v", placement, move, err)
 	}
 	assertPoolBusy(t, f.reconciler.PoolLocks, "destination-pool-uid", func() error {
-		return f.reconciler.reconcilePreparation(f.ctx, move)
+		return f.reconciler.reconcilePersistedMove(f.ctx, move)
 	})
 	if got := f.move(t, 0); !reflect.DeepEqual(got, move) {
 		t.Fatalf("busy admission changed Move: before=%+v after=%+v", move, got)
@@ -40,7 +40,7 @@ func TestPreparationPoolBusyPreservesPlacementAndServingSource(t *testing.T) {
 	}
 	assertPreparationOriginals(t, f)
 	assertPreparationReserved(t, f, 0)
-	if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if f.move(t, 0).Status.Preparation == nil {

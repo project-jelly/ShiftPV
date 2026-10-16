@@ -30,23 +30,72 @@ const (
 type Action string
 
 const (
-	ActionWait             Action = "Wait"
-	ActionLockVolume       Action = "LockVolume"
-	ActionEvictConsumer    Action = "EvictConsumer"
-	ActionEnsurePlacement  Action = "EnsurePlacement"
-	ActionEnsureCapacity   Action = "EnsureCapacity"
-	ActionDeletePlacement  Action = "DeletePlacement"
-	ActionReleasePlacement Action = "ReleasePlacement"
-	ActionEnsureCopy       Action = "EnsureCopy"
-	ActionEnsurePromotion  Action = "EnsurePromotion"
-	ActionCommitOwner      Action = "CommitOwner"
-	ActionEnsureCleanup    Action = "EnsureCleanup"
-	ActionConfirmCleanup   Action = "ConfirmCleanup"
-	ActionMarkSucceeded    Action = "MarkSucceeded"
-	ActionMarkBlocked      Action = "MarkBlocked"
+	ActionWait                  Action = "Wait"
+	ActionLockVolume            Action = "LockVolume"
+	ActionEvictConsumer         Action = "EvictConsumer"
+	ActionEnsurePlacement       Action = "EnsurePlacement"
+	ActionEnsureCapacity        Action = "EnsureCapacity"
+	ActionDeletePlacement       Action = "DeletePlacement"
+	ActionReleasePlacement      Action = "ReleasePlacement"
+	ActionEnsureCopy            Action = "EnsureCopy"
+	ActionEnsurePromotion       Action = "EnsurePromotion"
+	ActionCommitOwner           Action = "CommitOwner"
+	ActionEnsureCleanup         Action = "EnsureCleanup"
+	ActionConfirmCleanup        Action = "ConfirmCleanup"
+	ActionMarkSucceeded         Action = "MarkSucceeded"
+	ActionMarkBlocked           Action = "MarkBlocked"
+	ActionProtectMove           Action = "ProtectMove"
+	ActionInitializePreparation Action = "InitializePreparation"
+	ActionClaimSource           Action = "ClaimSource"
+	ActionReservePreparation    Action = "ReservePreparation"
+	ActionStartDisruption       Action = "StartDisruption"
+	ActionRestoreSource         Action = "RestoreSource"
+	ActionReleasePreparation    Action = "ReleasePreparation"
+	ActionReleaseSource         Action = "ReleaseSource"
+	ActionFinalizeHistory       Action = "FinalizeHistory"
+	ActionFinalizeSourceUsage   Action = "FinalizeSourceUsage"
+	ActionDiscardUnstartedMove  Action = "DiscardUnstartedMove"
+	ActionBeginRecovery         Action = "BeginRecovery"
+	ActionQuiesceRecovery       Action = "QuiesceRecovery"
+	ActionVerifyRecovery        Action = "VerifyRecovery"
+	ActionRetireRecovery        Action = "RetireRecovery"
+	ActionResumeRecovery        Action = "ResumeRecovery"
+	ActionCompleteRecovery      Action = "CompleteRecovery"
 )
 
+const (
+	RecoveryQuiescing  = "Quiescing"
+	RecoveryVerifying  = "Verifying"
+	RecoveryRetiring   = "Retiring"
+	RecoveryResuming   = "Resuming"
+	RecoveryCompleting = "Completing"
+	RecoveryRecovered  = "Recovered"
+)
+
+// State retains the failed transaction phase while recovery settles its owner.
+// Recovery is not a second attempt to move that owner to another node.
+type State struct {
+	Phase         Phase
+	RecoveryPhase string
+}
+
 type Observation struct {
+	// Prepared is the temporary legacy-execution adapter. All new Moves use it.
+	Prepared                   bool
+	PendingObsolete            bool
+	ProtectionPresent          bool
+	SourcePlanRecorded         bool
+	SourceClaimed              bool
+	PreparationReserved        bool
+	PreparationChangedReason   string
+	SourceMoving               bool
+	PlacementAbsent            bool
+	DestinationIntentRecorded  bool
+	RecoveryRequested          bool
+	RecoveryOwnerIsDestination bool
+	// RecoveryUnlockObserved means the exact recorded recovery owner is Ready
+	// with ActiveMove cleared. It is consumed only in RecoveryCompleting.
+	RecoveryUnlockObserved bool
 	PreconditionsValid     bool
 	PreflightDeferred      bool
 	UnsafeReason           string
@@ -76,15 +125,39 @@ type Observation struct {
 }
 
 type Decision struct {
-	Next   Phase
+	Next   State
 	Action Action
 	Reason string
 }
 
-func Decide(current Phase, observation Observation) (Decision, error) {
-	if !known(current) {
-		return Decision{}, fmt.Errorf("unknown mobility phase %q", current)
+// Decide selects one lifecycle step. Callers apply Next only after the action
+// completes; pending or ambiguous writes require re-observation, not advancement.
+func Decide(current State, observation Observation) (Decision, error) {
+	if current.Phase == "" && current.RecoveryPhase == "" {
+		if !observation.Prepared {
+			return Decision{Next: State{Phase: PhasePending}, Action: ActionWait}, nil
+		}
+		// A new prepared Move may already have a protected, fully observed
+		// source plan. Normalization must not add a metadata-only pass.
+		current.Phase = PhasePending
 	}
+	if err := validateState(current, observation); err != nil {
+		return Decision{}, err
+	}
+	if decision, handled, err := decideLifecycle(current, observation); handled {
+		return decision, err
+	}
+	decision, err := decideExecution(current.Phase, observation)
+	if err != nil {
+		return Decision{}, err
+	}
+	if err := ValidateTransition(current.Phase, decision.Next.Phase); err != nil {
+		return Decision{}, err
+	}
+	return decision, nil
+}
+
+func decideExecution(current Phase, observation Observation) (Decision, error) {
 	// These three preludes run in this order before any phase-specific rule,
 	// and each one owns the decision outright when it fires.
 	if decision, guarded, err := lifecycleGuard(current, observation); guarded {
@@ -145,13 +218,17 @@ func ValidateTransition(from, to Phase) error {
 }
 
 var allowedTransitions = map[Phase][]Phase{
-	PhasePending:                      {PhasePending, PhaseLocking, PhaseBlocked},
+	PhasePending:                      {PhasePending, PhasePreparing, PhaseLocking, PhaseBlocked, PhaseCanceling},
+	PhasePreparing:                    {PhasePreparing, PhaseStartingDisruption, PhaseCanceling},
+	PhaseStartingDisruption:           {PhaseStartingDisruption, PhaseWaitingForUnpublish, PhaseCanceling},
+	PhaseCanceling:                    {PhaseCanceling, PhaseCancelled},
+	PhaseCancelled:                    {PhaseCancelled},
 	PhaseLocking:                      {PhaseLocking, PhaseEvicting, PhaseBlocked},
 	PhaseEvicting:                     {PhaseEvicting, PhaseWaitingForUnpublish, PhaseBlocked},
-	PhaseWaitingForUnpublish:          {PhaseWaitingForUnpublish, PhaseWaitingForReplacement, PhaseBlocked},
-	PhaseWaitingForReplacement:        {PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseBlocked},
-	PhaseWaitingForDestination:        {PhaseWaitingForDestination, PhaseWaitingForCapacity, PhaseBlocked},
-	PhaseWaitingForCapacity:           {PhaseWaitingForCapacity, PhaseCopying, PhaseBlocked},
+	PhaseWaitingForUnpublish:          {PhaseWaitingForUnpublish, PhaseWaitingForReplacement, PhaseBlocked, PhaseCanceling},
+	PhaseWaitingForReplacement:        {PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseBlocked, PhaseCanceling},
+	PhaseWaitingForDestination:        {PhaseWaitingForDestination, PhaseWaitingForCapacity, PhaseBlocked, PhaseCanceling},
+	PhaseWaitingForCapacity:           {PhaseWaitingForCapacity, PhaseCopying, PhaseBlocked, PhaseCanceling},
 	PhaseCopying:                      {PhaseCopying, PhasePromoting, PhaseBlocked},
 	PhasePromoting:                    {PhasePromoting, PhaseCommitting, PhaseBlocked},
 	PhaseCommitting:                   {PhaseCommitting, PhaseReleasingDestination, PhaseBlocked},
@@ -160,14 +237,14 @@ var allowedTransitions = map[Phase][]Phase{
 	PhaseCleaningSource:               {PhaseCleaningSource, PhaseCompleting, PhaseBlocked},
 	PhaseCompleting:                   {PhaseCompleting, PhaseSucceeded},
 	PhaseSucceeded:                    {PhaseSucceeded},
-	PhaseBlocked:                      {PhaseBlocked},
+	PhaseBlocked:                      {PhaseBlocked, PhaseCanceling},
 }
 
 func transition(from, to Phase, action Action, reason string) (Decision, error) {
 	if err := ValidateTransition(from, to); err != nil {
 		return Decision{}, err
 	}
-	return Decision{Next: to, Action: action, Reason: reason}, nil
+	return Decision{Next: State{Phase: to}, Action: action, Reason: reason}, nil
 }
 
 // destinationGuard is the prelude shared by every phase that still depends on a
@@ -197,11 +274,14 @@ func placementGuard(current Phase, observation Observation) (Decision, bool, err
 }
 
 func blocked(reason string) Decision {
-	return Decision{Next: PhaseBlocked, Action: ActionMarkBlocked, Reason: reason}
+	return Decision{Next: State{Phase: PhaseBlocked}, Action: ActionMarkBlocked, Reason: reason}
 }
 
 // blockedWith prefers the observation's own diagnosis over the phase fallback.
 func blockedWith(observation Observation, fallback string) Decision {
+	if beforeExecutionApproval(observation) {
+		return Decision{Next: State{Phase: PhaseCanceling}, Action: ActionWait, Reason: reasonOr(observation.UnsafeReason, fallback)}
+	}
 	return blocked(reasonOr(observation.UnsafeReason, fallback))
 }
 
@@ -211,7 +291,11 @@ func known(phase Phase) bool {
 }
 
 func terminal(phase Phase) bool {
-	return phase == PhaseSucceeded || phase == PhaseBlocked
+	return phase == PhaseSucceeded || phase == PhaseCancelled
+}
+
+func beforeExecutionApproval(observation Observation) bool {
+	return observation.Prepared && !observation.CapacityApproved && !observation.DestinationIntentRecorded
 }
 
 func beforeCommit(phase Phase) bool {

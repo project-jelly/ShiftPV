@@ -232,7 +232,7 @@ func (f *preparationRegistryFixture) untilPrepared(t *testing.T, index int) volu
 		if move.Status.Preparation != nil {
 			return move
 		}
-		if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 			t.Fatal(err)
 		}
 		f.schedulePlacements(t)

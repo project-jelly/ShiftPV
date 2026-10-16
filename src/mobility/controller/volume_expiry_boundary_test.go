@@ -47,7 +47,7 @@ func TestVolumeExpiryLegacyRecoveryRequiresFreshObservation(t *testing.T) {
 			f.reconciler.Repository = repository
 			ctx, cancel := context.WithTimeout(f.ctx, 250*time.Millisecond)
 			defer cancel()
-			err := f.reconciler.reconcileRecovery(ctx, move)
+			err := f.reconciler.reconcilePersistedMove(ctx, move)
 			if !errors.Is(ctx.Err(), context.DeadlineExceeded) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errMoveStatusPersistence) {
 				t.Fatalf("caller expiry did not require re-observation: ctx=%v err=%v", ctx.Err(), err)
 			}
@@ -69,7 +69,7 @@ func TestVolumeExpiryLegacyRecoveryRequiresFreshObservation(t *testing.T) {
 
 			restarted := newTestReconciler(f.client, f.registry)
 			for range 2 {
-				if err := restarted.reconcileRecovery(f.ctx, f.move(t, 0)); err != nil {
+				if err := restarted.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 			}

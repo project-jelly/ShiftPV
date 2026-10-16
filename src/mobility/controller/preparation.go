@@ -15,73 +15,88 @@ import (
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
-// Preparation owns no disk effects. Its source remains publishable until a
-// durable StartingDisruption intent precedes the source Moving transition.
-func (r *Reconciler) reconcilePreparation(ctx context.Context, move volumeapi.Move) error {
+// Preparation observes only the prerequisites needed before disruption. The
+// decision model chooses the phase; these observations grant no disk authority.
+func (r *Reconciler) observePreparation(ctx context.Context, move volumeapi.Move) (observation, error) {
+	result := observation{Names: namesFor(move.Name)}
 	if move.Status.CapacityApproved || !noDestinationEffectIntent(move) || move.Status.CleanupPhase != "" || move.Status.RollbackRequiredGeneration != 0 {
-		return fmt.Errorf("preparation cannot run with destination execution authority")
+		return result, fmt.Errorf("preparation cannot run with destination execution authority")
 	}
 	if err := volumeapi.ValidateMovePreparation(move); err != nil {
-		return err
+		return result, err
 	}
 	if move.Deleting {
-		return r.requestPreparationCancellation(ctx, &move, "MoveDeleting")
+		result.FSM.PreparationChangedReason = "MoveDeleting"
+		return result, nil
 	}
 	if !slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer) {
-		// The finalizer write changes resourceVersion. Observe it before any
-		// plan, Volume claim, reservation or disruptive action.
-		return r.Repository.AddMoveFinalizer(ctx, move.Name, move.UID)
+		return result, nil
 	}
 	probe := move
 	probe.Status.CandidateNodes = nil // Eligibility is live until disruption.
-	observed := observation{Names: namesFor(move.Name)}
-	pools, _, err := r.observeEligibility(ctx, probe, &observed)
+	pools, _, err := r.observeEligibility(ctx, probe, &result)
 	if err != nil {
-		return err
+		return result, err
 	}
-	if err := preparationSourceAuthority(move, observed.Volume); err != nil {
-		return err
+	result.Pools = pools
+	if err := preparationSourceAuthority(move, result.Volume); err != nil {
+		return result, err
 	}
-	if !observed.SourceCordoned {
-		return r.requestPreparationCancellation(ctx, &move, "SourceNotCordoned")
-	}
-	if move.Status.SourceCopy == nil {
-		return r.initializePreparation(ctx, &move, observed)
-	}
-	return r.continuePreparation(ctx, move, observed, pools)
+	return r.observePreparationPlan(ctx, move, result)
 }
 
-func (r *Reconciler) continuePreparation(ctx context.Context, move volumeapi.Move, observed observation, pools poolIndex) error {
-	if !preparedBindingMatches(move, observed.PV, observed.Claim) {
-		return r.requestPreparationCancellation(ctx, &move, "VolumeBindingChanged")
+func (r *Reconciler) observePreparationPlan(ctx context.Context, move volumeapi.Move, result observation) (observation, error) {
+	if !result.SourceCordoned {
+		result.FSM.PreparationChangedReason = "SourceNotCordoned"
+		return result, nil
 	}
-	if move.Status.Phase == string(fsm.PhaseStartingDisruption) {
-		return r.startPreparedDisruption(ctx, &move, observed)
-	}
-	if observed.Consumer == nil || observed.Consumer.DeletionTimestamp != nil {
-		return r.requestPreparationCancellation(ctx, &move, "ConsumerChanged")
-	}
-	if move.Status.Preparation != nil {
-		if observed.Volume.ActiveMove != move.Name {
-			return fmt.Errorf("preparation reservation lost its source claim")
+	if move.Status.SourceCopy == nil {
+		if result.FSM.SourceAuthorityInvalid {
+			result.FSM.PreparationChangedReason = preparationReason(result.FSM.UnsafeReason, "VolumeBindingChanged")
 		}
-		if !observed.FSM.SourceHealthy || observed.FSM.PreflightDeferred || !observed.FSM.PreconditionsValid {
-			return r.requestPreparationCancellation(ctx, &move, preparationReason(observed.FSM.UnsafeReason, "PreparationChanged"))
+		return result, nil
+	}
+	if !preparedBindingMatches(move, result.PV, result.Claim) {
+		result.FSM.PreparationChangedReason = "VolumeBindingChanged"
+		return result, nil
+	}
+	if move.Status.Phase != string(fsm.PhaseStartingDisruption) && (result.Consumer == nil || result.Consumer.DeletionTimestamp != nil) {
+		result.FSM.PreparationChangedReason = "ConsumerChanged"
+		return result, nil
+	}
+	if move.Status.Preparation == nil {
+		if preparationDeferred(result) {
+			if err := r.observePlacement(ctx, move, &result); err != nil {
+				return result, err
+			}
 		}
-		return r.finishPreparation(ctx, &move, observed)
+		return result, nil
 	}
-	if !observed.FSM.SourceHealthy || observed.FSM.PreflightDeferred || !observed.FSM.PreconditionsValid {
-		if err := r.deletePlacement(ctx, move); err != nil {
-			return err
-		}
-		return r.preparationWait(ctx, &move, preparationReason(observed.FSM.UnsafeReason, "PreparationDeferred"))
+	if result.Volume.ActiveMove != move.Name {
+		return result, fmt.Errorf("preparation reservation lost its source claim")
 	}
-	if observed.Volume.ActiveMove == "" {
-		next := observed.Volume
-		next.ActiveMove = move.Name
-		return r.Repository.CompareAndSetSourceState(ctx, move.Spec.VolumeID, observed.Volume, next)
+	if result.Replacement != nil && (result.Replacement.Spec.NodeName != "" || !hasPlacementHold(result.Replacement)) {
+		result.FSM.PreparationChangedReason = "UnexpectedConsumerPlacement"
+		return result, nil
 	}
-	return r.prepareDestination(ctx, &move, observed, pools)
+	if !result.FSM.SourceHealthy || result.FSM.PreflightDeferred ||
+		(result.Consumer != nil && !result.FSM.PreconditionsValid) {
+		result.FSM.PreparationChangedReason = preparationReason(result.FSM.UnsafeReason, "PreparationChanged")
+		return result, nil
+	}
+	reason, err := r.validatePreparedPlacement(ctx, move, result)
+	result.FSM.PreparationChangedReason = reason
+	return result, err
+}
+
+func preparationDeferred(observed observation) bool {
+	return !observed.FSM.SourceHealthy || observed.FSM.PreflightDeferred || !observed.FSM.PreconditionsValid
+}
+
+func (r *Reconciler) claimPreparationSource(ctx context.Context, move volumeapi.Move, state volumeapi.State) error {
+	next := state
+	next.ActiveMove = move.Name
+	return r.Repository.CompareAndSetSourceState(ctx, move.Spec.VolumeID, state, next)
 }
 
 func preparationSourceAuthority(move volumeapi.Move, state volumeapi.State) error {
@@ -112,34 +127,22 @@ func preparedBindingMatches(move volumeapi.Move, pv *corev1.PersistentVolume, cl
 
 func (r *Reconciler) initializePreparation(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	if observed.FSM.SourceAuthorityInvalid {
-		return r.requestPreparationCancellation(ctx, move, preparationReason(observed.FSM.UnsafeReason, "VolumeBindingChanged"))
+		return preparationChanged(preparationReason(observed.FSM.UnsafeReason, "VolumeBindingChanged"))
 	}
 	if !observed.FSM.PreconditionsValid || observed.FSM.PreflightDeferred {
-		return r.preparationWait(ctx, move, preparationReason(observed.FSM.UnsafeReason, "PreparationDeferred"))
+		return errLifecyclePending
 	}
 	if observed.PV == nil || observed.PV.UID == "" || observed.Claim == nil || observed.Claim.UID == "" ||
 		observed.Consumer == nil || observed.Consumer.UID == "" || observed.Consumer.DeletionTimestamp != nil {
 		return fmt.Errorf("preparation requires exact live binding and consumer identities")
 	}
-	previous := move.Status
 	source := *observed.Volume.CurrentCopy
 	move.Status.SourceCopy = &source
 	move.Status.PersistentVolumeName, move.Status.PersistentVolumeUID = observed.PV.Name, string(observed.PV.UID)
 	move.Status.ClaimNamespace, move.Status.ClaimName, move.Status.ClaimUID = observed.Claim.Namespace, observed.Claim.Name, string(observed.Claim.UID)
 	move.Status.ConsumerName, move.Status.ConsumerUID = observed.Consumer.Name, string(observed.Consumer.UID)
 	move.Status.CandidateNodes = append([]string(nil), observed.CandidateNodes...)
-	move.Status.Phase, move.Status.Reason = string(fsm.PhasePreparing), ""
-	return r.persistMoveStatus(ctx, move, previous)
-}
-
-func (r *Reconciler) preparationWait(ctx context.Context, move *volumeapi.Move, reason string) error {
-	previous := move.Status
-	if move.Status.Phase == "" {
-		move.Status.Phase = string(fsm.PhasePending)
-	}
-	move.Status.Reason = reason
-	move.Status.Message = "automatic retry; preparing destination without interrupting the source: " + reason
-	return r.persistMoveStatus(ctx, move, previous)
+	return nil
 }
 
 func (r *Reconciler) prepareDestination(ctx context.Context, move *volumeapi.Move, observed observation, pools poolIndex) error {
@@ -151,17 +154,19 @@ func (r *Reconciler) prepareDestination(ctx context.Context, move *volumeapi.Mov
 		if err := r.deletePlacement(ctx, *move); err != nil {
 			return err
 		}
-		return r.preparationWait(ctx, move, preparationCapacityReason(unavailable))
+		move.Status.Reason = preparationCapacityReason(unavailable)
+		return nil
 	}
 	placement, reason, err := r.ensurePreparedPlacement(ctx, *move, observed, candidates)
 	if err != nil {
 		return err
 	}
 	if reason != "" {
-		return r.requestPreparationCancellation(ctx, move, reason)
+		return preparationChanged(reason)
 	}
 	if placement == nil || placement.Spec.NodeName == "" || placement.DeletionTimestamp != nil {
-		return r.preparationWait(ctx, move, "WaitingForPreparedPlacement")
+		move.Status.Reason = "WaitingForPreparedPlacement"
+		return nil
 	}
 	poolsOnNode, err := r.destinationPools(ctx, *move, placement.Spec.NodeName)
 	if err != nil {
@@ -183,7 +188,8 @@ func (r *Reconciler) prepareDestination(ctx context.Context, move *volumeapi.Mov
 	if err := r.deletePlacement(ctx, *move); err != nil {
 		return err
 	}
-	return r.preparationWait(ctx, move, preparationCapacityReason(unavailable))
+	move.Status.Reason = preparationCapacityReason(unavailable)
+	return nil
 }
 
 // This filter is advisory. A node must have one Pool that fits the whole
@@ -335,50 +341,25 @@ func (r *Reconciler) preparationPoolGroup(ctx context.Context, move volumeapi.Mo
 	return sourcePool.PoolGroup == pool.PoolGroup && !volumeapi.PoolHasServingVolume(pool, move.Spec.VolumeID), nil
 }
 
-func (r *Reconciler) finishPreparation(ctx context.Context, move *volumeapi.Move, observed observation) error {
-	reason, err := r.validatePreparedPlacement(ctx, *move, observed)
-	if err != nil {
-		return err
-	}
-	if reason != "" {
-		return r.requestPreparationCancellation(ctx, move, reason)
-	}
-	previous := move.Status
-	move.Status.Phase, move.Status.Reason = string(fsm.PhaseStartingDisruption), ""
-	// No effects in the same pass. A new observation must see this durable
-	// intent before moving the Volume or submitting an eviction.
-	return r.persistMoveStatus(ctx, move, previous)
-}
-
+// The StartingDisruption intent was observed before this effect. Revalidate
+// placement and capacity at the effect boundary without selecting a new phase.
 func (r *Reconciler) startPreparedDisruption(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	if observed.Volume.ActiveMove != move.Name || move.Status.Preparation == nil {
 		return fmt.Errorf("disruption requires its source claim and durable preparation")
 	}
-	if observed.Replacement != nil && (observed.Replacement.Spec.NodeName != "" || !hasPlacementHold(observed.Replacement)) {
-		return r.requestPreparationCancellation(ctx, move, "UnexpectedConsumerPlacement")
-	}
-	if !observed.FSM.SourceHealthy || observed.FSM.PreflightDeferred ||
-		(observed.Consumer != nil && !observed.FSM.PreconditionsValid) {
-		return r.requestPreparationCancellation(ctx, move, preparationReason(observed.FSM.UnsafeReason, "PreparationChanged"))
-	}
 	reason, err := r.validatePreparedPlacement(ctx, *move, observed)
 	if err != nil {
 		return err
 	}
 	if reason != "" {
-		return r.requestPreparationCancellation(ctx, move, reason)
+		return preparationChanged(reason)
 	}
 	if observed.Volume.Phase == volumeapi.PhaseReady {
 		if err := r.startPreparedSource(ctx, *move, observed.Volume); err != nil {
 			return err
 		}
 	}
-	previous := move.Status
-	if err := r.evictConsumer(ctx, move, observed); err != nil {
-		return err
-	}
-	move.Status.Phase, move.Status.Reason = string(fsm.PhaseWaitingForUnpublish), ""
-	return r.persistMoveStatus(ctx, move, previous)
+	return r.evictConsumer(ctx, move, observed)
 }
 
 func preparationReason(reason, fallback string) string {

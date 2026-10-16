@@ -70,7 +70,7 @@ func TestPreparationCapacityProbeFiltersPoolsWithinOneNode(t *testing.T) {
 				}
 			}
 			for range 5 {
-				if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 				f.schedulePlacements(t)
@@ -105,7 +105,7 @@ func TestPreparationCapacityProbeFiltersPoolsWithinOneNode(t *testing.T) {
 func TestPreparationCapacityProbeRechecksCapabilityBeforeGrant(t *testing.T) {
 	f := newPreparationRegistryFixture(t, 1)
 	for range 3 {
-		if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 			t.Fatal(err)
 		}
 		f.schedulePlacements(t)
@@ -113,7 +113,7 @@ func TestPreparationCapacityProbeRechecksCapabilityBeforeGrant(t *testing.T) {
 	f.reconciler.Repository = &preparationPoolReadRepository{Repository: f.registry, beforeReady: func() {
 		setPreparationProbeSupported(t, f, "destination-pool", false)
 	}}
-	if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if move := f.move(t, 0); move.Status.Preparation != nil || move.Status.Reason != "DestinationCapacityProbeUnavailable" {
@@ -125,7 +125,7 @@ func TestPreparationCapacityProbeRechecksCapabilityBeforeGrant(t *testing.T) {
 func preparationStartingDisruption(t *testing.T, f *preparationRegistryFixture) volumeapi.Move {
 	t.Helper()
 	move := f.untilPrepared(t, 0)
-	if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 		t.Fatal(err)
 	}
 	move = f.move(t, 0)
@@ -162,7 +162,7 @@ func TestPreparedDisruptionProbePendingPreservesSourceAndReservation(t *testing.
 			case "missing probe":
 				f.reconciler.CapacityProbe = nil
 			}
-			err = f.reconciler.reconcilePreparation(f.ctx, move)
+			err = f.reconciler.reconcilePersistedMove(f.ctx, move)
 			unlock()
 			if err == nil || ((failure == "timeout" || failure == "unsupported") && !errors.Is(err, ErrCapacityProbePending)) ||
 				(failure == "busy" && !errors.Is(err, errPoolBusy)) {
@@ -191,7 +191,7 @@ func TestPreparedDisruptionProbePendingPreservesSourceAndReservation(t *testing.
 				}
 				return poolcapacity.Filesystem{AvailableBytes: 1}, nil // Reachability, not approval.
 			})
-			if err = f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+			if err = f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 				t.Fatal(err)
 			}
 			recovered := f.move(t, 0)
@@ -217,7 +217,7 @@ func TestPreparedDisruptionMovingReentryDoesNotRepeatProbe(t *testing.T) {
 		t.Fatal("crash recovery repeated the pre-disruption probe")
 		return poolcapacity.Filesystem{}, ErrCapacityProbePending
 	})
-	if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.move(t, 0); got.Status.Phase != "WaitingForUnpublish" || got.Status.CapacityApproved {
@@ -236,7 +236,7 @@ func TestPreparedPreflightDoesNotAuthorizeLaterInsufficientSpace(t *testing.T) {
 		}
 		return poolcapacity.Filesystem{AvailableBytes: 1}, nil
 	})
-	if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 		t.Fatal(err)
 	}
 	move = f.move(t, 0)

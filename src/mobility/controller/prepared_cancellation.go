@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -12,81 +13,59 @@ import (
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
-// Cancellation first fences the Move writer. It never evicts a consumer or
-// releases a reservation in the caller's observation of the preparing path.
-func (r *Reconciler) requestPreparationCancellation(ctx context.Context, move *volumeapi.Move, reason string) error {
-	if err := cancellablePreparation(*move); err != nil {
-		return err
-	}
-	if move.Status.Phase == string(fsm.PhaseCanceling) || move.Status.Phase == string(fsm.PhaseCancelled) {
-		return nil
-	}
-	previous := move.Status
-	move.Status.Phase, move.Status.Reason = string(fsm.PhaseCanceling), reason
-	move.Status.Message = "cancelling preparation before destination execution approval"
-	return r.persistMoveStatus(ctx, move, previous)
-}
-
-// Re-observe after each write. In particular, releasing the logical hold must
-// precede clearing ActiveMove: the capacity ledger binds a live hold to that
-// exact lock. A crash between those writes resumes from Cancelled.
-func (r *Reconciler) reconcileCancellation(ctx context.Context, move volumeapi.Move) error {
+// Cancellation reads only source authority and its exact placement. Lost
+// workload/PV/PVC/Node objects cannot prevent releasing an unapproved hold.
+func (r *Reconciler) observeCancellation(ctx context.Context, move volumeapi.Move) (observation, error) {
+	result := observation{Names: namesFor(move.Name)}
 	if err := cancellablePreparation(move); err != nil {
-		return err
+		return result, err
 	}
-	phase := fsm.Phase(move.Status.Phase)
-	if phase != fsm.PhaseCanceling && phase != fsm.PhaseCancelled {
-		return fmt.Errorf("Move is not cancelling preparation")
-	}
-	if phase == fsm.PhaseCancelled && move.Status.Preparation != nil {
-		return fmt.Errorf("cancelled Move still holds a preparation reservation")
+	if move.Status.Phase == string(fsm.PhaseCancelled) && move.Status.Preparation != nil {
+		return result, fmt.Errorf("cancelled Move still holds a preparation reservation")
 	}
 	if err := volumeapi.ValidateMovePreparation(move); err != nil {
-		return err
+		return result, err
 	}
-
 	state, err := r.cancellationVolume(ctx, move)
 	if err != nil {
-		return err
+		return result, err
 	}
+	result.Volume = state
 	locked := state.ActiveMove == move.Name
-	if phase == fsm.PhaseCanceling && !locked && move.Status.SourceCopy != nil {
-		// An initial claim PUT may still arrive after its caller timed out.
-		// Acquire the exact Ready source for settlement, then release it below
-		// in a later pass. Those real writes fence the delayed claim before the
-		// journal can disappear; an unchanged status PUT is not an RV fence.
-		next := state
-		next.ActiveMove = move.Name
-		return r.Repository.CompareAndSetSourceState(ctx, move.Spec.VolumeID, state, next)
+	if move.Status.Phase == string(fsm.PhaseCanceling) && !locked && move.Status.SourceCopy != nil || locked && state.Phase == volumeapi.PhaseMoving {
+		return result, nil
 	}
-	// A timed-out StartingDisruption PUT may arrive after Cancelled but
-	// before unlock. Restore it here too, preserving current publication.
-	if locked && state.Phase == volumeapi.PhaseMoving {
-		next := state
-		next.Phase = volumeapi.PhaseReady
-		return r.Repository.CompareAndSetSourceState(ctx, move.Spec.VolumeID, state, next)
+	pod, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, result.Names.PlacementPod, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		result.FSM.PlacementAbsent = true
+		return result, nil
 	}
+	if err != nil {
+		return result, fmt.Errorf("observe cancelled placement: %w", err)
+	}
+	if err := validatePlacementIdentity(pod, move, result.Names); err != nil {
+		return result, err
+	}
+	if pod.UID == "" || (move.Status.PlacementPodUID != "" && string(pod.UID) != move.Status.PlacementPodUID) {
+		return result, fmt.Errorf("cancelled placement Pod UID changed")
+	}
+	result.Placement = pod
+	return result, nil
+}
 
-	absent, err := r.cancelPreparationPlacement(ctx, move)
-	if err != nil || !absent {
+func (r *Reconciler) deleteCancelledPlacement(ctx context.Context, move volumeapi.Move, pod *corev1.Pod) error {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return nil
+	}
+	if err := validatePlacementIdentity(pod, move, namesFor(move.Name)); err != nil {
 		return err
 	}
-	if phase == fsm.PhaseCanceling {
-		previous := move.Status
-		move.Status.Phase = string(fsm.PhaseCancelled)
-		move.Status.Preparation = nil
-		move.Status.CapacityReason = "PreparationCancelled"
-		move.Status.Message = "preparation cancelled; source authority preserved"
-		return r.persistMoveStatus(ctx, &move, previous)
+	uid := pod.UID
+	if err := r.Client.CoreV1().Pods(r.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete cancelled placement: %w", err)
 	}
-	if locked {
-		next := state
-		next.ActiveMove = ""
-		return r.Repository.CompareAndSetSourceState(ctx, move.Spec.VolumeID, state, next)
-	}
-	// An old settled cancellation may coexist with a later Move or owner. It
-	// owns only its journal now and must never restore that newer Volume state.
-	return r.reconcileTerminalMove(ctx, move)
+	// DELETE success is not absence. The next GET must return NotFound.
+	return nil
 }
 
 func (r *Reconciler) cancellationVolume(ctx context.Context, move volumeapi.Move) (volumeapi.State, error) {
@@ -145,33 +124,4 @@ func cancellationSource(move volumeapi.Move, state volumeapi.State) error {
 		return fmt.Errorf("cancellation cannot prove the exact authoritative source copy")
 	}
 	return nil
-}
-
-func (r *Reconciler) cancelPreparationPlacement(ctx context.Context, move volumeapi.Move) (bool, error) {
-	names := namesFor(move.Name)
-	pod, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.PlacementPod, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("observe cancelled placement: %w", err)
-	}
-	if err := validatePlacementIdentity(pod, move, names); err != nil {
-		return false, err
-	}
-	if pod.UID == "" || (move.Status.PlacementPodUID != "" && string(pod.UID) != move.Status.PlacementPodUID) {
-		return false, fmt.Errorf("cancelled placement Pod UID changed")
-	}
-	if pod.DeletionTimestamp != nil {
-		return false, nil
-	}
-	uid := pod.UID
-	if err := r.Client.CoreV1().Pods(r.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &uid},
-	}); err != nil && !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("delete cancelled placement: %w", err)
-	}
-	// A successful DELETE can leave a terminating Pod. Only a later GET
-	// returning NotFound permits releasing its logical reservation.
-	return false, nil
 }

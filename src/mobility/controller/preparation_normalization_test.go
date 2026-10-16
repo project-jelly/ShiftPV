@@ -54,7 +54,7 @@ func TestPreparationPlacementSurvivesOwnerPinSerialization(t *testing.T) {
 			name := namesFor(f.moveNames[0]).PlacementPod
 			var placement *corev1.Pod
 			for range 6 {
-				if err = f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+				if err = f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 				for _, action := range f.client.Actions() {
@@ -80,7 +80,7 @@ func TestPreparationPlacementSurvivesOwnerPinSerialization(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err = f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil {
+			if err = f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 				t.Fatal(err)
 			}
 			placement, err = f.client.CoreV1().Pods("system").Get(f.ctx, name, metav1.GetOptions{})

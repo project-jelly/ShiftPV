@@ -43,10 +43,10 @@ func TestPreparedCancellationResumesAfterCancelledResponseLossWithoutBinding(t *
 		}
 		return nil
 	}
-	if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil { // DELETE placement
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil { // DELETE placement
 		t.Fatal(err)
 	}
-	if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); !errors.Is(err, errMoveStatusPersistence) {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); !errors.Is(err, errMoveStatusPersistence) {
 		t.Fatalf("lost cancellation status response was not fenced: %v", err)
 	}
 	move := f.move(t, 0)
@@ -98,7 +98,7 @@ func TestPreparedCancellationFencesDelayedMovingWrite(t *testing.T) {
 				t.Fatal(err)
 			}
 			for range 2 { // placement absence, then durable Cancelled
-				if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -106,7 +106,7 @@ func TestPreparedCancellationFencesDelayedMovingWrite(t *testing.T) {
 				t.Fatal("did not reach the crash boundary before unlock")
 			}
 			if deliverAfterUnlock {
-				if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := f.commitDynamicUpdate(volumeapi.VolumeResource, delayed); !apierrors.IsConflict(err) {
@@ -119,7 +119,7 @@ func TestPreparedCancellationFencesDelayedMovingWrite(t *testing.T) {
 				if _, err := f.commitDynamicUpdate(volumeapi.VolumeResource, delayed); err != nil {
 					t.Fatalf("late pre-unlock PUT should still match its Volume RV: %v", err)
 				}
-				if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 				state := f.state(t, 0)
@@ -139,7 +139,7 @@ func TestPreparedCancellationFencesDelayedInitialClaim(t *testing.T) {
 	for _, arrival := range []string{"before cancellation claim", "after cancellation claim", "after journal deletion"} {
 		t.Run(arrival, func(t *testing.T) {
 			f := newPreparationRegistryFixture(t, 1)
-			if err := f.reconciler.reconcilePreparation(f.ctx, f.move(t, 0)); err != nil { // Persist the exact source plan.
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil { // Persist the exact source plan.
 				t.Fatal(err)
 			}
 			move := f.move(t, 0)
@@ -156,7 +156,7 @@ func TestPreparedCancellationFencesDelayedInitialClaim(t *testing.T) {
 				}
 				return false, nil, nil
 			})
-			if err := f.reconciler.reconcilePreparation(f.ctx, move); !errors.Is(err, context.DeadlineExceeded) || delayed == nil {
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, move); !errors.Is(err, context.DeadlineExceeded) || delayed == nil {
 				t.Fatalf("did not capture the actual initial claim PUT: %v", err)
 			}
 			if err := f.reconciler.requestPreparationCancellation(f.ctx, &move, "SourceUncordoned"); err != nil {
@@ -167,7 +167,7 @@ func TestPreparedCancellationFencesDelayedInitialClaim(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 				state := f.state(t, 0)
@@ -224,7 +224,7 @@ func TestPreparedCancellationPreservesConcurrentPublication(t *testing.T) {
 				want = nil
 			} else {
 				for range 2 {
-					if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+					if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -233,7 +233,7 @@ func TestPreparedCancellationPreservesConcurrentPublication(t *testing.T) {
 			wrapper := &cancellationPublicationRepository{Repository: f.registry}
 			wrapper.beforeCAS = func() { setCancellationPublications(t, f, want) }
 			f.reconciler.Repository = wrapper
-			if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 				t.Fatal(err)
 			}
 			got := f.state(t, 0).PublishedNodes
@@ -285,7 +285,7 @@ func TestPreparedCancellationWaitsForExactPlacementAbsence(t *testing.T) {
 				})
 			}
 			f.client.ClearActions()
-			err = f.reconciler.reconcileCancellation(f.ctx, move)
+			err = f.reconciler.reconcilePersistedMove(f.ctx, move)
 			if (err != nil) != (boundary != "terminating") {
 				t.Fatalf("unexpected placement cancellation result: %v", err)
 			}
@@ -335,7 +335,7 @@ func TestPreparedCancellationRejectsDiskAuthority(t *testing.T) {
 			if err := f.reconciler.requestPreparationCancellation(f.ctx, &move, "cancel"); err == nil {
 				t.Fatal("execution authority was accepted for preparation cancellation")
 			}
-			if err := f.reconciler.reconcileCancellation(f.ctx, move); err == nil {
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err == nil {
 				t.Fatal("execution authority entered cancellation effects")
 			}
 			if len(f.client.Actions()) != 0 || len(f.dynamic.Actions()) != 0 {
@@ -352,7 +352,7 @@ func TestPreparedCancellationBeforeReservation(t *testing.T) {
 			move := f.move(t, 0)
 			if withPlacement {
 				for range 8 {
-					if err := f.reconciler.reconcilePreparation(f.ctx, move); err != nil {
+					if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 						t.Fatal(err)
 					}
 					move = f.move(t, 0)
@@ -411,7 +411,7 @@ func TestPreparedCancellationRetainsContradictorySource(t *testing.T) {
 			}
 			f.client.ClearActions()
 			f.dynamic.ClearActions()
-			if err := f.reconciler.reconcileCancellation(f.ctx, move); err == nil {
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err == nil {
 				t.Fatal("cancellation adopted contradictory source authority")
 			}
 			for _, actions := range [][]ktesting.Action{f.client.Actions(), f.dynamic.Actions()} {
@@ -442,7 +442,7 @@ func TestPreparedCancelledJournalDoesNotRestoreLaterMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := f.state(t, 0)
-	if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if after := f.state(t, 0); !reflect.DeepEqual(before, after) {
@@ -511,7 +511,7 @@ func finishCancellation(t *testing.T, f *preparationRegistryFixture) {
 		if move.Status.Phase == "Cancelled" && move.Status.Preparation == nil && f.state(t, 0).ActiveMove == "" && len(move.Finalizers) == 0 {
 			return
 		}
-		if err := f.reconciler.reconcileCancellation(f.ctx, move); err != nil {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 			t.Fatal(err)
 		}
 	}

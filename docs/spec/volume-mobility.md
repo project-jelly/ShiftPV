@@ -203,6 +203,12 @@ plus the existing service-account/resource/timeout profile, until settlement.
 
 ## State Table
 
+One decision model selects the next `phase` and `recoveryPhase` for preparation,
+execution, cancellation and recovery. The controller observes only the facts each
+stage needs. Effects persist exact evidence or report pending; they do not choose
+lifecycle phases. A pending effect retains accepted evidence and does not advance
+its phase. `Canceling` releases the hold and becomes `Cancelled` in one status CAS.
+
 | State | Entry condition | Allowed next step |
 |---|---|---|
 | `Pending` | Volume is Ready, RWO Filesystem, one active owner, no active Move | Validate preconditions |

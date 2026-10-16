@@ -57,7 +57,7 @@ func TestLegacyRecoveryStatusFailureRequiresReobservation(t *testing.T) {
 				}
 				return nil
 			}
-			err := f.reconciler.reconcileRecovery(f.ctx, move)
+			err := f.reconciler.reconcilePersistedMove(f.ctx, move)
 			if !injected || !errors.Is(err, test.failure) || f.ctx.Err() != nil {
 				t.Fatalf("failure was not returned with a live context: injected=%v err=%v ctx=%v", injected, err, f.ctx.Err())
 			}
@@ -85,7 +85,7 @@ func TestLegacyRecoveryStatusFailureRequiresReobservation(t *testing.T) {
 			f.afterWrite = nil
 			restarted := newTestReconciler(f.client, f.registry)
 			for range 2 {
-				if err := restarted.reconcileRecovery(f.ctx, f.move(t, 0)); err != nil {
+				if err := restarted.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -95,7 +95,7 @@ func TestLegacyRecoveryStatusFailureRequiresReobservation(t *testing.T) {
 				t.Fatalf("fresh recovery did not resume one verification Job: jobs=%+v err=%v", jobs, err)
 			}
 			finishRecoveryJobs(t, f.client, batchv1.JobComplete)
-			if err := restarted.reconcileRecovery(f.ctx, f.move(t, 0)); err != nil {
+			if err := restarted.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 				t.Fatal(err)
 			}
 			if got := f.move(t, 0); got.Status.RecoveryPhase != recoveryRetiring || got.Status.RecoveryReason != "" {

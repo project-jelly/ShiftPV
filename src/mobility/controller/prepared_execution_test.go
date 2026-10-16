@@ -125,7 +125,7 @@ func TestPreparedExecutionCancelsBeforeDiskAuthority(t *testing.T) {
 				t.Fatalf("pre-disk failure did not cancel: %+v", f.move(t, 0).Status)
 			}
 			for range 8 {
-				if err := f.reconciler.reconcileCancellation(f.ctx, f.move(t, 0)); err != nil {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 			}

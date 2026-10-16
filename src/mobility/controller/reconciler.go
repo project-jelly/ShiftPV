@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -16,7 +15,6 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
-	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -104,33 +102,6 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 func (r *Reconciler) reconcilePersistedMove(ctx context.Context, move volumeapi.Move) error {
 	if !supportedMoveProtocol(move) {
 		return fmt.Errorf("retain unsupported protocol %q", move.Spec.ProtocolVersion)
-	}
-	if handled, err := r.reconcilePreparedStage(ctx, move); handled || err != nil {
-		return err
-	}
-	phase := fsm.Phase(move.Status.Phase)
-	if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {
-		// A read-only measurement must not delay restoring source authority.
-		_, cleanupErr := r.finalizeSourceUsage(ctx, move)
-		if ctx.Err() != nil {
-			return errors.Join(cleanupErr, ctx.Err())
-		}
-		return errors.Join(r.reconcileRecovery(ctx, move), cleanupErr)
-	}
-	if phase == fsm.PhaseSucceeded || (phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered) {
-		// Finish a terminal journal's destructive operation before releasing
-		// the finalizer it still depends on. Re-observe after settlement.
-		if moveCleanupPending(move) {
-			return r.settleTerminalCleanup(ctx, move)
-		}
-		if !volumeapi.MoveCleanupSettled(move) {
-			return fmt.Errorf("retain terminal move: cleanup and capacity are not settled")
-		}
-		return r.reconcileTerminalMove(ctx, move)
-	}
-	if phase == fsm.PhaseBlocked {
-		_, err := r.finalizeSourceUsage(ctx, move)
-		return err
 	}
 	return r.reconcileMove(ctx, move)
 }

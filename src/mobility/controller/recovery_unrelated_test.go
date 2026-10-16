@@ -45,7 +45,7 @@ func TestRecoveryRollbackWithUnrelatedPublishedVolume(t *testing.T) {
 				unrelatedState := volumeapi.State{UID: unrelated.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: unrelated.NodeName, CurrentCopy: &unrelated, PublishedNodes: []string{unrelated.NodeName}, CapacityBytes: 32 << 20}
 				repo.volumes[unrelated.VolumeID] = unrelatedState
 				move := repo.moves[0]
-				if err := r.reconcileRecovery(context.Background(), move); err != nil {
+				if err := r.reconcilePersistedMove(context.Background(), move); err != nil {
 					t.Fatalf("recovery rejected unrelated publication: %v", err)
 				}
 				if repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason != recoveryCapacitySettled {
@@ -66,7 +66,7 @@ func TestRecoveryRollbackWithUnrelatedPublishedVolume(t *testing.T) {
 				if state.OwnerNode != move.Spec.SourceNode || state.ActiveMove != move.Name || state.Phase != volumeapi.PhaseBlocked {
 					t.Fatalf("source authority or recovery guard changed: %+v", state)
 				}
-				if err := r.reconcileRecovery(context.Background(), repo.moves[0]); err != nil {
+				if err := r.reconcilePersistedMove(context.Background(), repo.moves[0]); err != nil {
 					t.Fatal(err)
 				}
 				if repo.moves[0].Status.RecoveryPhase != recoveryResuming {

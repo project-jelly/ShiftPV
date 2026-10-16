@@ -26,7 +26,7 @@ func TestRollbackCleanupPendingPreservesRecoveryAndCapacity(t *testing.T) {
 			before := seedCleanupObservationPhase(t, r, spec, phase)
 			state := repo.volumes[move.Spec.VolumeID]
 			for range 2 {
-				if err := r.reconcileRecovery(ctx, repo.moves[0]); err != nil {
+				if err := r.reconcilePersistedMove(ctx, repo.moves[0]); err != nil {
 					t.Fatalf("executor wait became recovery error: %v", err)
 				}
 				current, err := r.Cleanups.Get(ctx, spec.Authority)
@@ -38,7 +38,7 @@ func TestRollbackCleanupPendingPreservesRecoveryAndCapacity(t *testing.T) {
 			if _, err := kube.BatchV1().Jobs(job.Namespace).UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
 				t.Fatal(err)
 			}
-			if err := r.reconcileRecovery(ctx, repo.moves[0]); err != nil {
+			if err := r.reconcilePersistedMove(ctx, repo.moves[0]); err != nil {
 				t.Fatal(err)
 			}
 			current, err := r.Cleanups.Get(ctx, spec.Authority)
