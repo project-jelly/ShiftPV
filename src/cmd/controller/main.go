@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -123,6 +124,13 @@ func parseFlags() config {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "upgrade-check" {
+		if err := runUpgradeCheck(context.Background(), os.Args[2:], os.Stdout, loadUpgradeCheckClients); err != nil && !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(os.Stderr, "ShiftPV upgrade check failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg := parseFlags()
 	clients := wiring.InCluster(fatal)
 	config, client, dynamicClient := clients.Config, clients.Typed, clients.Dynamic

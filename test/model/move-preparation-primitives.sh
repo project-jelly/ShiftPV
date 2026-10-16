@@ -80,6 +80,28 @@ jq -e --slurpfile before "${probe_dir}/legacy-before.json" \
 echo "Old Move CRD rejects Strict Create and status Update before pruning"
 
 kubectl --kubeconfig "${probe_kubeconfig}" apply -f "${move_crd}" >/dev/null
+jq '.metadata.name = "move-new-legacy-rejected"' "${probe_dir}/legacy-create.json" >"${probe_dir}/new-legacy-create.json"
+# Establishment does not prove every API handler has observed the new rules.
+# A dry-run cannot leave a legacy object behind while the schema propagates.
+schema_ready=0
+schema_deadline=$((SECONDS + 30))
+while ((SECONDS < schema_deadline)); do
+  if ! kubectl --kubeconfig "${probe_kubeconfig}" create --raw "${move_api}?dryRun=All&fieldValidation=Strict" \
+    -f "${probe_dir}/new-legacy-create.json" >"${probe_dir}/schema-probe-output" 2>"${probe_dir}/schema-probe-error" &&
+    grep -Fq 'new Moves require prepared-v1' "${probe_dir}/schema-probe-error"; then
+    schema_ready=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${schema_ready}" != 1 ]]; then
+  cat "${probe_dir}/schema-probe-error" >&2
+  echo 'new Move creation contract did not become observable' >&2
+  exit 1
+fi
+expect_rejected 'new Moves require prepared-v1' \
+  kubectl --kubeconfig "${probe_kubeconfig}" create --raw "${move_api}?fieldValidation=Strict" \
+  -f "${probe_dir}/new-legacy-create.json"
 kubectl --kubeconfig "${probe_kubeconfig}" create --raw "${move_api}?fieldValidation=Strict" \
   -f "${probe_dir}/prepared-create.json" >"${probe_dir}/prepared-before.json"
 
@@ -152,4 +174,23 @@ get_move "${prepared_name}" | jq '.status.preparation = null' >"${probe_dir}/pre
 kubectl --kubeconfig "${probe_kubeconfig}" replace --raw "${move_api}/${prepared_name}/status?fieldValidation=Strict" \
   -f "${probe_dir}/prepared-null.json" >/dev/null
 get_move "${prepared_name}" | jq -e '.status | has("preparation") and .preparation == null' >/dev/null
+
+# Old records can still update metadata and finish finalization without a
+# protocol rewrite. Neither required nor default is added to the old field.
+get_move "${legacy_name}" | jq '
+  .metadata.annotations["example.test/history"] = "retained"
+  | .metadata.finalizers = ["example.test/transition-probe"]
+' >"${probe_dir}/legacy-metadata.json"
+kubectl --kubeconfig "${probe_kubeconfig}" replace --raw "${move_api}/${legacy_name}?fieldValidation=Strict" \
+  -f "${probe_dir}/legacy-metadata.json" >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" delete "shiftpvmove/${legacy_name}" --wait=false >/dev/null
+get_move "${legacy_name}" | jq -e --slurpfile before "${probe_dir}/legacy-before.json" '
+  .metadata.uid == $before[0].metadata.uid and .metadata.deletionTimestamp != null
+  and .metadata.annotations["example.test/history"] == "retained"
+  and (.spec | has("protocolVersion") | not)
+' >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" patch "shiftpvmove/${legacy_name}" \
+  --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" wait --for=delete "shiftpvmove/${legacy_name}" --timeout=30s >/dev/null
+echo 'New legacy Move CREATE rejected; old status/metadata/finalizer/DELETE compatibility passed'
 echo "Prepared Move protocol immutability, schema, roundtrip and status CAS passed"

@@ -27,3 +27,7 @@ transition을 허용하지 않는다.
 
 모든 production 보증은 같은 계약을 실제 CRD, Controller, node-local lock, helper effect에 구현한 뒤
 unit, Linux integration, isolated Kind fault injection, real-node unclean OS reboot와 soak gate를 통과해야 성립한다.
+
+Move API primitive는 신규 protocol 미지정 CREATE 거부와 기존 legacy 기록의 status·metadata·
+finalizer·DELETE 허용을 함께 검사한다. 새 필드를 기존 기록에 기본값으로 채우거나 protocol을
+변경하지 않는다.

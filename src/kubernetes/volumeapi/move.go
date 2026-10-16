@@ -112,15 +112,11 @@ func (r *Registry) CreateMove(ctx context.Context, generateName string, spec Mov
 	if err := r.validate(); err != nil {
 		return Move{}, err
 	}
-	if spec.ProtocolVersion != "" && spec.ProtocolVersion != MoveProtocolPreparedV1 {
+	if spec.ProtocolVersion != MoveProtocolPreparedV1 {
 		return Move{}, fmt.Errorf("unsupported Move protocol %q", spec.ProtocolVersion)
 	}
-	encodedSpec := map[string]any{"volumeID": spec.VolumeID, "sourceNode": spec.SourceNode}
-	options := metav1.CreateOptions{}
-	if spec.ProtocolVersion != "" {
-		encodedSpec["protocolVersion"] = spec.ProtocolVersion
-		options.FieldValidation = metav1.FieldValidationStrict
-	}
+	encodedSpec := map[string]any{"volumeID": spec.VolumeID, "sourceNode": spec.SourceNode, "protocolVersion": spec.ProtocolVersion}
+	options := metav1.CreateOptions{FieldValidation: metav1.FieldValidationStrict}
 	object, err := r.Client.Resource(MoveResource).Create(ctx, &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVMove",

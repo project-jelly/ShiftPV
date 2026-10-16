@@ -1342,7 +1342,7 @@ func TestRegistryCreateMove(t *testing.T) {
 		return true, created, nil
 	})
 	registry := &Registry{Client: client}
-	move, err := registry.CreateMove(context.Background(), "move-volume-", MoveSpec{VolumeID: "volume", SourceNode: "source"})
+	move, err := registry.CreateMove(context.Background(), "move-volume-", MoveSpec{ProtocolVersion: MoveProtocolPreparedV1, VolumeID: "volume", SourceNode: "source"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1351,6 +1351,19 @@ func TestRegistryCreateMove(t *testing.T) {
 	}
 	if !slices.Contains(move.Finalizers, MoveProtectionFinalizer) {
 		t.Fatalf("move finalizers = %v", move.Finalizers)
+	}
+}
+
+func TestRegistryRejectsNewLegacyMoveBeforeAPIWrite(t *testing.T) {
+	for _, protocol := range []string{"", "prepared-v2"} {
+		t.Run(protocol, func(t *testing.T) {
+			client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+			registry := &Registry{Client: client}
+			_, err := registry.CreateMove(context.Background(), "move-", MoveSpec{ProtocolVersion: protocol, VolumeID: "volume", SourceNode: "source"})
+			if err == nil || len(client.Actions()) != 0 {
+				t.Fatalf("unsupported protocol reached API: err=%v actions=%v", err, client.Actions())
+			}
+		})
 	}
 }
 

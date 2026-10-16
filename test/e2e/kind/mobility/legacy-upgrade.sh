@@ -29,6 +29,15 @@ if ! kubectl get shiftpvmoves -o json | jq -e 'all(.items[]; (.spec.protocolVers
 	echo 'legacy upgrade test requires no prepared journals before starting the published controller' >&2
 	exit 1
 fi
+# Install the preceding creation contract before starting its published writer.
+# The current schema intentionally rejects newly created protocol-less Moves.
+legacy_contract_file=$(mktemp)
+trap 'rm -f "${legacy_contract_file}"' EXIT
+kubectl create --dry-run=client --validate=false \
+	-f "${ROOT_DIR}/charts/shiftpv/crds/shiftpv.io_shiftpvmoves.yaml" -o json \
+	| jq '.spec.versions[].schema.openAPIV3Schema.properties.spec["x-kubernetes-validations"] |=
+		map(select(.message != "new Moves require prepared-v1"))' >"${legacy_contract_file}"
+kubectl apply -f "${legacy_contract_file}"
 kubectl -n shiftpv-system patch deployment/shiftpv-controller --type=strategic -p "$(jq -nc \
 	--arg image "${LEGACY_CONTROLLER}" --argjson args "${LEGACY_ARGS}" \
 	'{spec:{template:{spec:{containers:[{name:"shiftpv-controller",image:$image,args:$args}]}}}}')"
@@ -88,6 +97,7 @@ if DENIAL=$(kubectl patch "shiftpvmove/${MOVE}" --subresource=status --type=merg
 	exit 1
 fi
 grep -Fq 'legacy upgrade execution boundary failure injection' <<<"${DENIAL}"
+kubectl apply -f "${ROOT_DIR}/charts/shiftpv/crds/shiftpv.io_shiftpvmoves.yaml"
 kubectl -n shiftpv-system patch deployment/shiftpv-controller --type=strategic -p "$(jq -nc \
 	--arg image "${CANDIDATE_CONTROLLER}" --argjson args "${CANDIDATE_ARGS}" \
 	'{spec:{template:{spec:{containers:[{name:"shiftpv-controller",image:$image,args:$args}]}}}}')"
@@ -106,6 +116,32 @@ test -z "$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.activeMov
 test "$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.metadata.uid}')" = "${MOVE_UID}"
 test -z "$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.spec.protocolVersion}')"
 kubectl uncordon "${SOURCE}"
+# This completed old journal and its existing Ready PVC are transition inputs,
+# not new creation work. The candidate must inspect them without replaying it.
+inspection_report=$(mktemp)
+trap 'rm -f "${legacy_contract_file}" "${inspection_report}" "${inspection_report}.error"' EXIT
+inspection_ok=0
+deadline=$((SECONDS + 90))
+while ((SECONDS < deadline)); do
+	if kubectl -n shiftpv-system exec deployment/shiftpv-controller -c shiftpv-controller -- \
+		/shiftpv-controller upgrade-check --namespace=shiftpv-system --node-daemonset-name=shiftpv-node \
+		>"${inspection_report}" 2>"${inspection_report}.error"; then
+		inspection_ok=1
+		break
+	fi
+	sleep 1
+done
+if [[ "${inspection_ok}" != 1 ]]; then
+	cat "${inspection_report}" "${inspection_report}.error" >&2
+	echo 'settled legacy history or existing Ready PVC blocked transition inspection' >&2
+	exit 1
+fi
+rm -f "${inspection_report}.error"
+test "$(pod_sha256 "${NAMESPACE}" deployment/wffc /data/payload)" = "${CHECKSUM}"
+test "$(kubectl -n "${NAMESPACE}" get pvc/wffc -o jsonpath='{.metadata.uid}')" = "${CLAIM_UID}"
+test "$(kubectl get "pv/${PV}" -o jsonpath='{.spec.csi.volumeHandle}')" = "${VOLUME}"
+test "$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.metadata.uid}')" = "${MOVE_UID}"
+test -z "$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.spec.protocolVersion}')"
 kubectl delete namespace "${NAMESPACE}" --wait=true --timeout=180s
 kubectl wait "pv/${PV}" --for=delete --timeout=180s
 kubectl wait "shiftpvvolume/${VOLUME}" --for=delete --timeout=180s
