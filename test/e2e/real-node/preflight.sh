@@ -91,6 +91,10 @@ fi
 if [[ "${FAULT_NODE}" != "${SOURCE_NODE}" && "${FAULT_NODE}" != "${DESTINATION_NODE}" ]]; then
 	block 'FAULT_NODE must be SOURCE_NODE or DESTINATION_NODE'
 fi
+if [[ ( "${FAULT_NODE}" == "${SOURCE_NODE}" && "${FAULT_SSH_TARGET}" != "${SOURCE_SSH_TARGET}" ) ||
+	( "${FAULT_NODE}" == "${DESTINATION_NODE}" && "${FAULT_SSH_TARGET}" != "${DESTINATION_SSH_TARGET}" ) ]]; then
+	block 'FAULT_SSH_TARGET must match the reviewed SSH role for FAULT_NODE'
+fi
 case ${EXPECTED_CONTROLLER_IMAGE} in
 *@sha256:*) pass 'controller image expectation is immutable' ;;
 *) block 'EXPECTED_CONTROLLER_IMAGE must contain @sha256:' ;;
@@ -130,8 +134,9 @@ for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
 	fi
 done
 
-fault_role=$(jq -r --arg node "${FAULT_NODE}" '.items[] | select(.metadata.name == $node) | ((.metadata.labels["node.kubernetes.io/microk8s-controlplane"] // "") + (.metadata.labels["node-role.kubernetes.io/control-plane"] // "") + (.metadata.labels["node-role.kubernetes.io/master"] // ""))' <<<"${cluster_json}")
-if [[ -z "${fault_role}" ]]; then
+fault_role=$(jq -r --arg node "${FAULT_NODE}" '.items[] | select(.metadata.name == $node) | (.metadata.labels // {}) |
+	has("node.kubernetes.io/microk8s-controlplane") or has("node-role.kubernetes.io/control-plane") or has("node-role.kubernetes.io/master")' <<<"${cluster_json}")
+if [[ "${fault_role}" == false ]]; then
 	pass "fault node is not labelled as a control-plane node: ${FAULT_NODE}"
 else
 	block "fault node carries a control-plane role: ${FAULT_NODE}"
@@ -185,6 +190,9 @@ fi
 volume_count=$(k get shiftpvvolumes -o json 2>/dev/null | jq '.items | length' 2>/dev/null || printf 'unknown')
 move_json=$(k get shiftpvmoves -o json 2>/dev/null || true)
 move_count=$(jq '.items | length' <<<"${move_json}" 2>/dev/null || printf 'unknown')
+if ! jq -e '.items | type == "array"' <<<"${move_json}" >/dev/null 2>&1; then
+	block 'cannot completely observe existing Move journals'
+fi
 unsettled_moves=$(jq -r '
 	.items[]?
 	| select(
@@ -224,22 +232,31 @@ for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
 	fi
 done
 
-if remote_hostname=$(ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${FAULT_SSH_TARGET}" 'hostname; sudo -n true' 2>/dev/null | head -1); then
-	if [[ "${remote_hostname}" == "${FAULT_NODE}" ]]; then
-		pass "SSH and passwordless sudo reach the exact fault node: ${FAULT_SSH_TARGET}"
+# Soak alternates its source. Validate both reviewed SSH roles, not only the
+# initial FAULT_NODE, before either resident executor can be interrupted.
+for role in source destination; do
+	if [[ "${role}" == source ]]; then expected_node=${SOURCE_NODE}; else expected_node=${DESTINATION_NODE}; fi
+	if remote_hostname=$(ssh_node "${role}" 'set -e; hostname; sudo -n true; command -v flock >/dev/null; command -v timeout >/dev/null' 2>/dev/null); then
+		if [[ "${remote_hostname}" == "${expected_node}" ]]; then
+			pass "SSH, sudo, flock and timeout reach the exact ${role} node: ${expected_node}"
+		else
+			block "SSH ${role} identity mismatch: expected=${expected_node} actual=${remote_hostname:-missing}"
+		fi
 	else
-		block "SSH target identity mismatch: expected=${FAULT_NODE} actual=${remote_hostname:-missing}"
+		block "SSH, sudo, flock or timeout is unavailable for ${role}: ${expected_node}"
 	fi
-else
-	block "SSH or passwordless sudo is unavailable: ${FAULT_SSH_TARGET}"
-fi
+done
 
-unsafe_pods=$(k get pods -A --field-selector "spec.nodeName=${FAULT_NODE}" -o json 2>/dev/null | jq -r '
+if ! pods_json=$(k get pods -A --field-selector "spec.nodeName=${FAULT_NODE}" -o json 2>/dev/null) ||
+	! jq -e '.items | type == "array"' <<<"${pods_json}" >/dev/null 2>&1; then
+	block "cannot completely observe workloads on ${FAULT_NODE}"
+	pods_json='{"items":[]}'
+fi
+unsafe_pods=$(jq -r '
 	.items[]
 	| select(.status.phase != "Succeeded" and .status.phase != "Failed")
 	| select((.metadata.ownerReferences[0].kind // "") != "DaemonSet")
-	| "\(.metadata.namespace)/\(.metadata.name) owner=\(.metadata.ownerReferences[0].kind // "none")/\(.metadata.ownerReferences[0].name // "none")"' \
-	| sort || true)
+	| "\(.metadata.namespace)/\(.metadata.name) owner=\(.metadata.ownerReferences[0].kind // "none")/\(.metadata.ownerReferences[0].name // "none")"' <<<"${pods_json}" | sort)
 if [[ -z "${unsafe_pods}" ]]; then
 	pass "fault node has no non-DaemonSet workload: ${FAULT_NODE}"
 elif [[ -n "${EXPECTED_NON_DAEMONSET_PODS_SHA256}" ]]; then

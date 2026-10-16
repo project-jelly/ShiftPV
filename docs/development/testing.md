@@ -124,7 +124,7 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | `helperpod`: `inspector_test.go`, `inspector_move_test.go`; `nodeexecutor`: `cleanup_advance_test.go` | GET/LIST만으로 exact legacy history·Job/Pod 종료·orphan owner를 확인; 여러 Move에 LIST 2회, 불완전 관찰은 보존 |
 | `mobility/controller`: `cleanup_pending_test.go`, `cleanup_dispatcher_test.go` | Node cleanup 대기 3개가 worker 2개를 점유하지 않고 독립 Move 계획 저장 |
 | `mobility/controller`: `source_usage_boundary_test.go`; `helperpod`: `source_usage_test.go`; `volumeapi`: `move_usage_test.go` | 실제 Registry·helper Pod 경로의 응답 유실·재시작·취소·terminal 잔여 Pod와 3개 측정 대기 중 독립 Volume 진행; 결과 CAS와 양수 사용량 불변성 |
-| `mobility/controller`: `legacy_recovery_response_loss_test.go` | 실제 Registry의 저장 후 EOF/API timeout과 저장 전 실패에서 진단 재쓰기 금지, 원래 오류 보존, fresh read 뒤 복구 재개 |
+| `mobility/controller`: `recovery_response_loss_test.go` | 실제 Registry의 저장 후 EOF/API timeout과 저장 전 실패에서 진단 재쓰기 금지, 원래 오류 보존, fresh read 뒤 복구 재개 |
 | `cmd/controller`: `mobility_probe_test.go`; `pool/measurement` clients; `mobility/controller`: capacity probe tests | 실제 HTTP 지연을 포함한 resident 조회 전체 시간 예산, helper fallback 부재, fresh nonce, 중단 전 확인·pending 시 예약과 source 권한 유지 |
 | `mobility/controller`: `volume_budget*_test.go`, `volume_expiry_boundary_test.go`, `expired_status_test.go` | 실제 HTTP 지연이 worker 수보다 많아도 독립 Volume 진행, 동일 Volume 직렬화, 상위 deadline 상속, 만료 후 다음 작업·진단 중단; 응답 유실로 저장된 상태는 보존하고 fresh read로 재개 |
 | `volume-helper`: measurement tests; `pool/capacity`: measurement tests | scan generation 변경 중 du 1회 유지·최신 inventory/실제 backing 재확인·명시적 실패와 config/copy/publication 변경 시 결과 폐기 |
@@ -210,17 +210,34 @@ capacity accounting이 같은 결론을 가리켜야 한다.
 
 ## Soak exit criteria
 
-운영 동형 환경에서 정한 횟수의 provision/publish/move/delete loop를 실행하고 다음이 모두 0으로
-돌아와야 한다.
+Real-node release gate는 운영 동형 환경에서 **성공한 Move 100회와 경과 시간 43,200초를 모두**
+충족해야 한다. 10회마다 controller를 재시작하고, 20회마다 native cleanup의 bound Node Pod를
+교체하며 해당 fault의 실제 성공 횟수도 확인한다. 간격 0은 smoke 전용이며 native cleanup 간격
+1은 이전 settled Move가 없어 거절한다. 짧은 smoke run이나 mock 검증은 실제 노드 qualification을
+대신하지 않는다. PVC/PV/ShiftPVVolume UID와 PV name/CSI `volumeHandle`을 정확히 보존하고,
+초기 payload에 unique `RUN_ID`/`PVC_UID`/`VOLUME_UID` nonce를 넣어 재생성을 검출한다.
+
+Native fault는 cordon 전에 동일 test Volume의 이전 `Succeeded`/cleanup `Completed` Move를
+변경 없이 server dry-run하여 거절되는 것으로 admission barrier 활성화를 증명한다(저장 없음).
+Volume barrier로 cleanup 승인을 막은 뒤 source unpublish와 destination
+owner commit을 확인하고 기존 lock inode에 `flock`을 잡는다. Barrier 해제 후 journal에 bound된
+정확한 Node Pod UID를 UID precondition으로 삭제한다. 같은 operation/target이 새 Pod UID로
+rebind된 뒤 lock을 해제하고, native receipt의 `executorUID`가 새 Pod UID와 같은지 확인한다.
+Receipt 승인과 fresh source absence 증거가 확보되기 전에는 capacity hold를 해제하지 않는다.
+Context·역할별 노드/SSH 대상·immutable image 승인은 [real-node 절차](../../test/e2e/real-node/README.md)를 따른다.
+성공 marker는 owned lock/policy 해제, uncordon, 필수 final API 증거 수집 뒤 출력한다.
+`INT`는 130, `TERM`은 143으로 종료한다.
+
+완료 시 다음이 모두 0으로 돌아와야 한다.
 
 - non-terminal Move와 deleting Volume
 - parent 없는 executor Job
 - 설명되지 않는 physical copy와 capacity hold drift
 - dual mount 또는 non-owner publish
-- restart 증가와 persistent `Blocked`/cleanup `NeedsReview`
+- 주입하지 않은 restart 증가와 persistent `Blocked`/cleanup `NeedsReview`
 
-Soak 시간과 횟수는 cluster 규모와 disk 속도에 맞춰 release checklist에서 고정한다. 실패한 run은
-resource snapshot, logs, metrics, directory inventory를 보존하고 자동 재실행으로 덮지 않는다.
+실패한 run은 resource snapshot, logs, metrics, directory inventory를 보존하고 자동 재실행으로
+덮지 않는다.
 
 ## CDI provisioning latency
 

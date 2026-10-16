@@ -198,6 +198,31 @@ assert_node_file "${DESTINATION_NODE}" "${DESTINATION_MOUNT}/volumes/${VOLUME_ID
 source_copy=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.sourceCopy.copyID}')
 assert_cleanup_journal "shiftpvmove/${MOVE_NAME}" MoveSource "${VOLUME_ID}" "${source_copy}" ShiftPVMove
 
+# Exercise the real-node soak's policy against this genuinely completed Move.
+# Only an unchanged server dry-run is submitted; no history is manufactured.
+(
+	# shellcheck source=test/e2e/real-node/cleanup-executor.sh
+	source "${ROOT_DIR}/test/e2e/real-node/cleanup-executor.sh"
+	k() { kubectl --request-timeout=30s "$@"; }
+	MOVE_TIMEOUT_SECONDS=60
+	ARTIFACT_DIR="${WORK_DIR}/soak-barrier"
+	mkdir -p "${ARTIFACT_DIR}"
+	deadline=$((SECONDS + 120))
+	while ((SECONDS < deadline)); do
+		k get "shiftpvmove/${MOVE_NAME}" -o json >"${ARTIFACT_DIR}/before.json"
+		if jq -e '((.metadata.finalizers // []) | length) == 0' "${ARTIFACT_DIR}/before.json" >/dev/null; then break; fi
+		sleep 1
+	done
+	trap release_soak_cleanup EXIT
+	hold_soak_cleanup "shiftpv-soak-canary-${MOVE_UID}" "${VOLUME_ID}" "${MOVE_NAME}"
+	k get "shiftpvmove/${MOVE_NAME}" -o json >"${ARTIFACT_DIR}/after.json"
+	jq -e --slurpfile before "${ARTIFACT_DIR}/before.json" '
+		.metadata.uid == $before[0].metadata.uid and .spec == $before[0].spec and .status == $before[0].status' \
+		"${ARTIFACT_DIR}/after.json" >/dev/null
+	release_soak_cleanup
+	trap - EXIT
+)
+
 trap - EXIT
 cleanup
 echo "ShiftPV cleanup Node retry passed: move=${MOVE_NAME} operation=${OPERATION} killedPodUID=${killed_pod_uid} retryPodUID=${retry_pod_uid}"
