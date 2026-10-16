@@ -183,7 +183,12 @@ func (r *Reconciler) applyMoveDecision(move *volumeapi.Move, decision fsm.Decisi
 	if before.Phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" {
 		return
 	}
-	if before.Phase == decision.Next.Phase && (before.Phase == fsm.PhaseCanceling || before.Phase == fsm.PhaseCancelled) {
+	if before.Phase == fsm.PhaseCanceling || before.Phase == fsm.PhaseCancelled {
+		// Settlement preserves why cancellation began, including its terminal
+		// transition. The next phase updates the message, not that cause.
+		if before.Phase != decision.Next.Phase {
+			move.Status.Message = mobilityMessage(decision.Next.Phase, move.Status.Reason)
+		}
 		return
 	}
 	if decision.Action != fsm.ActionReservePreparation || decision.Reason != "" {

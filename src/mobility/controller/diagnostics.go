@@ -118,6 +118,9 @@ func mobilityMessage(phase fsm.Phase, reason string) string {
 	if phase == fsm.PhaseBlocked {
 		return "operator action required; automatic rollback is disabled; inspect the reason and authoritative owner, restore the failed prerequisite, then use ResumeOwner only when its recovery checks can pass"
 	}
+	if phase == fsm.PhaseCanceling || phase == fsm.PhaseCancelled {
+		return mobilityMessages[phase]
+	}
 	if reason != "" {
 		return "automatic retry; " + waitReasonMessage(reason)
 	}

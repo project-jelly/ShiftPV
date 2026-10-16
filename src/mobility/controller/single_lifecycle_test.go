@@ -118,6 +118,10 @@ func TestSingleLifecycleSourceChangesBeforeApprovalPreserveServingCopy(t *testin
 				!reflect.DeepEqual(canceling.Status.Preparation, move.Status.Preparation) || !reflect.DeepEqual(source, f.state(t, 0)) {
 				t.Fatalf("%s source change bypassed durable pre-disk cancellation: move=%+v source=%+v", change, canceling.Status, f.state(t, 0))
 			}
+			reason := canceling.Status.Reason
+			if reason == "" {
+				t.Fatal("source change did not record its cancellation reason")
+			}
 			assertPreparationReserved(t, f, preparationRequestedBytes)
 			singleLifecycleUntil(t, f, func(move volumeapi.Move, state volumeapi.State) bool {
 				return move.Status.Phase == "Cancelled" && state.ActiveMove == ""
@@ -125,6 +129,9 @@ func TestSingleLifecycleSourceChangesBeforeApprovalPreserveServingCopy(t *testin
 			source.ActiveMove = ""
 			if !reflect.DeepEqual(source, f.state(t, 0)) {
 				t.Fatal("pre-disk cancellation changed source copy or publication")
+			}
+			if got := f.move(t, 0).Status.Reason; got != reason {
+				t.Fatalf("settlement erased the cancellation reason: got=%q want=%q", got, reason)
 			}
 			assertPreparationReserved(t, f, 0)
 			assertNoEviction(t, f.client)
