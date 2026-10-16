@@ -21,8 +21,20 @@ type PoolReference struct {
 // Initializing distinguishes an unstarted creation from damaged execution state.
 // Legacy objects may lack InitialPool and must pass capacity admission again.
 func (s State) Initializing() bool {
+	return !s.Deleting && s.unstartedCreation()
+}
+
+// HasInitialReservation is an accounting fact, not permission to initialize.
+// A DELETE before the first status write must retain its admitted Pool's hold
+// until finalization removes the object. No execution evidence may be present.
+func (s State) HasInitialReservation() bool {
+	return s.InitialPool != nil && volume.ValidIdentityToken(s.InitialPool.Name) &&
+		volume.ValidIdentityToken(s.InitialPool.UID) && s.unstartedCreation()
+}
+
+func (s State) unstartedCreation() bool {
 	return volume.ValidIdentityToken(s.UID) && s.RequestName != "" && s.InitialNode != "" && s.CapacityBytes > 0 &&
-		slices.Contains(s.Finalizers, VolumeProtectionFinalizer) && !s.Deleting && !s.HasCleanup &&
+		slices.Contains(s.Finalizers, VolumeProtectionFinalizer) && !s.HasCleanup &&
 		s.Phase == "" && s.OwnerNode == "" && s.ActiveMove == "" && len(s.PublishedNodes) == 0 &&
 		s.CurrentCopy == nil && s.CreationOperationID == "" && s.DeletionOperationID == "" &&
 		s.CreationExecutor == nil && s.CreationReceipt == nil

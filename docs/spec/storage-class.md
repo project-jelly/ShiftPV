@@ -84,6 +84,11 @@ mobility를 허용한 PVC의 topology는 그룹에 등록된 node 범위다. 일
 stale, invalid 또는 incomplete observation은 allocation을 승인할 수 없다. `statfs`는 같은 filesystem의
 현재 여유를 확인하는 admission 신호일 뿐 공간을 예약하거나 hard quota를 제공하지 않는다.
 
+가용 bytes 또는 inode가 0이면 작은 쓰기 probe가 성공해도 신규 할당용 `Ready`는
+`False / NoSpace`다. `Writable`은 해당 probe의 결과이며 다음 metadata 쓰기의 성공을 보장하지 않는다.
+기존 copy의 게시·승인된 정리는 자기 backing과 실행 권한을 별도로 확인한다. 정리에 필요한 durable
+intent를 저장하지 못하면 삭제를 시작하지 않으며, 공간을 반환한 뒤 같은 기록으로 재시도한다.
+
 ### Existing copy operations
 
 `CapacityBackingVerified`는 현재 filesystem·block 영역이 해당 Pool의 anchor와 일치하는지,

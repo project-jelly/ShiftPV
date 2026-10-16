@@ -56,6 +56,8 @@ var definitions = []struct {
 	{"mobility_deferred_volumes", "Volumes deferred during the last completed cordon discovery.", []string{"reason"}},
 	{"persistent_volumes", "Driver-owned PersistentVolumes by phase and by the Pool holding the current copy.", []string{"phase", "pool"}},
 	{"persistent_volumes_released_bytes", "Requested capacity of Released driver-owned PersistentVolumes awaiting an operator reclaim decision.", []string{"pool"}},
+	{"volumes_without_persistent_volume", "Ready or preserved Blocked volume owners without a matching driver PersistentVolume, excluding lifecycle work.", []string{"pool"}},
+	{"volumes_without_persistent_volume_reserved_bytes", "Logical owner reservations without a matching driver PersistentVolume, not disk usage or reclaim permission.", []string{"pool"}},
 }
 
 func (c *Cache) Describe(ch chan<- *prometheus.Desc) {

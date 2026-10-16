@@ -140,6 +140,7 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 		result.CapacityReadable = failure(err)
 	} else {
 		result.Filesystem = stats
+		// Reading capacity does not prove that another metadata write will fit.
 		result.CapacityReadable = Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "filesystem capacity is readable"}
 	}
 	if result.MountIdentity != nil {

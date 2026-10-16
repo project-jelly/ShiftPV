@@ -27,7 +27,7 @@ func TestPoolDeadlineAllowsIndependentObservationAndRecovery(t *testing.T) {
 	for _, boundary := range []string{"status", "inventory", "release"} {
 		t.Run(boundary, func(t *testing.T) {
 			ok := Check{Known: true, OK: true, Reason: "OK"}
-			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}}
 			a := testRegistration(volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", Generation: 1, CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock})
 			b := testRegistration(volumeapi.Pool{Name: "pool-b", UID: "b", NodeName: "node", Generation: 1, CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock})
 			for _, pool := range []*volumeapi.Pool{&a, &b} {

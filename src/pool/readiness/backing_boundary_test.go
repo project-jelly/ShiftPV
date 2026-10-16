@@ -73,7 +73,7 @@ func newBackingFixture(t *testing.T) *backingFixture {
 		InspectDirectory: inspectDirectory,
 		Write:            func(path string) error { f.writes[filepath.Base(path)]++; return writeProbe(path) },
 		StatFS: func(string) (capacity.Filesystem, error) {
-			return capacity.Filesystem{TotalBytes: 2 << 30, AvailableBytes: 1 << 30}, nil
+			return capacity.Filesystem{TotalBytes: 2 << 30, AvailableBytes: 1 << 30, AvailableInodes: 64}, nil
 		},
 		ListMounts: func() ([]mountutils.MountInfo, error) { return f.mounts, nil },
 	})
@@ -164,6 +164,56 @@ func TestApprovedOwnBackingChangeNeverUsesOldAnchorAsEvidence(t *testing.T) {
 	}
 	if ready, reason := b.CleanupReadyAt(testTime, time.Minute); !ready || f.scans["b"] != 2 {
 		t.Fatalf("healthy peer stopped: ready=%v reason=%s scans=%v", ready, reason, f.scans)
+	}
+}
+
+func TestApprovedFullPoolPreservesExactExistingWorkAndRecovers(t *testing.T) {
+	for _, exhausted := range []string{"bytes", "inodes"} {
+		t.Run(exhausted, func(t *testing.T) {
+			f := newBackingFixture(t)
+			f.reconcile(t)
+			original := f.pool(t, "a")
+			statFS := f.probe.statFS
+			f.probe.statFS = func(path string) (capacity.Filesystem, error) {
+				stats, err := statFS(path)
+				if filepath.Base(path) == "a" {
+					if exhausted == "bytes" {
+						stats.AvailableBytes = 0
+					} else {
+						stats.AvailableInodes = 0
+					}
+				}
+				return stats, err
+			}
+			f.reconcile(t)
+			pool := f.pool(t, "a")
+			if ready, reason := pool.ReadyAt(testTime, time.Minute); ready || reason != "NoSpace" {
+				t.Fatalf("full Pool admitted new placement: ready=%v reason=%s", ready, reason)
+			}
+			if !pool.RegistrationApproved() || !volumeapi.SameCapacityUnit(pool.Status.CapacityUnit, original.Status.CapacityUnit) ||
+				pool.Status.MountIdentity == nil || *pool.Status.MountIdentity != *original.Status.MountIdentity ||
+				!completeInventory(pool.Status.Inventory) || f.writes["a"] != 2 || f.scans["a"] != 2 {
+				t.Fatalf("allocation headroom changed existing backing or inventory: status=%+v writes=%v scans=%v", pool.Status, f.writes, f.scans)
+			}
+			for name, check := range map[string]func(time.Time, time.Duration) (bool, string){
+				"cleanup": pool.CleanupReadyAt, "execution": pool.ExecutionReadyAt,
+			} {
+				if allowed, reason := check(testTime, time.Minute); !allowed {
+					t.Fatalf("%s lost exact successful backing/write evidence: %s", name, reason)
+				}
+			}
+			if err := f.probe.VerifyBacking(pool); err != nil {
+				t.Fatalf("live own backing changed with headroom: %v", err)
+			}
+			if _, err := f.registry.ReadyPoolForIdentity(context.Background(), "b", "b-uid", "node"); err != nil {
+				t.Fatalf("full Pool blocked an independent healthy peer: %v", err)
+			}
+			f.probe.statFS = statFS
+			f.reconcile(t)
+			if _, err := f.registry.ReadyPoolForIdentity(context.Background(), "a", "a-uid", "node"); err != nil {
+				t.Fatalf("restored headroom did not recover allocation: %v", err)
+			}
+		})
 	}
 }
 

@@ -73,6 +73,48 @@ groups:
             {{ $value }} durable cleanup contract(s) in state {{ $labels.state }} are
             preserving data pending operator action.
           runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcleanupneedsreview
+      - alert: ShiftPVPoolNoSpace
+        expr: |
+          (
+            shiftpv_pool_filesystem_available_bytes{shiftpv="true"} == 0
+            or shiftpv_pool_filesystem_available_inodes{shiftpv="true"} == 0
+          )
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (shiftpv_metrics_snapshot_success{shiftpv="true",source="filesystem"} == 1)
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="filesystem"} > 0)
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="filesystem"} < 300)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV Pool filesystem has no available space
+          description: >-
+            Pool {{ $labels.pool }} on node {{ $labels.node }} reports zero available bytes or inodes.
+            New allocation is blocked and cleanup may need headroom for durable metadata.
+            Preserve owned data and inspect the filesystem before reclaiming space.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnospace
+      - alert: ShiftPVVolumesWithoutPersistentVolume
+        expr: |
+          shiftpv_volumes_without_persistent_volume{shiftpv="true"} > 0
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (shiftpv_metrics_snapshot_success{shiftpv="true",source="metadata"} == 1)
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} > 0)
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} < 300)
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV retained owners have no PersistentVolume reference
+          description: >-
+            {{ $value }} Ready or preserved Blocked Volume owner(s) on pool {{ $labels.pool }} have
+            no matching driver PersistentVolume. This may be delayed PV publication or retained data;
+            inspect the Volume and provisioning history before deciding how to recover it.
+            Data and capacity reservations remain protected.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvvolumeswithoutpersistentvolume
       - alert: ShiftPVReleasedVolumes
         expr: shiftpv_persistent_volumes{shiftpv="true",phase="Released"} > 0
         for: 6h

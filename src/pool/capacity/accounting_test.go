@@ -132,3 +132,33 @@ func TestReservedBytesForPoolRejectsContradictoryCapacityState(t *testing.T) {
 		})
 	}
 }
+
+func TestInitialReservationDoesNotHideDamagedExecutionState(t *testing.T) {
+	for name, change := range map[string]func(*volumeapi.State){
+		"missing protection": func(s *volumeapi.State) { s.Finalizers = nil },
+		"missing UID":        func(s *volumeapi.State) { s.UID = "" },
+		"missing request":    func(s *volumeapi.State) { s.RequestName = "" },
+		"missing node":       func(s *volumeapi.State) { s.InitialNode = "" },
+		"missing capacity":   func(s *volumeapi.State) { s.CapacityBytes = 0 },
+		"missing Pool name":  func(s *volumeapi.State) { s.InitialPool.Name = "" },
+		"invalid Pool UID":   func(s *volumeapi.State) { s.InitialPool.UID = "../other" },
+		"cleanup":            func(s *volumeapi.State) { s.HasCleanup = true },
+		"phase":              func(s *volumeapi.State) { s.Phase = volumeapi.PhasePending },
+		"owner":              func(s *volumeapi.State) { s.OwnerNode = "node" },
+		"move":               func(s *volumeapi.State) { s.ActiveMove = "move" },
+		"publication":        func(s *volumeapi.State) { s.PublishedNodes = []string{"node"} },
+		"copy":               func(s *volumeapi.State) { s.CurrentCopy = &volume.CopyIdentity{PoolUID: "pool-uid", NodeName: "node"} },
+		"create operation":   func(s *volumeapi.State) { s.CreationOperationID = "create-volume-uid" },
+		"delete operation":   func(s *volumeapi.State) { s.DeletionOperationID = "delete-volume-uid" },
+		"executor":           func(s *volumeapi.State) { s.CreationExecutor = &volumeapi.NodeExecutor{} },
+		"receipt":            func(s *volumeapi.State) { s.CreationReceipt = &volumeapi.CreationReceipt{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := volumeapi.State{UID: "volume-uid", Finalizers: []string{volumeapi.VolumeProtectionFinalizer}, RequestName: "request", InitialNode: "node", CapacityBytes: 64, InitialPool: &volumeapi.PoolReference{Name: "pool", UID: "pool-uid"}, Deleting: true}
+			change(&state)
+			if _, err := ReservedBytesForPool(map[string]volumeapi.State{"v": state}, nil, "pool-uid"); err == nil {
+				t.Fatalf("damaged intent supplied capacity ownership: %+v", state)
+			}
+		})
+	}
+}

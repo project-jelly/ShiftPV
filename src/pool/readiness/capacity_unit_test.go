@@ -47,7 +47,7 @@ func TestSharedAllocationIsRejectedBeforeWritableProbeAndInventory(t *testing.T)
 		{Name: "pool-b", UID: "b-uid", NodeName: "node", MountPath: "/b", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 1},
 	}}
 	scans, inspects := 0, 0
-	r := &Reconciler{NodeName: "node", Pools: repo, Interval: time.Minute, Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}, shared: true, inspects: &inspects}, Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+	r := &Reconciler{NodeName: "node", Pools: repo, Interval: time.Minute, Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}, shared: true, inspects: &inspects}, Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
 		scans++
 		return volumeapi.PoolInventory{Valid: true}
 	}}

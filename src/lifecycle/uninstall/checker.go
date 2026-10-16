@@ -490,7 +490,7 @@ func exactMoveCopy(copy *volume.CopyIdentity, volumeID, nodeName, role string) b
 }
 
 func currentCopyUsesPool(volumeID string, state volumeapi.State, pool volumeapi.Pool) (bool, bool) {
-	if state.Initializing() && state.InitialPool != nil {
+	if state.HasInitialReservation() {
 		return state.InitialPool.Name == pool.Name && state.InitialPool.UID == pool.UID, true
 	}
 	copy := state.CurrentCopy

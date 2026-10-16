@@ -15,7 +15,7 @@ func TestRejectedCandidateDoesNotStopApprovedPool(t *testing.T) {
 	for _, scenario := range []string{"legacy", "shared", "unproven", "nested", "invalid capacity", "fractional capacity", "overflow capacity"} {
 		t.Run(scenario, func(t *testing.T) {
 			ok := Check{Known: true, OK: true, Reason: "OK", Message: "ok"}
-			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}}
 			a := testRegistration(volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 1})
 			a.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(a)
 			a.Status.RegistrationApproved = true
@@ -71,7 +71,7 @@ func TestDeletingUnapprovedPoolDoesNotRunWriteProbeOrAnchorIdentity(t *testing.T
 			repo := &fakeRepository{pool: pool}
 			inspects := 0
 			ok := Check{Known: true, OK: true, Reason: "OK"}
-			var inspector Inspector = fakeAllocationInspector{inspects: &inspects, result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+			var inspector Inspector = fakeAllocationInspector{inspects: &inspects, result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}}
 			if !supported {
 				inspector = fakeInspector{}
 			}
@@ -100,7 +100,7 @@ func TestApprovedPoolLimitErrorPreservesLivePeerEvidence(t *testing.T) {
 	for _, limit := range []string{"not-a-quantity", "1500m", "9223372036854775808"} {
 		t.Run(limit, func(t *testing.T) {
 			ok := Check{Known: true, OK: true, Reason: "OK"}
-			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}}
 			a := testRegistration(volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 1})
 			b := testRegistration(volumeapi.Pool{Name: "pool-b", UID: "b", NodeName: "node", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 2, CapacityLimit: limit})
 			for _, p := range []*volumeapi.Pool{&a, &b} {
@@ -147,7 +147,7 @@ func TestInvalidLimitDoesNotBlockApprovedCleanup(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				ok := Check{Known: true, OK: true, Reason: "OK"}
-				inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+				inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}}
 				pool := testRegistration(volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", Generation: 2, CapacityPolicy: policy, CapacityLimit: "not-a-quantity"})
 				pool.Status.RegistrationApproved = true
 				if policy != "" {
@@ -196,7 +196,7 @@ func TestInvalidLimitDoesNotBypassCleanupGuards(t *testing.T) {
 	for _, scenario := range []string{"backing unproven", "mount missing", "inventory truncated", "release not approved"} {
 		t.Run(scenario, func(t *testing.T) {
 			ok := Check{Known: true, OK: true, Reason: "OK"}
-			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}}
 			pool := testRegistration(volumeapi.Pool{Name: "pool-b", UID: "b", NodeName: "node", Generation: 2, CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, CapacityLimit: "not-a-quantity"})
 			pool.Status.RegistrationApproved = true
 			pool.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(pool)
@@ -258,7 +258,7 @@ func TestRegistrationRechecksAfterInventory(t *testing.T) {
 	for _, scenario := range []string{"peer appeared", "generation changed", "API failed"} {
 		t.Run(scenario, func(t *testing.T) {
 			ok := Check{Known: true, OK: true, Reason: "OK"}
-			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}, shared: true}
+			inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}, shared: true}
 			a := testRegistration(volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 1})
 			repo := &registrationRepository{fakeRepository: &fakeRepository{pools: []volumeapi.Pool{a}}}
 			repo.change = func(n int, f *fakeRepository) {
@@ -338,7 +338,7 @@ func TestNewReconcilerRejectsMissingDependencies(t *testing.T) {
 func TestConcurrentConflictingCandidatesNeverApprove(t *testing.T) {
 	ok := Check{Known: true, OK: true, Reason: "OK"}
 	writes := 0
-	inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}, shared: true, inspects: &writes}
+	inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}, shared: true, inspects: &writes}
 	repo := &fakeRepository{pools: []volumeapi.Pool{
 		testRegistration(volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 1}),
 		testRegistration(volumeapi.Pool{Name: "pool-b", UID: "b", NodeName: "node", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 1}),

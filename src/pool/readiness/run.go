@@ -2,7 +2,6 @@ package readiness
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
@@ -38,8 +37,12 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err != nil && !errors.Is(err, context.Canceled) {
-			klog.Errorf("reconcile ShiftPVPool readiness on node %s: %v", r.NodeName, err)
+		if err != nil {
+			if onlyExpectedObservationError(err) {
+				klog.V(4).Infof("retry ShiftPVPool readiness on node %s: %v", r.NodeName, err)
+			} else {
+				klog.Errorf("reconcile ShiftPVPool readiness on node %s: %v", r.NodeName, err)
+			}
 		}
 		updateInventoryRetries(pending, only, retry, c.Now())
 
@@ -66,6 +69,30 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			timer.Stop()
 		}
 	}
+}
+
+// Reconcile joins errors from independent Pools and identity-release writes.
+// A stale observation or canceled child must not hide a real joined failure.
+func onlyExpectedObservationError(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !onlyExpectedObservationError(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if err == volumeapi.ErrPoolObservationChanged || err == context.Canceled {
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyExpectedObservationError(wrapped.Unwrap())
+	}
+	return false
 }
 
 func timerDelay(pending map[string]inventoryRetry, now time.Time) time.Duration {

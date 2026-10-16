@@ -50,6 +50,13 @@ func TestPoolRemovalProtectsInitializingReservation(t *testing.T) {
 	}
 	assert(poolA, 1)
 	assert(poolB, 0)
+	state.Deleting = true // DELETE retains the exact logical reservation.
+	assert(poolA, 1)
+	assert(poolB, 0)
+	state.Finalizers = nil // Damaged protection cannot narrow the affected Pools.
+	assert(poolA, 1)
+	assert(poolB, 1)
+	state.Finalizers = []string{volumeapi.VolumeProtectionFinalizer}
 	state.InitialPool = nil // Old unassigned intents conservatively protect their node.
 	assert(poolA, 1)
 	assert(poolB, 1)

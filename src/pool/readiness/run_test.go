@@ -1,12 +1,18 @@
 package readiness
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
 	clocktesting "k8s.io/utils/clock/testing"
 )
 
@@ -18,7 +24,7 @@ func TestChangingInventoryRecoversWithoutExternalWake(t *testing.T) {
 		{Name: "pool-b", UID: "peer-uid", NodeName: "node", Generation: 1, CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock},
 	}}
 	ok := Check{OK: true, Known: true, Reason: "OK"}
-	inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}}
+	inspector := fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}}
 	for i := range repo.pools {
 		repo.pools[i].Status.RegistrationApproved = true
 		repo.pools[i].Status.CapacityUnit, _ = inspector.InspectCapacityUnit(repo.pools[i])
@@ -185,5 +191,76 @@ func TestScheduledInventoryRetrySurvivesListFailure(t *testing.T) {
 	awaitReadinessTimers(t, c, 1)
 	if scans != 2 || !repo.status.Inventory.Valid {
 		t.Fatal("failed List stranded the pending inventory retry")
+	}
+}
+
+func TestOnlyExpectedObservationErrorDoesNotHideJoinedFailures(t *testing.T) {
+	stale := volumeapi.ErrPoolObservationChanged
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"single", stale, true},
+		{"canceled", context.Canceled, true},
+		{"joined expected", errors.Join(stale, context.Canceled), true},
+		{"wrapped", fmt.Errorf("pool: %w", stale), true},
+		{"multiple pools", errors.Join(stale, fmt.Errorf("peer: %w", stale)), true},
+		{"nested", fmt.Errorf("reconcile: %w", errors.Join(stale, stale)), true},
+		{"identity", volumeapi.ErrStateConflict, false},
+		{"mixed identity", errors.Join(stale, volumeapi.ErrStateConflict), false},
+		{"mixed IO", errors.Join(stale, errors.New("inventory IO failed")), false},
+		{"mixed cancellation", errors.Join(stale, context.Canceled, errors.New("inventory IO failed")), false},
+		{"nested mixed", fmt.Errorf("reconcile: %w", errors.Join(stale, errors.Join(stale, volumeapi.ErrStateConflict))), false},
+		{"nil", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := onlyExpectedObservationError(tc.err); got != tc.want {
+				t.Fatalf("classified retry=%v want=%v error=%v", got, tc.want, tc.err)
+			}
+		})
+	}
+}
+
+// Exercise Run's outer logging guard as well as the leaf classifier. A normal
+// child cancellation must not hide a simultaneous failed Pool observation.
+func TestRunLogsRealErrorJoinedWithCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantError bool
+	}{
+		{"cancellation", fmt.Errorf("observation: %w", context.Canceled), false},
+		{"stale generation", volumeapi.ErrPoolObservationChanged, false},
+		{"mixed failure", errors.Join(context.Canceled, errors.New("inventory IO failed")), true},
+		{"mixed stale and failure", errors.Join(volumeapi.ErrPoolObservationChanged, context.Canceled, errors.New("inventory IO failed")), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := klog.CaptureState()
+			defer saved.Restore()
+			var output bytes.Buffer
+			klog.SetLogger(funcr.New(func(_, message string) { output.WriteString(message) }, funcr.Options{}))
+			reconciler, _ := NewReconciler("node", &fakeRepository{err: tc.err}, fakeInspector{}, time.Hour)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			wake := make(chan struct{}, 1)
+			wake <- struct{}{}
+			reconciler.Wake = wake
+			passes := 0
+			reconciler.ObserveAll = func([]Observation, error) {
+				passes++
+				if passes == 2 {
+					cancel()
+				}
+			}
+			// The second pass can start only after Run classified the first
+			// error. Cancel there so completion also synchronizes logger reads.
+			if err := reconciler.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(output.String(), "reconcile ShiftPVPool readiness"); got != tc.wantError {
+				t.Fatalf("errorLogged=%v want=%v output=%q", got, tc.wantError, output.String())
+			}
+		})
 	}
 }

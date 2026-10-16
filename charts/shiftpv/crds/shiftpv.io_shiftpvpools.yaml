@@ -92,6 +92,9 @@ spec:
                     limit:
                       type: string
                       minLength: 1
+                      x-kubernetes-validations:
+                        - rule: "isQuantity(self) && quantity(self).isInteger() && quantity(self).asInteger() > 0"
+                          message: capacity.limit must be an exact positive int64 byte count
                 scanEpoch:
                   description: Monotonic causal inventory request. Incrementing it advances metadata.generation and requires a new complete node observation.
                   type: integer

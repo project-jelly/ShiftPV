@@ -110,6 +110,8 @@ for crd in shiftpvpools.shiftpv.io shiftpvvolumes.shiftpv.io shiftpvmoves.shiftp
     --timeout=30s >/dev/null
 done
 
+bash test/model/pool-limit-primitives.sh "${probe_kubeconfig}" "${probe_dir}"
+
 protected_crds="$(kubectl --kubeconfig "${probe_kubeconfig}" get customresourcedefinitions \
   -l shiftpv.io/uninstall-protected=true \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
@@ -192,6 +194,36 @@ if [[ -n "$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${init
   echo "Create unexpectedly retained status instead of exercising initialization" >&2
   exit 1
 fi
+
+# DELETE before the first status write retains the protected spec reservation.
+# This is the API state modeled by the capacity initialization/deletion DI test.
+terminating_intent_id="shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+kubectl --kubeconfig "${probe_kubeconfig}" create -f - >/dev/null <<YAML
+apiVersion: shiftpv.io/v1alpha1
+kind: ShiftPVVolume
+metadata:
+  name: ${terminating_intent_id}
+  finalizers: [shiftpv.io/volume-protection]
+spec:
+  volumeID: ${terminating_intent_id}
+  requestName: pvc-terminating-intent
+  initialNode: source-node
+  initialPool:
+    name: source-pool
+    uid: ${pool_uid}
+  capacityBytes: 67108864
+YAML
+terminating_intent_uid="$(kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${terminating_intent_id}" -o jsonpath='{.metadata.uid}')"
+kubectl --kubeconfig "${probe_kubeconfig}" delete shiftpvvolume "${terminating_intent_id}" --wait=false >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${terminating_intent_id}" -o json | jq -e \
+  --arg uid "${terminating_intent_uid}" --arg pool_uid "${pool_uid}" \
+  '.metadata.uid == $uid and .metadata.deletionTimestamp != null and
+   .metadata.finalizers == ["shiftpv.io/volume-protection"] and
+   .spec.initialPool == {name:"source-pool",uid:$pool_uid} and
+   .spec.capacityBytes == 67108864 and (.status // {}) == {}' >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${terminating_intent_id}" --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null
+kubectl --kubeconfig "${probe_kubeconfig}" wait --for=delete "shiftpvvolume/${terminating_intent_id}" --timeout=30s >/dev/null
+echo 'Unstarted Volume DELETE retained its protected initial reservation until finalization'
 
 for protected_volume in "${volume_id}" "${initializing_volume_id}"; do
   kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${protected_volume}" \

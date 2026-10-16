@@ -29,6 +29,9 @@ var (
 	ErrPoolNotFound      = errors.New("ShiftPV Pool is not registered")
 	ErrPoolNotReady      = errors.New("ShiftPV Pool is not ready")
 	ErrPoolCopyConflict  = errors.New("ShiftPV Pool contains a conflicting serving copy")
+	// ErrPoolObservationChanged is only a stale observation generation, not a
+	// changed Pool UID, node, registration approval, or backing identity.
+	ErrPoolObservationChanged = fmt.Errorf("%w: Pool observation generation changed", ErrStateConflict)
 )
 
 const (
