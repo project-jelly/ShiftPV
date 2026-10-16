@@ -61,7 +61,8 @@ storageClass:
 새 생성은 중단한다. 기존 Ready Volume은 필드 추가 없이 계속 사용할 수 있다.
 
 아래 `TARGET_CHART_VERSION`은 설치할 정확한 Chart version으로 지정한다. 기존 release의 values도
-함께 전달한다.
+함께 전달한다. 실행 protocol을 전환할 때는 아래 [mobility 전환 순서](#planned-mobility-upgrades)의
+사전 검사를 마친 뒤 `helm upgrade`를 실행한다.
 
 ```sh
 TARGET_CHART_VERSION='<approved-chart-version>'
@@ -79,20 +80,27 @@ Node 0.4.12 이하로 되돌리면 전체 status 쓰기가 이 필드를 보존�
 
 ## Planned mobility upgrades
 
-새 준비 protocol과 resident Node cleanup을 도입하는 업그레이드는 다음 순서를 따른다.
+새 runtime은 `prepared-v1` Move만 실행한다. 신규 생성·삭제·Move cleanup은 resident Node만
+실행하고, copy·owner verification·promotion Job과 읽기 전용 계측 helper는 유지한다.
+기존 status를 읽을 수 있다는 것은 이전 실행기를 재개할 수 있다는 의미가 아니다.
+
+이 실행 계약으로 전환하는 업그레이드는 다음 순서를 따른다.
 실행 계약은 [volume mobility](../spec/volume-mobility.md), 정산 조건은
 [source cleanup](../spec/source-cleanup.md)이 소유한다.
 
-1. 추가 cordon과 PVC 생성·삭제 등 새 작업 유입을 멈추고, 기존 controller가 진행 중 작업을
-   정산하도록 둔다. 정산 전에 mobility를 끄면 해당 작업의 reconciliation도 멈춘다.
-2. Volume Ready·빈 `activeMove`, 정산된 hold/cleanup, 진행 중 creation/copy/promotion/cleanup/
-   usage helper 부재를 확인한다. 해결되지 않은 journal·finalizer를 삭제하지 않는다.
+1. 추가 cordon과 PVC 생성·삭제 등 새 작업 유입을 멈춘다. 호환되는 기존 Controller와
+   immutable helper image를 유지한 채 진행 중 작업을 정산한다. 정산 전에 mobility를 끄거나
+   candidate로 교체하지 않는다.
+2. Volume Ready·빈 `activeMove`, 정산된 hold/cleanup 및 helper 실행 종료를 확인한다.
+   해결되지 않은 journal·finalizer·예약을 삭제하거나 Job binding을 Node로 바꾸지 않는다.
 3. target CRD와 Node의 Move 조회·watch·status 쓰기 RBAC를 먼저 적용한다. 운영값으로
    렌더링한 target Node를 먼저 갱신하고 informer sync·resident capability·현재 Pool 관측을 확인한다.
-4. target placement PriorityClass와 호환되는 chart/controller/helper 조합을 적용한다.
+4. candidate 이미지의 읽기 전용 `upgrade-check`를 별도 Pod에서 실행한다. 종료 코드 0과
+   `complete: true`, 빈 `blockers`인 SAFE 결과를 확인한 뒤에만 Controller를 교체한다.
+5. target placement PriorityClass와 호환되는 chart/controller/helper 조합을 적용한다.
    새 chart는 구 controller가 모르는 flag를 전달하므로 전체 chart에 구 controller image만
    덮어쓰는 방식은 사용하지 않는다. controller는 단일 writer와 `Recreate`를 유지한다.
-5. 배포 후 controller·Pool·capability 상태를 확인한 다음 새 유지보수 작업을 시작한다.
+6. 배포 후 controller·Pool·capability 상태와 기존 데이터·UID를 확인한 뒤 새 작업 유입을 재개한다.
 
 ### 전환 사전 검사
 
@@ -113,21 +121,18 @@ kubectl -n shiftpv-system wait --for=jsonpath='{.status.phase}'=Succeeded \
 kubectl -n shiftpv-system logs shiftpv-upgrade-check
 ```
 
-검사는 GET/LIST만 사용한다. 정상 Ready Volume과 기존 PVC/PV·게시된 데이터, 정산된 완료 이력은
-유지하며, 미정산 이동·생성·삭제·cleanup·실행자와 필요한 Node 기능 부재를 보고한다.
-실패하면 기존 Controller를 계속 실행하고 원인을 정산한다. journal·finalizer·예약을 강제로
-삭제하거나 Job 실행자를 Node로 바꿔 적지 않는다.
+검사는 GET/LIST만 사용한다. 정상 Ready Volume과 기존 PVC/PV·데이터 및 정산된 완료 이력을
+보존하고, 미정산 작업·실행자와 필요한 Node 기능 부재를 보고한다. API 오류·decode 실패·불완전한
+관측은 승인이 아니다. 실패하면 기존 writer와 helper image를 유지한 채 원인을 정산한다.
 
 성공은 그 시점의 관측이며 영속적인 전환 허가가 아니다. 새 작업 유입을 멈춘 상태를 검사부터
 업그레이드 완료까지 유지한다. 검사는 새 작업을 차단하거나 기록을 변환하지 않는다.
 구 rollback이 inventory로만 완료되어 독립적인 journal 증거가 없는 이력은 보수적으로 보고할 수
 있다. 기존 runtime의 정산·보존·정상 GC 절차로 처리하며 검사를 통과시키려고 증거를 만들지 않는다.
 
-helper image 변경은 작업 정산 후가 기본이다. 중간 controller 갱신이 필요하면 CLI 호환성을
-확인한 기존 immutable image를 `mobility.helperImage`와 `helperPod.image`에 모두 pin하고
-service-account/resource/timeout profile도 유지한다. 빈 값은 controller image를 상속한다.
-기존 source Pod와 Job은 image·command·실행 조건이 달라지면 채택을 거부한다. 읽기 전용
-usage Pod의 명시적 폐기·재측정 경로를 다른 helper에도 적용된다고 가정하지 않는다.
+legacy 작업 정산에는 그 writer와 호환되는 immutable image를 `mobility.helperImage`와
+`helperPod.image`에 모두 pin하고 기존 실행 설정을 유지한다. candidate로 구 Job을 이어서 실행하는
+중간 업그레이드는 지원하지 않는다. helper image는 정산 뒤 새 조합으로 바꾼다.
 
 신규 생성·삭제·이동 cleanup은 resident Node만 실행한다. 필요한 capability가 없으면 같은
 intent·예약을 유지하며 재시도하고 Job을 만들지 않는다. 이전 생성 Pod나 미정산 Job-bound
@@ -135,6 +140,18 @@ cleanup이 발견되면 기존 writer로 정산한 뒤 전환한다. 새 writer�
 Node로 재바인딩하지 않으며, 완료 journal·absence 증거와 실행 종료를 확인한 이력만 읽는다.
 정상 Ready Volume의 생성 재호출은 현재 owner·Pool group·요청 호환성·생성 이력을 검증하고
 효과 없이 응답한다. 최초 Pool이나 생성 Node가 계속 존재할 필요는 없다.
+
+legacy Move는 독립적인 완료 증거·정확한 parent/UID·실행 종료·Volume 참조 해제를 검증한 뒤
+retention과 finalizer 조건에 따라 metadata GC만 수행한다. 미정산·불완전한 이력은 실행하거나
+보정하지 않는다. 승인된 전체 copy/operation plan이 없으면 recovery는 `CleanupNeedsReview`로
+멈추고 hold를 보존하며, inventory에서 plan이나 승인을 추론하지 않는다.
+Cleanup intent가 없던 prepared source 복구는 exact CAS 정산·causal rollback fence와 helper 종료를
+확인한다. 기존 cleanup journal의 receipt·absence 요구와 legacy 이력의 보수적 판정은 유지한다.
+
+[`legacy-upgrade.sh`](../../test/e2e/kind/mobility/legacy-upgrade.sh)는 active legacy 작업을
+candidate 사전 검사가 거부하는지, 기존 writer·helper가 직접 정산하는지, 교체 전에 SAFE인지
+확인한다. `Recreate` 전환 뒤에도 PVC/PV/Volume/Move UID·checksum·이력을 보존하고 새 실행자를
+만들지 않는지 검사한다.
 
 `prepared-v1` 기록이 남아 있으면 보존 중 terminal 기록까지 이해하는 controller가 필요하다.
 이를 모르는 구 controller와 공존하거나 downgrade하지 않는다. rollback 시 CRD를 축소하거나

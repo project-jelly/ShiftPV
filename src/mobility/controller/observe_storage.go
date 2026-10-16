@@ -141,17 +141,7 @@ func (r *Reconciler) observeSource(ctx context.Context, move volumeapi.Move, poo
 	if !sourceHealthy && !result.FSM.OwnerCommitted {
 		result.FSM.UnsafeReason = "SourceUnavailable"
 	}
-	// Discovery and Node updates are not atomic. A Move may be created from a
-	// cordoned snapshot just after the source was uncordoned. Before any volume
-	// lock or helper action, prefer the current Node observation and let the
-	// reconciler remove that obsolete transaction even if its PVC is disappearing.
-	result.PendingObsolete = move.Status.Phase == string(fsm.PhasePending) && sourceHealthy && !result.SourceCordoned &&
-		state.Phase == volumeapi.PhaseReady && state.ActiveMove == "" && state.OwnerNode == move.Spec.SourceNode
-	if result.PendingObsolete {
-		result.FSM.PreflightDeferred = true
-		result.FSM.UnsafeReason = "SourceNotCordoned"
-		return true, nil
-	}
+
 	return false, nil
 }
 

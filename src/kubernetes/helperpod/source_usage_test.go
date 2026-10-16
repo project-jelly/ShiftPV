@@ -26,7 +26,7 @@ func usageFixture(t *testing.T) (*Runner, *fake.Clientset, volumeapi.Move, volum
 		pod.UID = "usage-pod-uid"
 		return true, pod, client.Tracker().Add(pod)
 	})
-	copy := creationIdentity()
+	copy := sourceUsageCopy()
 	move := volumeapi.Move{Name: "move-a", UID: "move-uid", Finalizers: []string{volumeapi.MoveProtectionFinalizer},
 		Spec: volumeapi.MoveSpec{VolumeID: copy.VolumeID, SourceNode: copy.NodeName}, Status: volumeapi.MoveStatus{Phase: "WaitingForCapacity"}}
 	pool := volumeapi.Pool{Name: copy.PoolName, UID: copy.PoolUID, NodeName: copy.NodeName,
@@ -396,5 +396,13 @@ func TestSourceUsageIncompleteObservationNeverDeletes(t *testing.T) {
 		if action.GetVerb() == "delete" || action.GetVerb() == "create" {
 			t.Fatal("incomplete observation recreated the measurement")
 		}
+	}
+}
+
+func sourceUsageCopy() volume.CopyIdentity {
+	return volume.CopyIdentity{
+		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
+		VolumeID: testVolumeID, VolumeUID: "volume-uid", CopyID: "copy-id",
+		NodeName: "worker-a", Role: volume.RoleServing,
 	}
 }

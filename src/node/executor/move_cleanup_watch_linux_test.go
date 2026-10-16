@@ -12,20 +12,9 @@ import (
 	"github.com/project-jelly/ShiftPV/src/node/rpc/protocol"
 	"github.com/project-jelly/ShiftPV/src/volume"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/watch"
 	ktesting "k8s.io/client-go/testing"
 )
-
-func initialWatchObjects(stream *watch.RaceFreeFakeWatcher, object *unstructured.Unstructured) {
-	initial := object.DeepCopy()
-	initial.SetResourceVersion("1")
-	stream.Add(initial)
-	bookmark := &unstructured.Unstructured{}
-	bookmark.SetResourceVersion("1")
-	bookmark.SetAnnotations(map[string]string{metav1.InitialEventsAnnotationKey: "true"})
-	stream.Action(watch.Bookmark, bookmark)
-}
 
 func TestMoveCleanupStartupWaitsForBothWatchesBeforeCapability(t *testing.T) {
 	for _, last := range []string{"Volume", "Move"} {

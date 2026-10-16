@@ -96,6 +96,9 @@ func (r *Reconciler) reconcileOwnerPlacementInVolume(ctx context.Context, volume
 				return nil
 			}
 		}
+		if err := r.validateSettledMoves(ctx, movesForVolume(moves, identity.copy.VolumeID)); err != nil {
+			return err
+		}
 		// A Move LIST is not a transaction with the Volume or binding. Re-read
 		// authority after it and on every Pod conflict; NodePublish remains the
 		// final phase/owner fence if an external actor changes it after this read.
@@ -112,7 +115,7 @@ func (r *Reconciler) reconcileOwnerPlacementInVolume(ctx context.Context, volume
 
 func moveBlocksOwnerPlacement(move volumeapi.Move, volumeID string) bool {
 	journalUnsettled := move.Status.CleanupPhase != "" && move.Status.CleanupPhase != cleanupapi.PhaseCompleted
-	return move.Spec.VolumeID == volumeID && (!supportedMoveProtocol(move) || journalUnsettled || !volumeapi.MoveCleanupSettled(move))
+	return move.Spec.VolumeID == volumeID && ((!legacyMoveProtocol(move) && !supportedMoveProtocol(move)) || journalUnsettled || !volumeapi.MoveCleanupSettled(move))
 }
 
 // Pin and release together: a successful Update never exposes an unpinned Pod.

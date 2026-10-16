@@ -419,12 +419,12 @@ func TestChartRender(t *testing.T) {
 			},
 		},
 		{
-			name: "separate create and move helper images",
+			name: "separate measurement and move helper images",
 			args: []string{"--set", "controller.image.repository=controller,controller.image.tag=test," +
 				"helperPod.image=create-helper:test,mobility.helperImage=move-helper:test"},
 			assert: func(t *testing.T, c chart) {
 				args := c.controllerArgs(t)
-				wantArg(t, "create helper image", args, "--helper-image=create-helper:test")
+				wantArg(t, "measurement helper image", args, "--helper-image=create-helper:test")
 				wantArg(t, "move helper image", args, "--mobility-helper-image=move-helper:test")
 			},
 		},

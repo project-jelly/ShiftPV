@@ -16,9 +16,9 @@ import (
 	"github.com/project-jelly/ShiftPV/src/cmd/internal/wiring"
 	controllercsi "github.com/project-jelly/ShiftPV/src/csi/controller"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,9 +37,9 @@ func TestCSIDeletionRetriesLocalBudgetRejection(t *testing.T) {
 	budget := wiring.NewAPIBudget(0.01, 1)
 	budget.TryAccept()
 	clients := wiring.ForConfig(&rest.Config{Host: server.URL, RateLimiter: budget}, "test", func(step string, err error) { t.Fatalf("%s: %v", step, err) })
-	runner := &helperpod.Runner{}
+	effects := &nodeexecutor.Client{}
 	service := &controllercsi.Service{
-		Client: clients.Typed, Namespace: "shiftpv", Operator: runner, CleanupOperator: runner,
+		Client: clients.Typed, Namespace: "shiftpv", Operator: effects, CleanupOperator: effects,
 		Volumes: &volumeapi.Registry{Client: clients.Dynamic}, Cleanups: &cleanupapi.Store{Client: clients.Dynamic},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

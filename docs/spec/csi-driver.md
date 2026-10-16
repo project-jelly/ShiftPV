@@ -109,9 +109,10 @@ Pod UID·주소·인증서 변경 시 교체한다. 실행과 복구의 권한�
 
 Node 재시작은 같은 operation과 local marker/receipt로 재개한다. 실행 중인 Pod를 다른 Pod로 바꾸지 않으며,
 종료되거나 사라진 Pod만 receipt 기록 전에 재지정한다. Node에 고정된 작업은 시간 초과 후 helper로 전환하지
-않는다. Move copy·verify·promote는 Job을 사용하고, 새 cleanup은 capability를 갖춘 resident Node로 실행할 수 있다.
-기존 Job-bound 또는 이미 수락된 cleanup Job은 Job 경로로 정산한다. 자세한 경계는
-[source cleanup](source-cleanup.md)을 따른다.
+않는다. 새 생성·삭제·Move cleanup은 capability를 갖춘 resident Node로만 실행한다. capability가 없으면
+intent와 hold를 유지하고 재시도한다. Move copy·verify·promote Job과 읽기 전용 측정 helper는 유지한다.
+기존 Job 책임은 candidate가 실행·재결합·Node 전환하지 않는다. 호환되는 이전 writer와 helper image에서
+먼저 정산해야 한다. 자세한 경계는 [source cleanup](source-cleanup.md)을 따른다.
 불명확한 capacity, observation 또는 identity에서는 directory를 만들지 않는다.
 
 Publish는 다음 조건을 모두 만족할 때만 같은 per-volume lock 안에서 bind mount한다.
@@ -127,7 +128,10 @@ subjournal `NeedsReview`로 수렴한다.
 
 ## Planned cold move
 
-새 `prepared-v1` Move는 아래 순서로 진행한다. Protocol이 없는 기존 Move는 기존 경로로 정산한다.
+Candidate는 `prepared-v1` Move만 아래 순서로 실행한다. Protocol이 없는 기존 기록은 완결된 journal,
+Volume 무참조와 executor 종료 증거를 읽어 확인한 뒤 metadata만 정리한다. API reader의 과거 기록 호환은
+실행 호환을 뜻하지 않는다. 전환 전 기존 writer에서 정산하고, 새 작업을 차단한 채 candidate의 읽기 전용
+preflight를 통과한 뒤 `Recreate`로 교체한다. Preflight는 원자적 snapshot이 아니다.
 
 ```text
 Volume Ready + activeMove (source hold and publication retained)
@@ -149,7 +153,8 @@ effect의 API receipt와 fresh absence proof 전에는 destination hold를 해�
 
 어느 단계에서도 source와 destination의 동시 writable publication을 허용하지 않는다. stale, invalid,
 incomplete scan이나 identity contradiction은 promotion과 cleanup을 멈추고 authoritative copy와 모든 관련
-hold를 보존한다.
+hold를 보존한다. 승인 기록에 완전한 목적지 계획이 없으면 review 상태로 보존하며, copy identity나
+cleanup 권한을 추론하거나 추론한 계획으로 scan하지 않는다.
 
 ## Delete and cleanup closure
 

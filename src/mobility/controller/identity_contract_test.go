@@ -320,7 +320,7 @@ func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) 
 		moves: []volumeapi.Move{move},
 	}
 	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Namespace: "system", Repository: repository}
-	if err := reconciler.prepareMoveCopyIdentities(context.Background(), &move); err != nil {
+	if err := prepareMoveCopyIdentitiesForPool(&move, repository.pools[1]); err != nil {
 		t.Fatal(err)
 	}
 	if move.Status.IncomingCopy == nil || move.Status.IncomingCopy.Role != volume.RoleIncoming || move.Status.IncomingCopy.PoolUID != "destination-pool-uid" ||
@@ -361,8 +361,7 @@ func TestMoveCopyIdentityRejectsPoolRecreatedAfterCapacityApproval(t *testing.T)
 		{Name: source.PoolName, UID: source.PoolUID, NodeName: "source", MountPath: "/source"},
 		{Name: "destination-pool", UID: "replacement-pool-uid", NodeName: "destination", MountPath: "/destination"},
 	}}
-	reconciler := &Reconciler{Repository: repository}
-	if err := reconciler.prepareMoveCopyIdentities(context.Background(), &move); err == nil || !strings.Contains(err.Error(), "identity changed") {
+	if err := prepareMoveCopyIdentitiesForPool(&move, repository.pools[1]); err == nil || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("recreated destination Pool was accepted: %v", err)
 	}
 	if move.Status.IncomingCopy != nil || move.Status.DestinationCopy != nil {

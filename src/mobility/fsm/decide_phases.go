@@ -32,45 +32,6 @@ func authorityGuard(current Phase, observation Observation) (Decision, bool, err
 	return Decision{}, false, nil
 }
 
-// preflightGuard parks the phases that still run before the consumer has been
-// asked to leave while preflight defers them.
-//
-// A related but looser pre-eviction window is derived from Move status by
-// preEviction in src/mobility/controller/preflight.go; they are not the same
-// predicate, so do not unify them blindly.
-func preflightGuard(current Phase, observation Observation) (Decision, bool, error) {
-	if observation.PreflightDeferred && (current == PhasePending || current == PhaseLocking ||
-		(current == PhaseEvicting && !observation.EvictionRequested)) {
-		decision, err := transition(current, current, ActionWait, observation.UnsafeReason)
-		return decision, true, err
-	}
-	return Decision{}, false, nil
-}
-
-func decidePending(current Phase, observation Observation) (Decision, error) {
-	if !observation.PreconditionsValid {
-		return transition(current, current, ActionWait, reasonOr(observation.UnsafeReason, "PreconditionFailed"))
-	}
-	return transition(current, PhaseLocking, ActionLockVolume, "")
-}
-
-func decideLocking(current Phase, observation Observation) (Decision, error) {
-	if observation.VolumeLocked {
-		return transition(current, PhaseEvicting, ActionEvictConsumer, "")
-	}
-	return transition(current, PhaseLocking, ActionLockVolume, "")
-}
-
-func decideEvicting(current Phase, observation Observation) (Decision, error) {
-	if !observation.ConsumerExists {
-		return transition(current, PhaseWaitingForUnpublish, ActionWait, "")
-	}
-	if observation.EvictionRequested {
-		return transition(current, PhaseEvicting, ActionWait, "")
-	}
-	return transition(current, PhaseEvicting, ActionEvictConsumer, "")
-}
-
 func decideWaitingForUnpublish(current Phase, observation Observation) (Decision, error) {
 	if observation.PublishedOnSource {
 		return transition(current, current, ActionWait, "")
@@ -107,12 +68,8 @@ func decideWaitingForDestination(current Phase, observation Observation) (Decisi
 	if observation.DestinationUnavailable {
 		return transition(current, PhaseWaitingForCapacity, ActionWait, "DestinationUnavailable")
 	}
-	if observation.Prepared {
-		// The approval CAS consumes an already observed WaitingForCapacity
-		// reservation. Merely entering the phase cannot authorize disk work.
-		return transition(current, PhaseWaitingForCapacity, ActionWait, "")
-	}
-	return transition(current, PhaseWaitingForCapacity, ActionEnsureCapacity, "")
+	// Approval consumes a freshly observed WaitingForCapacity reservation.
+	return transition(current, PhaseWaitingForCapacity, ActionWait, "")
 }
 
 func decideWaitingForCapacity(current Phase, observation Observation) (Decision, error) {

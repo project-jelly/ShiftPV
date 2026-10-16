@@ -10,7 +10,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -191,43 +190,6 @@ func (r *Registry) ListMoves(ctx context.Context) ([]Move, error) {
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].Name < result[right].Name })
 	return result, nil
-}
-
-func (r *Registry) SetMoveStatus(ctx context.Context, name, uid string, status MoveStatus) error {
-	if err := r.validate(); err != nil {
-		return err
-	}
-	if name == "" || uid == "" {
-		return fmt.Errorf("ShiftPVMove name and UID are required for status update")
-	}
-	return r.mutateObject(ctx, objectMutation{
-		resource:   MoveResource,
-		kind:       "ShiftPVMove",
-		name:       name,
-		uid:        uid,
-		backoff:    retry.DefaultBackoff,
-		readError:  "get ShiftPVMove for status update",
-		writeError: "update ShiftPVMove status",
-		status:     true,
-		apply: func(object *unstructured.Unstructured) error {
-			protocol, _, err := unstructured.NestedString(object.Object, "spec", "protocolVersion")
-			if err != nil || protocol != "" {
-				return fmt.Errorf("%w: versioned Move requires CompareAndSetMoveStatus", ErrStateConflict)
-			}
-			current, err := moveStatusFrom(object)
-			if err != nil {
-				return err
-			}
-			if current.Preparation != nil || status.Preparation != nil {
-				return fmt.Errorf("%w: prepared Move requires CompareAndSetMoveStatus", ErrStateConflict)
-			}
-			if err := preserveMoveIdentity(current, status); err != nil {
-				return err
-			}
-			setMoveStatus(object, status)
-			return nil
-		},
-	})
 }
 
 func moveFrom(object *unstructured.Unstructured) (Move, error) {

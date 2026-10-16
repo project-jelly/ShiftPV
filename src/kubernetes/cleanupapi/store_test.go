@@ -125,6 +125,14 @@ func TestTransitionRequiresReceiptThenFreshAbsence(t *testing.T) {
 	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: missingDigest}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("digestless receipt entered Verifying: %v", err)
 	}
+	incomplete := &Receipt{OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID, ObservedAt: testNow(), Retired: true, LocalReceiptDigest: testReceiptDigest}
+	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: incomplete}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unpurged receipt entered Verifying: %v", err)
+	}
+	unchanged, err := store.Get(context.Background(), cleanup.Spec.Authority)
+	if err != nil || unchanged.Status.Phase != PhaseRunning || unchanged.Status.Receipt != nil || unchanged.Status.Executor == nil || *unchanged.Status.Executor != *executor {
+		t.Fatalf("unpurged receipt changed journal: current=%#v err=%v", unchanged, err)
+	}
 	receipt := &Receipt{OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID, ObservedAt: testNow(), Retired: true, Purged: true, LocalReceiptDigest: testReceiptDigest}
 	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 		t.Fatal(err)

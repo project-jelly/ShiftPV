@@ -475,6 +475,102 @@ func TestUnsettledHistoryCannotUseCompletedPhaseAlone(t *testing.T) {
 	}
 }
 
+func TestPreparedNoArtifactRecoveryPreflightPreservesHistory(t *testing.T) {
+	for _, scenario := range []string{
+		"settled", "legacy", "unknown protocol", "no rollback fence", "missing source plan",
+		"missing binding plan", "unreleased hold", "wrong recovery owner", "unfinished recovery",
+		"cleanup without receipt", "live executor",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			object := readyVolume(t)
+			move := preparedNoArtifactMove(t, object)
+			switch scenario {
+			case "legacy":
+				unstructured.RemoveNestedField(move.Object, "spec", "protocolVersion")
+			case "unknown protocol":
+				_ = unstructured.SetNestedField(move.Object, "future-v2", "spec", "protocolVersion")
+			case "no rollback fence":
+				_ = unstructured.SetNestedField(move.Object, int64(0), "status", "rollbackRequiredGeneration")
+			case "missing source plan":
+				unstructured.RemoveNestedField(move.Object, "status", "sourceCopy")
+			case "missing binding plan":
+				unstructured.RemoveNestedField(move.Object, "status", "persistentVolumeClaimUID")
+			case "unreleased hold":
+				_ = unstructured.SetNestedField(move.Object, true, "status", "capacityApproved")
+			case "wrong recovery owner":
+				_ = unstructured.SetNestedField(move.Object, "worker-b", "status", "recoveryOwner")
+			case "unfinished recovery":
+				_ = unstructured.SetNestedField(move.Object, "Retiring", "status", "recoveryPhase")
+			case "cleanup without receipt":
+				incoming, _, _ := unstructured.NestedMap(move.Object, "status", "incomingCopy")
+				var target volume.CopyIdentity
+				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(incoming, &target); err != nil {
+					t.Fatal(err)
+				}
+				spec := cleanupapi.Spec{OperationID: volumeapi.MoveRollbackOperationID(string(move.GetUID())), Target: target, Reason: "MoveRollback",
+					Authority: cleanupapi.Authority{Kind: "ShiftPVMove", Name: move.GetName(), UID: string(move.GetUID())}}
+				_ = unstructured.SetNestedMap(move.Object, map[string]any{"spec": encode(t, &spec), "status": map[string]any{"phase": cleanupapi.PhaseCompleted}}, "status", "cleanup")
+			}
+			f := newFixture(t, object, move)
+			if scenario == "live executor" {
+				controller := true
+				job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "copy-job", Namespace: testNamespace, UID: "copy-job-uid",
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: move.GetName(), UID: move.GetUID(), Controller: &controller}}}}
+				if err := f.kube.Tracker().Add(job); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforeMove, beforeVolume := move.DeepCopy(), object.DeepCopy()
+			report, err := f.checker.Check(context.Background())
+			if scenario == "settled" {
+				if err != nil || !report.Complete || !report.Safe() {
+					t.Fatalf("prepared no-purge settlement blocked upgrade: %+v %v", report, err)
+				}
+			} else if report.Safe() || err == nil && (!report.Complete || len(report.Blockers) == 0) {
+				t.Fatalf("unsafe recovery approved: %+v %v", report, err)
+			}
+			afterMove, getErr := f.dynamic.Resource(volumeapi.MoveResource).Get(context.Background(), move.GetName(), metav1.GetOptions{})
+			if getErr != nil || !reflect.DeepEqual(beforeMove.Object, afterMove.Object) {
+				t.Fatalf("inspection mutated recovery history: %v", getErr)
+			}
+			afterVolume, getErr := f.dynamic.Resource(volumeapi.VolumeResource).Get(context.Background(), testID, metav1.GetOptions{})
+			if getErr != nil || !reflect.DeepEqual(beforeVolume.Object, afterVolume.Object) {
+				t.Fatalf("inspection mutated source authority: %v", getErr)
+			}
+			assertReadOnly(t, f)
+		})
+	}
+}
+
+func preparedNoArtifactMove(t *testing.T, ready *unstructured.Unstructured) *unstructured.Unstructured {
+	t.Helper()
+	sourceMap, _, err := unstructured.NestedMap(ready.Object, "status", "currentCopy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source volume.CopyIdentity
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(sourceMap, &source); err != nil {
+		t.Fatal(err)
+	}
+	incoming, destination := volumeapi.MoveTransactionCopies("move-uid", testID, volumeapi.MoveDestinationAnchor{
+		InstallationID: source.InstallationID, PoolName: "pool-b", PoolUID: "pool-b-uid", NodeName: "worker-b", VolumeUID: source.VolumeUID,
+	})
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
+		"metadata": map[string]any{"name": "move-a", "uid": "move-uid", "resourceVersion": "8"},
+		"spec":     map[string]any{"protocolVersion": volumeapi.MoveProtocolPreparedV1, "volumeID": testID, "sourceNode": source.NodeName, "recovery": "ResumeOwner"},
+		"status": map[string]any{
+			"phase": "Blocked", "recoveryPhase": "Recovered", "recoveryOwner": source.NodeName,
+			"capacityApproved": false, "capacityReason": "RecoverySettled", "rollbackRequiredGeneration": int64(3), "sourceBytes": int64(10),
+			"persistentVolumeName": "pv-a", "persistentVolumeUID": "pv-uid", "persistentVolumeClaimNamespace": "workloads", "persistentVolumeClaimName": "claim-a", "persistentVolumeClaimUID": "claim-uid",
+			"consumerName": "consumer-a", "consumerUID": "consumer-uid", "placementPodUID": "placement-uid",
+			"destinationNode": destination.NodeName, "destinationPoolUID": destination.PoolUID,
+			"sourceCopy": sourceMap, "incomingCopy": encode(t, &incoming), "destinationCopy": encode(t, &destination),
+			"copyJobName": "copy-job", "copyOperationID": volumeapi.MoveCopyOperationID("move-uid"), "promotionOperationID": volumeapi.MovePromotionOperationID("move-uid"),
+		},
+	}}
+}
+
 func settledMove(t *testing.T) (*unstructured.Unstructured, cleanupapi.Cleanup) {
 	t.Helper()
 	source := volume.CopyIdentity{InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-a-uid", VolumeID: testID, VolumeUID: "volume-uid", NodeName: "worker-a", Role: volume.RoleServing, CopyID: "original-copy"}

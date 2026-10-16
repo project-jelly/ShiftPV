@@ -48,7 +48,7 @@ func TestPreparedCapacityProbePendingPreservesJournalAndReservation(t *testing.T
 	assertPreparationReserved(t, f, preparationRequestedBytes)
 }
 
-func TestLegacyCapacityProbePendingDoesNotRecordDenial(t *testing.T) {
+func TestPreparedCapacityProbePendingDoesNotRecordDenial(t *testing.T) {
 	r, repo, move := capacityCostFixture()
 	move.Status.Phase = "WaitingForCapacity"
 	repo.moves[0] = move
@@ -66,6 +66,6 @@ func TestLegacyCapacityProbePendingDoesNotRecordDenial(t *testing.T) {
 	if !errors.Is(err, ErrCapacityProbePending) || stored.Status.SourceBytes != 32<<20 ||
 		stored.Status.Phase != "WaitingForCapacity" || stored.Status.Reason != "" ||
 		stored.Status.CapacityReason != "" || stored.Status.CapacityApproved {
-		t.Fatalf("pending legacy probe changed phase, denial or approval: %+v err=%v", stored.Status, err)
+		t.Fatalf("pending prepared probe changed phase, denial or approval: %+v err=%v", stored.Status, err)
 	}
 }

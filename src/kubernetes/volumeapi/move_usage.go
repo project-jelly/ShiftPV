@@ -7,7 +7,6 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -47,13 +46,6 @@ func (r *Registry) RecordSourceUsage(ctx context.Context, expected Move, copy vo
 	if current.Status.SourceBytes == bytes {
 		return current, nil
 	}
-	encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&copy)
-	if err != nil {
-		return Move{}, err
-	}
-	if err := unstructured.SetNestedMap(object.Object, encoded, "status", "sourceCopy"); err != nil {
-		return Move{}, err
-	}
 	if err := unstructured.SetNestedField(object.Object, bytes, "status", "sourceBytes"); err != nil {
 		return Move{}, err
 	}
@@ -77,22 +69,16 @@ func sourceUsageMove(move Move, copy volume.CopyIdentity, bytes int64, hasCleanu
 		move.Status.CapacityApproved || hasCleanup || hasMoveDestinationIntent(move.Status) {
 		return fmt.Errorf("%w: source usage requires a protected pre-execution Move", ErrStateConflict)
 	}
-	switch move.Spec.ProtocolVersion {
-	case "":
-		if move.Status.Preparation != nil || (move.Status.Phase != "WaitingForDestination" && move.Status.Phase != "WaitingForCapacity") {
-			return fmt.Errorf("%w: legacy Move is not waiting for capacity", ErrStateConflict)
-		}
-	case MoveProtocolPreparedV1:
-		if move.Status.Phase != "WaitingForCapacity" || move.Status.Preparation == nil {
-			return fmt.Errorf("%w: prepared Move has no waiting reservation", ErrStateConflict)
-		}
-		if err := ValidateMovePreparation(move); err != nil {
-			return err
-		}
-	default:
+	if move.Spec.ProtocolVersion != MoveProtocolPreparedV1 {
 		return fmt.Errorf("%w: unsupported Move protocol", ErrStateConflict)
 	}
-	if move.Status.SourceCopy != nil && *move.Status.SourceCopy != copy {
+	if move.Status.Phase != "WaitingForCapacity" || move.Status.Preparation == nil {
+		return fmt.Errorf("%w: prepared Move has no waiting reservation", ErrStateConflict)
+	}
+	if err := ValidateMovePreparation(move); err != nil {
+		return err
+	}
+	if move.Status.SourceCopy == nil || *move.Status.SourceCopy != copy {
 		return fmt.Errorf("%w: source copy changed", ErrStateConflict)
 	}
 	if move.Status.SourceBytes < 0 || (move.Status.SourceBytes > 0 && (move.Status.SourceBytes != bytes || move.Status.SourceCopy == nil)) {

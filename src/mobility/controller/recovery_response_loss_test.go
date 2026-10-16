@@ -19,7 +19,7 @@ import (
 
 // A status response can fail while the parent reconcile context remains live.
 // The caller must re-observe, not persist its old whole status as a diagnostic.
-func TestLegacyRecoveryStatusFailureRequiresReobservation(t *testing.T) {
+func TestRecoveryStatusFailureRequiresReobservation(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		accepted bool
@@ -30,7 +30,7 @@ func TestLegacyRecoveryStatusFailureRequiresReobservation(t *testing.T) {
 		{"rejected before storage", false, errors.New("status rejected before storage")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			f, move := legacyRecoveryStatusFixture(t)
+			f, move := preparedRecoveryStatusFixture(t)
 			protected := f.state(t, 0)
 			attempts, writes := 0, 0
 			injected := false
@@ -108,22 +108,25 @@ func TestLegacyRecoveryStatusFailureRequiresReobservation(t *testing.T) {
 	}
 }
 
-func legacyRecoveryStatusFixture(t *testing.T) (*preparationRegistryFixture, volumeapi.Move) {
+func preparedRecoveryStatusFixture(t *testing.T) (*preparationRegistryFixture, volumeapi.Move) {
 	t.Helper()
-	f := newPreparationRegistryFixture(t, 1)
+	f, move := preparationAtCapacity(t)
+	if err := f.reconciler.ensureCapacity(f.ctx, &move, observation{DestinationNode: "destination"}); err != nil {
+		t.Fatal(err)
+	}
 	object, err := f.dynamic.Resource(volumeapi.MoveResource).Get(f.ctx, f.moveNames[0], metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Seed an existing legacy journal; this is not a protocol migration.
-	unstructured.RemoveNestedField(object.Object, "spec", "protocolVersion")
+	// Recovery policy is selected before this execution fixture begins recovery.
 	if err := unstructured.SetNestedField(object.Object, "ResumeOwner", "spec", "recovery"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.dynamic.Tracker().Update(volumeapi.MoveResource, object, ""); err != nil {
 		t.Fatal(err)
 	}
-	move, state := f.move(t, 0), f.state(t, 0)
+	move = f.move(t, 0)
+	state := f.state(t, 0)
 	next := state
 	next.Phase, next.ActiveMove = volumeapi.PhaseBlocked, move.Name
 	if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, state, next); err != nil {
@@ -143,8 +146,13 @@ func legacyRecoveryStatusFixture(t *testing.T) (*preparationRegistryFixture, vol
 	move.Status.SourceCopy = state.CurrentCopy
 	move.Status.PersistentVolumeName = w.PV.Name
 	move.Status.ClaimNamespace, move.Status.ClaimName = w.Claim.Namespace, w.Claim.Name
-	if err := f.registry.SetMoveStatus(f.ctx, move.Name, move.UID, move.Status); err != nil {
+	if _, err := f.registry.CompareAndSetMoveStatus(f.ctx, move, move.Status); err != nil {
 		t.Fatal(err)
+	}
+	// Settle the pre-existing scheduler reservation before injecting the
+	// Quiescing -> Verifying status write; deletion itself is a pending pass.
+	if done, err := f.reconciler.quiesceMove(f.ctx, f.move(t, 0)); err != nil || done {
+		t.Fatalf("expected first placement-quiescence pass: done=%v err=%v", done, err)
 	}
 	return f, f.move(t, 0)
 }

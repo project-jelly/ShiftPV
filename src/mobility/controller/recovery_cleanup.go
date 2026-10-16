@@ -65,7 +65,7 @@ func (r *Reconciler) settleSourceRollback(ctx context.Context, move *volumeapi.M
 	}
 	if noDestinationEffectIntent(*move) {
 		if move.Status.CapacityApproved {
-			return r.settleUnstartedApproval(ctx, move, state)
+			return false, needsRecoveryCleanupReview("execution approval has no recorded destination plan")
 		}
 		return true, nil
 	}

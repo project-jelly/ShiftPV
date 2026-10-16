@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,34 +17,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ktesting "k8s.io/client-go/testing"
 )
-
-func (f moveCleanupFixture) request() *protocol.EffectRequest {
-	return &protocol.EffectRequest{ExecutorUid: f.node.Identity.PodUID, NodeName: f.node.Identity.NodeName,
-		VolumeName: testID, VolumeUid: f.cleanup.Spec.Target.VolumeUID, OperationId: f.cleanup.Spec.OperationID}
-}
-
-func (f moveCleanupFixture) mutate(t *testing.T, resource schema.GroupVersionResource, name string, change func(*unstructured.Unstructured)) {
-	t.Helper()
-	object, err := f.api.Resource(resource).Get(context.Background(), name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	change(object)
-	if err := f.api.Tracker().Update(resource, object, ""); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func (f moveCleanupFixture) requirePayload(t *testing.T) {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(f.path, "payload"))
-	if err != nil || string(data) != "exact move payload" {
-		t.Fatalf("unapproved cleanup changed payload: %q %v", data, err)
-	}
-}
 
 func TestMoveCleanupRechecksExactAuthorityBeforePurge(t *testing.T) {
 	changes := map[string]func(*testing.T, moveCleanupFixture){

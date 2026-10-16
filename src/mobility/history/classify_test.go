@@ -2,6 +2,7 @@ package history
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -102,13 +103,15 @@ func TestHistoryRejectsContradictoryCompletion(t *testing.T) {
 
 func TestRecoveredHistoryRequiresProofForItsExactOwner(t *testing.T) {
 	for _, test := range []struct {
+		protocol string
 		reason   string
 		incoming bool
 	}{
-		{"MoveSource", false}, {"MoveRollback", true}, {"MoveRollback", false},
+		{"", "MoveSource", false}, {"", "MoveRollback", true}, {"", "MoveRollback", false},
+		{volumeapi.MoveProtocolPreparedV1, "MoveSource", false}, {volumeapi.MoveProtocolPreparedV1, "MoveRollback", true}, {volumeapi.MoveProtocolPreparedV1, "MoveRollback", false},
 	} {
-		t.Run(test.reason+"/"+map[bool]string{true: "incoming", false: "serving"}[test.incoming], func(t *testing.T) {
-			move, journal := completedHistory(t, "", "", test.reason, test.incoming)
+		t.Run(test.protocol+"/"+test.reason+"/"+map[bool]string{true: "incoming", false: "serving"}[test.incoming], func(t *testing.T) {
+			move, journal := completedHistory(t, test.protocol, "", test.reason, test.incoming)
 			move.Spec.Recovery = "ResumeOwner"
 			move.Status.Phase, move.Status.RecoveryPhase = "Blocked", "Recovered"
 			move.Status.CapacityApproved, move.Status.CapacityReason = false, "RecoverySettled"
@@ -186,6 +189,86 @@ func TestNoEffectRecoveryAndCancellation(t *testing.T) {
 	if err := ValidateSettled(move, nil, nil); err == nil {
 		t.Fatal("partial prepared plan accepted")
 	}
+}
+
+func TestPreparedNoArtifactRecoveryRequiresExactCASSettlement(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(*volumeapi.Move, *volumeapi.State, **cleanupapi.Cleanup)
+		safe bool
+	}{
+		{"prepared settled without purge", func(*volumeapi.Move, *volumeapi.State, **cleanupapi.Cleanup) {}, true},
+		{"legacy", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) { m.Spec.ProtocolVersion = "" }, false},
+		{"unknown protocol", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) {
+			m.Spec.ProtocolVersion = "future-v2"
+		}, false},
+		{"no rollback fence", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) {
+			m.Status.RollbackRequiredGeneration = 0
+		}, false},
+		{"cleanup projection", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) {
+			m.Status.CleanupPhase = cleanupapi.PhaseCompleted
+		}, false},
+		{"source plan missing", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) { m.Status.SourceCopy = nil }, false},
+		{"incoming plan missing", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) { m.Status.IncomingCopy = nil }, false},
+		{"destination plan missing", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) { m.Status.DestinationCopy = nil }, false},
+		{"operation changed", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) {
+			m.Status.CopyOperationID = "other-operation"
+		}, false},
+		{"binding plan missing", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) { m.Status.ClaimUID = "" }, false},
+		{"unreleased execution hold", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) { m.Status.CapacityApproved = true }, false},
+		{"wrong recovery owner", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) {
+			m.Status.RecoveryOwner = m.Status.DestinationNode
+		}, false},
+		{"not recovered", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) {
+			m.Status.RecoveryPhase = "Retiring"
+		}, false},
+		{"not settled", func(m *volumeapi.Move, _ *volumeapi.State, _ **cleanupapi.Cleanup) { m.Status.CapacityReason = "" }, false},
+		{"still referenced", func(m *volumeapi.Move, s *volumeapi.State, _ **cleanupapi.Cleanup) { s.ActiveMove = m.Name }, false},
+		{"hidden journal", func(_ *volumeapi.Move, _ *volumeapi.State, c **cleanupapi.Cleanup) { *c = &cleanupapi.Cleanup{} }, false},
+		{"journal present without receipt", func(m *volumeapi.Move, _ *volumeapi.State, c **cleanupapi.Cleanup) {
+			m.Status.CleanupPhase = cleanupapi.PhaseCompleted
+			*c = &cleanupapi.Cleanup{UID: m.UID, Spec: cleanupapi.Spec{
+				Authority:   cleanupapi.Authority{Kind: "ShiftPVMove", Name: m.Name, UID: m.UID},
+				OperationID: volumeapi.MoveRollbackOperationID(m.UID), Reason: "MoveRollback", Target: *m.Status.IncomingCopy,
+			}, Status: cleanupapi.Status{Phase: cleanupapi.PhaseCompleted}}
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			move := preparedNoArtifactRecovery()
+			current := volumeapi.State{UID: move.Status.SourceCopy.VolumeUID, Phase: volumeapi.PhaseReady,
+				OwnerNode: move.Spec.SourceNode, CurrentCopy: move.Status.SourceCopy}
+			var journal *cleanupapi.Cleanup
+			test.edit(&move, &current, &journal)
+			before, err := json.Marshal(move)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateSettled(move, &current, journal); (err == nil) != test.safe {
+				t.Fatalf("safe=%v: %v", test.safe, err)
+			}
+			after, err := json.Marshal(move)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("history validation changed the Move: err=%v", err)
+			}
+		})
+	}
+}
+
+func preparedNoArtifactRecovery() volumeapi.Move {
+	source := volume.CopyIdentity{InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-a-uid",
+		VolumeID: historyVolumeID, VolumeUID: "volume-uid", NodeName: "worker-a", Role: volume.RoleServing, CopyID: "original-copy"}
+	incoming, destination := volumeapi.MoveTransactionCopies("move-uid", historyVolumeID, volumeapi.MoveDestinationAnchor{
+		InstallationID: source.InstallationID, PoolName: "pool-b", PoolUID: "pool-b-uid", NodeName: "worker-b", VolumeUID: source.VolumeUID,
+	})
+	return volumeapi.Move{Name: "move-a", UID: "move-uid", ResourceVersion: "8",
+		Spec: volumeapi.MoveSpec{ProtocolVersion: volumeapi.MoveProtocolPreparedV1, VolumeID: historyVolumeID, SourceNode: source.NodeName, Recovery: "ResumeOwner"},
+		Status: volumeapi.MoveStatus{Phase: "Blocked", RecoveryPhase: "Recovered", RecoveryOwner: source.NodeName,
+			CapacityReason: "RecoverySettled", RollbackRequiredGeneration: 3, SourceBytes: 10,
+			PersistentVolumeName: "pv-a", PersistentVolumeUID: "pv-uid", ClaimNamespace: "workloads", ClaimName: "claim-a", ClaimUID: "claim-uid",
+			ConsumerName: "consumer-a", ConsumerUID: "consumer-uid", PlacementPodUID: "placement-uid",
+			SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
+			DestinationNode: destination.NodeName, DestinationPoolUID: destination.PoolUID,
+			CopyJobName: "shiftpv-move-eec045147f75-copy", CopyOperationID: volumeapi.MoveCopyOperationID("move-uid"), PromotionOperationID: volumeapi.MovePromotionOperationID("move-uid")}}
 }
 
 // completedHistory uses the actual Registry decoder and Cleanup Store status

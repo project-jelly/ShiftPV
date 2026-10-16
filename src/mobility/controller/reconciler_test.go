@@ -23,6 +23,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -306,22 +307,9 @@ func (m *memoryRepository) ListMoves(ctx context.Context) ([]volumeapi.Move, err
 	}
 	return moves, nil
 }
-func (m *memoryRepository) SetMoveStatus(_ context.Context, name, uid string, status volumeapi.MoveStatus) error {
-	for index := range m.moves {
-		if m.moves[index].Name == name {
-			if m.moves[index].UID != uid {
-				return volumeapi.ErrStateConflict
-			}
-			m.moves[index].Status = status
-			advanceTestMoveVersion(&m.moves[index])
-			return nil
-		}
-	}
-	return fmt.Errorf("move not found")
-}
 
 // Contract tests for prepared transitions use the real Registry. This small
-// compatibility fake only supplies identity/version fencing to existing tests.
+// test fake only supplies identity/version fencing to existing tests.
 func (m *memoryRepository) CompareAndSetMoveStatus(_ context.Context, expected volumeapi.Move, next volumeapi.MoveStatus) (volumeapi.Move, error) {
 	for index := range m.moves {
 		current := &m.moves[index]
@@ -520,55 +508,43 @@ func TestDiscoverMovesSkipsIneligibleVolumes(t *testing.T) {
 	}
 }
 
-func TestBindingLossAfterLockBlocksWithoutPanic(t *testing.T) {
-	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseLocking)}}
-	repository := &memoryRepository{
-		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name}},
-		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
-		moves:   []volumeapi.Move{move},
-	}
-	client := fake.NewSimpleClientset(readyNode("source", true), readyNode("destination", false))
-	reconciler := newTestReconciler(client, repository)
-	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+func TestBindingLossAfterPreparedClaimCancelsWithoutPanic(t *testing.T) {
+	f := newPreparationRegistryFixture(t, 1)
+	move := f.untilPrepared(t, 0)
+	if err := f.client.CoreV1().PersistentVolumes().Delete(f.ctx, move.Status.PersistentVolumeName, metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if repository.moves[0].Status.Phase != string(fsm.PhaseBlocked) || repository.moves[0].Status.Reason != "VolumeBindingMissing" {
-		t.Fatalf("move = %#v", repository.moves[0])
+	if err := f.reconciler.ReconcileAll(f.ctx); err != nil {
+		t.Fatal(err)
 	}
-	if repository.volumes[volumeID].Phase != volumeapi.PhaseBlocked {
-		t.Fatalf("volume = %#v", repository.volumes[volumeID])
+	if got := f.move(t, 0); got.Status.Phase != "Canceling" || got.Status.CapacityApproved {
+		t.Fatalf("binding loss did not cancel before execution: %+v", got)
+	}
+	if state := f.state(t, 0); state.Phase != volumeapi.PhaseReady || state.OwnerNode != "source" {
+		t.Fatalf("source disturbed: %+v", state)
 	}
 }
 
-func TestPendingMoveIsCancelledWhenSourceWasUncordonedBeforeLock(t *testing.T) {
-	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{
-		Name: "move-test", UID: "move-uid",
-		Finalizers: []string{volumeapi.MoveProtectionFinalizer},
-		Spec:       volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
-		Status:     volumeapi.MoveStatus{Phase: string(fsm.PhasePending)},
-	}
-	repository := &memoryRepository{
-		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source"}},
-		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
-		moves:   []volumeapi.Move{move},
-	}
-	// The binding has already disappeared with its namespace. Since the source
-	// is now schedulable and no lock was taken, this is an obsolete discovery
-	// transaction rather than a VolumeBindingMissing safety failure.
-	client := fake.NewSimpleClientset(readyNode("source", false), readyNode("destination", false))
-	reconciler := newTestReconciler(client, repository)
-
-	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+func TestUninitializedPreparedMoveCancelsWhenSourceUncordoned(t *testing.T) {
+	f := newPreparationRegistryFixture(t, 1)
+	node, err := f.client.CoreV1().Nodes().Get(f.ctx, "source", metav1.GetOptions{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.moves) != 0 {
-		t.Fatalf("obsolete pre-lock move remained: %#v", repository.moves)
+	node.Spec.Unschedulable = false
+	if _, err := f.client.CoreV1().Nodes().Update(f.ctx, node, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	state := repository.volumes[volumeID]
-	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || state.OwnerNode != "source" {
-		t.Fatalf("obsolete move cancellation changed volume authority: %#v", state)
+	for range 4 {
+		if err := f.reconciler.ReconcileAll(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if move := f.move(t, 0); move.Status.Phase != "Cancelled" || move.Status.Preparation != nil {
+		t.Fatalf("obsolete discovery not cancelled: %+v", move)
+	}
+	if state := f.state(t, 0); state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || state.OwnerNode != "source" {
+		t.Fatalf("cancel changed source: %+v", state)
 	}
 }
 
@@ -580,7 +556,7 @@ func TestReconcileAllReleasesOnlySettledMoveFinalizer(t *testing.T) {
 	}{
 		"settled succeeded":   {status: volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded), CleanupPhase: cleanupapi.PhaseCompleted}, wantRelease: true},
 		"unsettled succeeded": {status: volumeapi.MoveStatus{Phase: string(fsm.PhaseSucceeded)}, wantError: true},
-		"blocked":             {status: volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked)}},
+		"blocked":             {status: volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked)}, wantError: true},
 		"unsettled recovered": {
 			status: volumeapi.MoveStatus{Phase: string(fsm.PhaseBlocked), RecoveryPhase: recoveryRecovered}, wantError: true,
 		},
@@ -795,6 +771,8 @@ func TestObserveAllowsOnlyActiveMoveToRepairDestinationCrashWindow(t *testing.T)
 			CopyOperationID: "copy-move-uid", PromotionOperationID: "promote-move-uid",
 		},
 	}
+	baseMove = preparedFixtureMove(baseMove)
+	baseMove.Status.ConsumerName, baseMove.Status.ConsumerUID = "old-consumer", "old-consumer-uid"
 	source := volumeapi.Pool{
 		Name: sourceCopy.PoolName, UID: sourceCopy.PoolUID, NodeName: sourceCopy.NodeName, MountPath: "/source-pool",
 		Status: volumeapi.PoolStatus{Inventory: &volumeapi.PoolInventory{Valid: true, Copies: []volumeapi.CopyObservation{{Identity: &sourceCopy, Present: true}}}},
@@ -1015,10 +993,10 @@ func TestObserveAndExecuteMobilityActions(t *testing.T) {
 
 func newMobilityWalk() *mobilityWalk {
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
+	move := volumeapi.Move{Name: "move-test", UID: "move-uid", ResourceVersion: "1", Finalizers: []string{volumeapi.MoveProtectionFinalizer}, Spec: volumeapi.MoveSpec{ProtocolVersion: volumeapi.MoveProtocolPreparedV1, VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
 	repository := &memoryRepository{
-		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}}},
-		pools:   []volumeapi.Pool{{Name: "source", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool"}},
+		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}, CapacityBytes: 32 << 20}},
+		pools:   []volumeapi.Pool{{Name: "source", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool", CapacityLimit: "1Gi"}, {Name: "destination", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool", CapacityLimit: "1Gi", Status: volumeapi.PoolStatus{CapacityProbeSupported: true}}},
 		moves:   []volumeapi.Move{move},
 	}
 	client := fake.NewSimpleClientset(mobilityObjects(volumeID)...)
@@ -1054,30 +1032,64 @@ func TestObserveExcludesDifferentPoolGroupFromAutomaticMove(t *testing.T) {
 
 func (w *mobilityWalk) execute(t *testing.T, action fsm.Action) error {
 	t.Helper()
-	return w.reconciler.execute(w.ctx, &w.move, w.observed, fsm.Decision{Action: action})
+	_, err := w.reconciler.executeLifecycle(w.ctx, &w.move, w.observed, fsm.Decision{Action: action})
+	return err
 }
 
 func (w *mobilityWalk) observeAndLock(t *testing.T) {
 	t.Helper()
-	observed, err := w.reconciler.observe(w.ctx, w.move)
+	observed, err := w.reconciler.observePreparation(w.ctx, w.move)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w.observed = observed
-	if !w.observed.FSM.PreconditionsValid || len(w.observed.CandidateNodes) != 1 {
-		t.Fatalf("observation = %#v", w.observed)
+	if !observed.FSM.PreconditionsValid || len(observed.CandidateNodes) != 1 {
+		t.Fatalf("observation = %#v", observed)
 	}
-	if err := w.execute(t, fsm.ActionLockVolume); err != nil {
+	previous := w.move.Status
+	if err := w.reconciler.initializePreparation(w.ctx, &w.move, observed); err != nil {
 		t.Fatal(err)
 	}
-	if w.repository.volumes[w.volumeID].Phase != volumeapi.PhaseMoving || w.move.Status.ConsumerName != "consumer" {
-		t.Fatalf("locked state=%#v move=%#v", w.repository.volumes[w.volumeID], w.move)
+	w.move.Status.Phase = string(fsm.PhasePreparing)
+	if err := w.reconciler.persistMoveStatus(w.ctx, &w.move, previous); err != nil {
+		t.Fatal(err)
 	}
+	if err := w.reconciler.claimPreparationSource(w.ctx, w.move, observed.Volume); err != nil {
+		t.Fatal(err)
+	}
+	placement, reason, err := w.reconciler.ensurePreparedPlacement(w.ctx, w.move, observed, observed.CandidateNodes)
+	if err != nil || reason != "" || placement == nil {
+		t.Fatalf("prepare placement: %s %v", reason, err)
+	}
+	placement.Spec.NodeName = "destination"
+	placement, err = w.client.CoreV1().Pods("system").Update(w.ctx, placement, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := w.repository.ReadyPoolForIdentity(w.ctx, "destination", "destination-pool-uid", "destination")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if granted, err := w.reconciler.grantPreparation(w.ctx, &w.move, pool, placement); err != nil || !granted {
+		t.Fatalf("prepare grant: %v %v", granted, err)
+	}
+	previous = w.move.Status
+	w.move.Status.Phase = string(fsm.PhaseStartingDisruption)
+	if err := w.reconciler.persistMoveStatus(w.ctx, &w.move, previous); err != nil {
+		t.Fatal(err)
+	}
+	w.observed.Volume, _ = w.repository.Get(w.ctx, w.volumeID)
+	w.reconciler.CapacityProbe = fakeMoveCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}}
+	if err := w.reconciler.startPreparedSource(w.ctx, w.move, w.observed.Volume); err != nil {
+		t.Fatal(err)
+	}
+	w.observed.Volume, _ = w.repository.Get(w.ctx, w.volumeID)
+	w.observed.Placement, w.observed.DestinationNode = placement, "destination"
 }
 
 func (w *mobilityWalk) rejectUnknownActionAfterEviction(t *testing.T) {
 	t.Helper()
-	if err := w.execute(t, fsm.ActionEvictConsumer); err != nil {
+	if err := w.execute(t, fsm.ActionStartDisruption); err != nil {
 		t.Fatal(err)
 	}
 	if !w.move.Status.EvictionRequested {
@@ -1115,9 +1127,14 @@ func (w *mobilityWalk) ensurePlacementOnDestination(t *testing.T) {
 	}
 	w.observed.Placement = placement
 	w.observed.DestinationNode = "destination"
+	w.move.Status.Preparation = nil
 	w.move.Status.CapacityApproved = true
 	w.move.Status.DestinationPoolUID = "destination-pool-uid"
 	w.move.Status.SourceBytes = 1
+	if err := prepareMoveCopyIdentitiesForPool(&w.move, w.repository.pools[1]); err != nil {
+		t.Fatal(err)
+	}
+	w.repository.moves[0] = w.move
 }
 
 func (w *mobilityWalk) ensureCopyOnlyAfterSourceReady(t *testing.T) {
@@ -1250,24 +1267,16 @@ func TestBlockedBeforeLockClosesRediscovery(t *testing.T) {
 }
 
 func TestReconcileAllAndCanceledRun(t *testing.T) {
-	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
-	repository := &memoryRepository{
-		volumes: map[string]volumeapi.State{volumeID: {Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}}},
-		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
-		moves:   []volumeapi.Move{move},
-	}
-	reconciler := newTestReconciler(fake.NewSimpleClientset(mobilityObjects(volumeID)...), repository, func(r *Reconciler) { r.Interval = 1 })
-	if err := reconciler.ReconcileAll(context.Background()); err != nil {
+	f := newPreparationRegistryFixture(t, 1)
+	if err := f.reconciler.ReconcileAll(f.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if repository.moves[0].Status.Phase != string(fsm.PhaseLocking) || repository.volumes[volumeID].Phase != volumeapi.PhaseMoving {
-		t.Fatalf("move=%#v volume=%#v", repository.moves[0], repository.volumes[volumeID])
+	if move, state := f.move(t, 0), f.state(t, 0); move.Status.Phase != "Preparing" || state.Phase != volumeapi.PhaseReady {
+		t.Fatalf("move=%+v state=%+v", move, state)
 	}
-	repository.moves[0].Status.Phase = string(fsm.PhaseSucceeded)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := reconciler.Run(ctx); err != nil {
+	if err := f.reconciler.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&Reconciler{}).validate(); err == nil {

@@ -29,7 +29,7 @@ import (
 
 func recoveryFixture(t *testing.T, owner string) (*Reconciler, *memoryRepository, *fake.Clientset) {
 	t.Helper()
-	r, repo, client, _, _ := recoveryTransactionFixture(t, owner, owner == "destination")
+	r, repo, client, _, _ := recoveryTransactionFixture(t, owner, true)
 	return r, repo, client
 }
 
@@ -46,6 +46,8 @@ func recoveryTransactionFixture(t *testing.T, owner string, recordDestination bo
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: id, SourceNode: "source", Recovery: "ResumeOwner"}, Status: volumeapi.MoveStatus{
 		Phase: "Blocked", Reason: "OriginalFailure", PersistentVolumeName: "pv", ClaimNamespace: "workload", ClaimName: "claim", DestinationNode: "destination", SourceCopy: &source,
 	}}
+	move = preparedFixtureMove(move)
+	move.Status.SourceBytes = 1 << 20
 	state := volumeapi.State{UID: source.VolumeUID, Phase: "Blocked", ActiveMove: move.Name, OwnerNode: owner, CurrentCopy: &source, CapacityBytes: 32 << 20}
 	if recordDestination {
 		move.Status.DestinationPoolUID = destination.PoolUID
@@ -105,6 +107,16 @@ func TestRecoveryResumesOnlyCurrentOwnerAndSurvivesEveryBoundary(t *testing.T) {
 					repo.volumes[id] = state
 				}
 				finishRecoveryJobs(t, client, batchv1.JobComplete)
+				// The Node scanner acknowledges only a fence already persisted by
+				// the preceding pass, as it would across a controller restart.
+				if owner == "source" && repo.moves[0].Status.RollbackRequiredGeneration > 0 {
+					pool := &repo.pools[1]
+					now := metav1.Now()
+					pool.Status.ObservedGeneration = pool.Generation
+					pool.Status.Conditions = testBackingConditions(pool.Generation)
+					pool.Status.LastProbeTime = now
+					pool.Status.Inventory = &volumeapi.PoolInventory{ObservedAt: now, Valid: true}
+				}
 			}
 			if repo.moves[0].Status.Phase != "Blocked" || repo.moves[0].Status.Reason != "OriginalFailure" || repo.moves[0].Status.RecoveryPhase != recoveryRecovered || repo.volumes[id].ActiveMove != "" || !strings.Contains(repo.moves[0].Status.Message, "no operator action is required") {
 				t.Fatalf("move=%+v volume=%+v", repo.moves[0], repo.volumes[id])
@@ -216,7 +228,7 @@ func TestRecoveryWaitsForOldHelpersAndFailedVerification(t *testing.T) {
 	}
 }
 
-func TestRecoveryQuiescesScheduledPlacementBeforeDestinationIsRecorded(t *testing.T) {
+func TestRecoveryPreservesScheduledPlacementWhenDestinationPlanIsMissing(t *testing.T) {
 	r, repo, client := recoveryFixture(t, "source")
 	move := repo.moves[0]
 	move.Status.DestinationNode = ""
@@ -232,28 +244,32 @@ func TestRecoveryQuiescesScheduledPlacementBeforeDestinationIsRecorded(t *testin
 	if _, err := client.CoreV1().Pods("system").Create(context.Background(), placement, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	before := repo.volumes[move.Spec.VolumeID]
+	client.ClearActions()
 
-	if err := r.ReconcileAll(context.Background()); err != nil {
-		t.Fatalf("scheduled reservation blocked recovery before destination persistence: %v", err)
+	if err := r.ReconcileAll(context.Background()); err == nil {
+		t.Fatal("missing destination plan authorized recovery effects")
 	}
-	if _, err := client.CoreV1().Pods("system").Get(context.Background(), names.PlacementPod, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("placement reservation remained after quiesce: %v", err)
+	if repo.moves[0].Status.RecoveryReason != "DestinationUnknown" || !repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.RecoveryPhase != recoveryQuiescing {
+		t.Fatalf("incomplete plan changed recovery authority: %+v", repo.moves[0].Status)
 	}
-	if repo.moves[0].Status.RecoveryReason != "" || repo.moves[0].Status.RecoveryPhase != recoveryQuiescing {
-		t.Fatalf("unexpected recovery state after reservation deletion: %+v", repo.moves[0].Status)
+	if !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], before) {
+		t.Fatal("incomplete plan changed the authoritative Volume")
 	}
-	if err := r.ReconcileAll(context.Background()); err != nil {
-		t.Fatal(err)
+	for _, action := range client.Actions() {
+		switch action.GetVerb() {
+		case "create", "update", "patch", "delete":
+			t.Fatalf("incomplete plan mutated a Kubernetes resource: %#v", action)
+		}
 	}
-	if repo.moves[0].Status.RecoveryPhase != recoveryVerifying {
-		t.Fatalf("recovery did not advance after reservation disappearance: %+v", repo.moves[0].Status)
+	if got, err := client.CoreV1().Pods("system").Get(context.Background(), names.PlacementPod, metav1.GetOptions{}); err != nil || got.UID != placement.UID {
+		t.Fatalf("incomplete plan did not preserve the exact placement: pod=%+v err=%v", got, err)
 	}
 }
 
 func TestRecoveryRejectsUnrecordedDataHelper(t *testing.T) {
 	r, repo, client := recoveryFixture(t, "source")
 	move := repo.moves[0]
-	move.Status.DestinationNode = ""
 	move.Status.RecoveryOwner = "source"
 	move.Status.RecoveryPhase = recoveryQuiescing
 	repo.moves[0] = move
@@ -391,7 +407,7 @@ func TestRecoveryRollbackCleansExactlyOneObservedDestinationArtifact(t *testing.
 }
 
 func TestRecoveryRollbackAcceptsOnlyFreshExactAbsence(t *testing.T) {
-	t.Run("no destination effect before source identity journal", func(t *testing.T) {
+	t.Run("missing source identity preserves the hold", func(t *testing.T) {
 		r, repo, _ := recoveryFixture(t, "source")
 		move := repo.moves[0]
 		move.Status.SourceCopy = nil
@@ -400,11 +416,14 @@ func TestRecoveryRollbackAcceptsOnlyFreshExactAbsence(t *testing.T) {
 		repo.moves[0] = move
 		state, _ := repo.Get(context.Background(), move.Spec.VolumeID)
 		done, err := r.settleRecoveryArtifacts(context.Background(), &move, state)
-		if err != nil || done {
-			t.Fatalf("first settlement done=%v err=%v", done, err)
+		if !errors.Is(err, errRecoveryCleanupNeedsReview) || done {
+			t.Fatalf("missing source identity authorized settlement: done=%v err=%v", done, err)
 		}
-		if repo.moves[0].Status.CapacityApproved || repo.moves[0].Status.CapacityReason != recoveryCapacitySettled {
-			t.Fatalf("no-effect recovery did not settle: %+v", repo.moves[0].Status)
+		if !reflect.DeepEqual(repo.moves[0], move) || !reflect.DeepEqual(repo.volumes[move.Spec.VolumeID], state) {
+			t.Fatal("missing source identity changed the Move or authoritative Volume")
+		}
+		if _, err := r.Cleanups.Get(context.Background(), cleanupapiAuthority(move)); !errors.Is(err, cleanupapi.ErrNoJournal) {
+			t.Fatalf("missing source identity invented cleanup evidence: %v", err)
 		}
 	})
 
@@ -509,6 +528,7 @@ func TestPostcommitRecoveryWaitsForActualDestinationPublicationBeforeSourceClean
 		t.Fatalf("unproven destination released source hold: %+v", repo.moves[0].Status)
 	}
 	repo.readyPools[0].Status.Inventory.Copies[0].Published = true
+	move = repo.moves[0] // Re-observe the diagnostic CAS before retrying.
 	if err := r.reconcilePersistedMove(context.Background(), move); err != nil {
 		t.Fatal(err)
 	}

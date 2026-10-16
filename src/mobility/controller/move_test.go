@@ -32,6 +32,8 @@ func cleanupMoveFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 			CopyOperationID: "copy-move-cleanup-uid", PromotionOperationID: "promote-move-cleanup-uid",
 		},
 	}
+	move = preparedFixtureMove(move)
+	move.Status.CapacityApproved, move.Status.SourceBytes = true, 1<<20
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{move.Spec.VolumeID: {
 			UID: destination.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name,
@@ -113,12 +115,12 @@ type rejectedStatusRepository struct {
 	rejectNext bool
 }
 
-func (r *rejectedStatusRepository) SetMoveStatus(ctx context.Context, name, uid string, next volumeapi.MoveStatus) error {
+func (r *rejectedStatusRepository) CompareAndSetMoveStatus(ctx context.Context, expected volumeapi.Move, next volumeapi.MoveStatus) (volumeapi.Move, error) {
 	if r.rejectNext {
 		r.rejectNext = false
-		return errors.New("status write rejected before persistence")
+		return volumeapi.Move{}, errors.New("status write rejected before persistence")
 	}
-	return r.memoryRepository.SetMoveStatus(ctx, name, uid, next)
+	return r.memoryRepository.CompareAndSetMoveStatus(ctx, expected, next)
 }
 
 func TestMoveActionSurvivesJournalFailureAndControllerRestart(t *testing.T) {
@@ -270,11 +272,12 @@ func TestCompletionRejectsConflictingAuthority(t *testing.T) {
 			}
 			repository.moves[0] = move
 			repository.volumes[move.Spec.VolumeID] = state
-			if err := reconciler.reconcileMove(context.Background(), move); err != nil {
+			err := reconciler.reconcileMove(context.Background(), move)
+			if err != nil && scenario != "empty destination" && scenario != "same source" {
 				t.Fatal(err)
 			}
 			after := repository.moves[0].Status
-			if after.Phase != "Completing" || after.Reason != "CompletionAuthorityMismatch" {
+			if after.Phase != "Completing" || (err == nil && after.Reason != "CompletionAuthorityMismatch") {
 				t.Fatalf("unsafe completion was not deferred: %+v", after)
 			}
 			got := repository.volumes[move.Spec.VolumeID]

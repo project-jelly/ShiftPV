@@ -55,17 +55,12 @@ func (r *Reconciler) persistMoveStatus(ctx context.Context, move *volumeapi.Move
 	if move.Status.LastProgressTime == "" || progressOf(previous) != progressOf(move.Status) {
 		move.Status.LastProgressTime = now
 	}
-	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 {
-		stored, err := r.Repository.CompareAndSetMoveStatus(ctx, *move, move.Status)
-		if err != nil {
-			return errors.Join(errMoveStatusPersistence, err)
-		}
-		*move = stored
-	} else {
-		if err := r.Repository.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
-			return errors.Join(errMoveStatusPersistence, err)
-		}
+	stored, err := r.Repository.CompareAndSetMoveStatus(ctx, *move, move.Status)
+	if err != nil {
+		return errors.Join(errMoveStatusPersistence, err)
 	}
+	*move = stored
+
 	r.emitMoveEvent(*move, previous)
 	return nil
 }
@@ -136,8 +131,6 @@ var mobilityMessages = map[fsm.Phase]string{
 	fsm.PhaseStartingDisruption:           "automatic retry; starting disruption from the durable preparation intent",
 	fsm.PhaseCanceling:                    "cancelling preparation before destination execution approval",
 	fsm.PhaseCancelled:                    "preparation cancelled; source authority preserved",
-	fsm.PhaseLocking:                      "automatic retry; acquiring the volume mobility lock",
-	fsm.PhaseEvicting:                     "automatic retry; requesting consumer eviction without bypassing its disruption budget",
 	fsm.PhaseWaitingForUnpublish:          "automatic retry; waiting for the source node to report the volume unpublished",
 	fsm.PhaseWaitingForReplacement:        "automatic retry; waiting for the workload controller to create a replacement Pod",
 	fsm.PhaseWaitingForDestination:        "automatic retry; waiting for the scheduler to select a registered destination",

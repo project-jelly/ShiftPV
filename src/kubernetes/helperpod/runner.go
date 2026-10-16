@@ -46,42 +46,6 @@ type Runner struct {
 	ObserveStep             func(string, time.Duration)
 }
 
-func (r *Runner) CreateCopy(ctx context.Context, identity volume.CopyIdentity) error {
-	defer r.observeStep("create_helper")()
-	if err := identity.Validate(); err != nil {
-		return err
-	}
-	operationID, err := volumeapi.CreationOperationID(identity.VolumeUID)
-	if err != nil {
-		return err
-	}
-	_, err = r.runCreation(ctx, identity, operationID, []string{
-		"/shiftpv-volume-helper", "create",
-		"--operation-id=" + operationID,
-		"--installation-id=" + identity.InstallationID,
-		"--pool-name=" + identity.PoolName,
-		"--pool-uid=" + identity.PoolUID,
-		"--volume-id=" + identity.VolumeID,
-		"--volume-uid=" + identity.VolumeUID,
-		"--copy-id=" + identity.CopyID,
-		"--node-name=" + identity.NodeName,
-	})
-	return err
-}
-
-// FinalizeCreate removes only the exact, successfully terminated helper after
-// the controller has made the volume Ready. Absence is the settled state.
-func (r *Runner) FinalizeCreate(ctx context.Context, identity volume.CopyIdentity) error {
-	if err := identity.Validate(); err != nil {
-		return err
-	}
-	operationID, err := volumeapi.CreationOperationID(identity.VolumeUID)
-	if err != nil {
-		return err
-	}
-	return r.finalizeCreation(ctx, identity, operationID)
-}
-
 func (r *Runner) StatFS(ctx context.Context, nodeName string) (poolcapacity.Filesystem, error) {
 	if r.Pools == nil || nodeName == "" {
 		return poolcapacity.Filesystem{}, fmt.Errorf("ShiftPVPool registry is required")
@@ -357,17 +321,6 @@ func (r *Runner) helperPod(nodeName, volumeID, poolRoot string, command []string
 			}},
 		},
 	}
-}
-
-func (r *Runner) poolRootForIdentity(ctx context.Context, identity volume.CopyIdentity) (string, error) {
-	if r.Pools == nil {
-		return "", fmt.Errorf("ShiftPVPool registry is required")
-	}
-	pool, err := r.Pools.PoolForIdentity(ctx, identity.PoolName, identity.PoolUID, identity.NodeName)
-	if err != nil {
-		return "", fmt.Errorf("resolve ShiftPVPool %q for copy: %w", identity.PoolName, err)
-	}
-	return pool.MountPath, nil
 }
 
 func classifyKubernetesAPIError(err error) error {

@@ -86,7 +86,7 @@ func TestCompletedLegacyCleanupKeepsTerminalHistoryWhileReceiptPodRemains(t *tes
 					ctx := context.Background()
 					r, repo, _, move, incoming := settledTerminalMoveFixture(t, phase, recoveryRecovered, recoveryCapacitySettled)
 					if phase == "Succeeded" {
-						move.Status.RecoveryPhase, move.Status.CapacityReason = "", ""
+						move.Status.RecoveryPhase, move.Status.CapacityReason, move.Status.RecoveryOwner = "", "", ""
 					}
 					move.Status.LastTransitionTime = r.now().Add(-DefaultMoveJournalRetention - time.Hour).Format(time.RFC3339Nano)
 					move.Finalizers = []string{volumeapi.MoveProtectionFinalizer}
@@ -130,7 +130,11 @@ func TestCompletedLegacyCleanupKeepsTerminalHistoryWhileReceiptPodRemains(t *tes
 						if len(repo.moves) != 1 || slices.Contains(repo.moves[0].Finalizers, volumeapi.MoveProtectionFinalizer) {
 							t.Fatal("settled history did not remove finalizer before retention GC")
 						}
-						if err := r.reconcilePersistedMove(ctx, repo.moves[0]); err != nil {
+						fresh, err := repo.GetMove(ctx, move.Name)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := r.reconcilePersistedMove(ctx, fresh); err != nil {
 							t.Fatal(err)
 						}
 					}
@@ -224,12 +228,21 @@ func settledLegacyJobHistory(t *testing.T, r *Reconciler, kube *fake.Clientset, 
 func seedSettledFinalizerHistory(t *testing.T, r *Reconciler, repo *memoryRepository) {
 	t.Helper()
 	move := repo.moves[0]
-	if move.Status.CleanupPhase != cleanupapi.PhaseCompleted {
-		return
-	}
 	withTestCleanups()(r)
 	source, _, _ := testCopyIdentities(move.Spec.VolumeID, move.Spec.SourceNode, "destination")
 	move.Status.SourceCopy = &source
+	if move.Status.RecoveryPhase == recoveryRecovered {
+		move.Spec.Recovery, move.Status.RecoveryOwner = "ResumeOwner", move.Spec.SourceNode
+	}
+	if move.Status.CleanupPhase != cleanupapi.PhaseCompleted {
+		repo.moves[0] = move
+		return
+	}
+	move.Status.SourceBytes = 1
+	move.Status.DestinationNode, move.Status.DestinationPoolUID = "destination", "destination-pool-uid"
+	if err := prepareMoveCopyIdentitiesForPool(&move, volumeapi.Pool{Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination"}); err != nil {
+		t.Fatal(err)
+	}
 	repo.moves[0] = move
 	repo.journalParents = r.Cleanups.Client
 	kube := r.Client.(*fake.Clientset)

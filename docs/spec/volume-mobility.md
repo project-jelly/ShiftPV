@@ -17,7 +17,7 @@ permanent authoritative disk or node loss is outside this contract.
 | Partial copies | Incoming or incomplete copies never promote and never become owner. |
 | Publish proof | Destination actual-publish proof is required before source cleanup. |
 | Cleanup owner | The Move journal and finalizer own source and rollback cleanup decisions. |
-| Executors | Helper Jobs copy, verify and promote. Resident Node executors or already-bound Jobs perform cleanup; the parent journals own truth. |
+| Executors | Jobs copy, verify and promote; resident Nodes execute new creation and cleanup. Read-only measurement helpers remain. Parent journals own truth. |
 | Identity contradiction | Move enters `Blocked`; cleanup subjournals may enter `NeedsReview`. |
 
 `activeMove` is the per-volume lock. The Move keeps it until source cleanup has
@@ -32,8 +32,9 @@ after approval therefore retains both the capacity hold and its recovery plan.
 
 ### Preparation and execution
 
-New Moves require immutable `spec.protocolVersion: prepared-v1` in both the registry and API.
-Existing records without this field remain writable and retain their legacy execution path.
+Only `spec.protocolVersion: prepared-v1` executes in this controller. The registry
+and API require it for new Moves. Legacy records remain readable for settled-history
+validation and metadata retirement; reader/status compatibility does not permit execution.
 Preparation later records a `status.preparation` logical reservation identified by Pool name/UID, node and
 requested bytes. The shared capacity ledger counts it once; it protects its Pool
 from deletion and never authorizes a disk effect. Updates use exact Move UID and
@@ -61,12 +62,16 @@ retiring the journal. Cancellation needs no surviving PVC or consumer. After
 `StartingDisruption`, an already submitted eviction can still complete for the
 original UID; cancellation restores source authority, not that Pod's lifetime.
 
-Apply the CRDs separately before upgrading the chart and controller together.
-The new chart passes the preparation PriorityClass flag, which older controller
-binaries do not accept; pinning an old image under the new chart is not a CRD-only
-upgrade. Unknown protocols retain their records without executing effects.
-Do not run an older controller while prepared records remain. The implementation
-sequence is in [mobility stabilization](../development/mobility-stabilization-plan.md).
+Before switching, settle active legacy work with its compatible old controller
+and helper images. Exclude new work through cutover, run the candidate image's
+read-only `upgrade-check`, and require a complete report with no blockers before
+replacing the controller with `Recreate`. The inspection is not an atomic fence.
+The candidate never resumes legacy effects or converts Job bindings to Nodes;
+unknown or unsettled records are retained. Journal-bearing effects require exact
+receipt and absence proof. A prepared source recovery without cleanup intent can
+close through exact CAS settlement and its causal rollback fence; helper quiescence
+and no Volume references remain required for history acceptance. See
+[versioning](../development/versioning.md#planned-mobility-upgrades).
 
 ## Flow
 
@@ -143,7 +148,7 @@ retries without cancelling placement or releasing a hold. Capacity measurement,
 fresh ledger admission, and owner commit still use that shared lock. Admission
 and external writers remain outside the Volume queue and require the existing
 CAS and publication fences. Cleanup binds an executor and observes its journal
-once, returning the worker while the Node watch or Job executes. Pending cleanup
+once, returning the worker while the resident Node executes. Pending cleanup
 preserves the Move phase and holds. Source usage uses one Move UID-owned read-only
 Pod with a fixed deadline. Each pass observes once. A successful result is stored
 by exact Move CAS after rechecking the unpublished source authority; only then
@@ -157,8 +162,9 @@ configuration, copy or publication and explicit failed evidence discard the resu
 Destination statfs uses a separate resident RPC/API probe with one four-second
 budget covering discovery, reads and response validation. It has no helper-Pod
 fallback; private lock contention returns immediately. Temporary unavailability
-preserves the current phase, placement and hold for a fresh retry. CSI keeps its
-existing helper fallback. The probe budget fits inside the Volume pass budget.
+preserves the current phase, placement and hold for a fresh retry. CSI statfs may
+use a read-only measurement helper fallback. Creation and cleanup never fall back
+to helpers. The probe budget fits inside the Volume pass budget.
 
 New preparation candidates must advertise resident capacity probing. Immediately
 before changing a Ready source to Moving, a fresh nonce probe verifies that the
@@ -196,10 +202,10 @@ Nested filesystem traversal and device-node recreation are explicitly excluded
 from the Volume data contract by the copy options. The supported data set is
 verified with the same exclusions before promotion.
 
-Change helper images after active operations settle. Existing source Pods and
-Jobs compare the configured image and execution shape exactly. If upgrading the
-controller first, pin compatible `mobility.helperImage` and `helperPod.image`,
-plus the existing service-account/resource/timeout profile, until settlement.
+Settle active work before changing helper images or execution profiles. Source
+Pods and copy/verify/promote Jobs compare their image and execution shape exactly.
+Legacy work must finish under its old compatible writer and helper images before
+the candidate controller starts.
 
 ## State Table
 
@@ -216,11 +222,10 @@ its phase. `Canceling` releases the hold and becomes `Cancelled` in one status C
 | `StartingDisruption` | Protected logical hold and exact placement UID recorded | Recheck conditions, fence source publication and evict recorded consumer UID |
 | `Canceling` | No destination execution authority | Restore source Ready; confirm placement absence; release logical hold |
 | `Cancelled` | Logical hold released | Clear the exact source lock, then retain the settled journal for its retention period |
-| `Locking` / `Evicting` | Legacy Move only | Acquire Moving lock / evict using the previous protocol |
 | `WaitingForUnpublish` | Original consumer eviction was accepted or the consumer is gone | Wait until source publication is absent |
 | `WaitingForReplacement` | Source is unpublished | Wait for a replacement claim/placement object |
 | `WaitingForDestination` | Replacement exists and its hold is intact | Ensure destination placement and node readiness |
-| `WaitingForCapacity` | Destination placement is scheduled and usable | Verify quiesced physical usage; convert prepared hold (legacy: grant capacity) |
+| `WaitingForCapacity` | Destination placement is scheduled and usable | Verify quiesced physical usage; convert the prepared hold |
 | `Copying` | Destination capacity hold is approved | Copy into destination incoming path |
 | `Promoting` | Checksum and identities match | Promote incoming to destination serving copy |
 | `Committing` | Destination serving copy exists | CAS owner/currentCopy to destination |
@@ -299,10 +304,9 @@ cleanup journal was created. Node/controller timestamps only bound freshness;
 they do not establish scan ordering. A lost request or unrecorded fence causes a
 new scan request, while a persisted fence survives controller restart.
 
-For legacy approval-only records with no copy or cleanup intent, recovery derives
-the expected identities only to check absence after this fence. It does not save
-them as deletion authority. Any matching artifact or contradictory evidence keeps
-the hold for review; complete fresh absence permits source recovery.
+Approval without its recorded full destination plan requires review and preserves
+the hold. Recovery does not infer copy identities, request a scan from an inferred
+plan, or fabricate cleanup authority.
 
 ### Operator procedure
 
@@ -330,7 +334,7 @@ For `Blocked` after execution approval on a new `prepared-v1` Move:
 
 A missing/recreated claim after prepared execution approval remains an operator
 recovery case. `ResumeOwner` does not adopt a new UID or fabricate absent publication
-proof. Legacy Moves retain their original protocol's binding checks.
+proof. Legacy Moves must settle on their compatible old writer before upgrade.
 Before approval, preparation cancellation settles metadata without those objects;
 restoring application availability still requires a valid workload and binding.
 

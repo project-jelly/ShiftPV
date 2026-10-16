@@ -10,8 +10,6 @@ const (
 	PhaseStartingDisruption           Phase = "StartingDisruption"
 	PhaseCanceling                    Phase = "Canceling"
 	PhaseCancelled                    Phase = "Cancelled"
-	PhaseLocking                      Phase = "Locking"
-	PhaseEvicting                     Phase = "Evicting"
 	PhaseWaitingForUnpublish          Phase = "WaitingForUnpublish"
 	PhaseWaitingForReplacement        Phase = "WaitingForReplacement"
 	PhaseWaitingForDestination        Phase = "WaitingForDestination"
@@ -31,8 +29,6 @@ type Action string
 
 const (
 	ActionWait                  Action = "Wait"
-	ActionLockVolume            Action = "LockVolume"
-	ActionEvictConsumer         Action = "EvictConsumer"
 	ActionEnsurePlacement       Action = "EnsurePlacement"
 	ActionEnsureCapacity        Action = "EnsureCapacity"
 	ActionDeletePlacement       Action = "DeletePlacement"
@@ -54,7 +50,6 @@ const (
 	ActionReleaseSource         Action = "ReleaseSource"
 	ActionFinalizeHistory       Action = "FinalizeHistory"
 	ActionFinalizeSourceUsage   Action = "FinalizeSourceUsage"
-	ActionDiscardUnstartedMove  Action = "DiscardUnstartedMove"
 	ActionBeginRecovery         Action = "BeginRecovery"
 	ActionQuiesceRecovery       Action = "QuiesceRecovery"
 	ActionVerifyRecovery        Action = "VerifyRecovery"
@@ -80,9 +75,6 @@ type State struct {
 }
 
 type Observation struct {
-	// Prepared is the temporary legacy-execution adapter. All new Moves use it.
-	Prepared                   bool
-	PendingObsolete            bool
 	ProtectionPresent          bool
 	SourcePlanRecorded         bool
 	SourceClaimed              bool
@@ -101,9 +93,7 @@ type Observation struct {
 	UnsafeReason           string
 	SourceHealthy          bool
 	SourceAuthorityInvalid bool
-	VolumeLocked           bool
 	ConsumerExists         bool
-	EvictionRequested      bool
 	PublishedOnSource      bool
 	ReplacementExists      bool
 	ReplacementHeld        bool
@@ -134,9 +124,6 @@ type Decision struct {
 // completes; pending or ambiguous writes require re-observation, not advancement.
 func Decide(current State, observation Observation) (Decision, error) {
 	if current.Phase == "" && current.RecoveryPhase == "" {
-		if !observation.Prepared {
-			return Decision{Next: State{Phase: PhasePending}, Action: ActionWait}, nil
-		}
 		// A new prepared Move may already have a protected, fully observed
 		// source plan. Normalization must not add a metadata-only pass.
 		current.Phase = PhasePending
@@ -158,7 +145,7 @@ func Decide(current State, observation Observation) (Decision, error) {
 }
 
 func decideExecution(current Phase, observation Observation) (Decision, error) {
-	// These three preludes run in this order before any phase-specific rule,
+	// These guards run in this order before any phase-specific rule,
 	// and each one owns the decision outright when it fires.
 	if decision, guarded, err := lifecycleGuard(current, observation); guarded {
 		return decision, err
@@ -166,17 +153,8 @@ func decideExecution(current Phase, observation Observation) (Decision, error) {
 	if decision, guarded, err := authorityGuard(current, observation); guarded {
 		return decision, err
 	}
-	if decision, guarded, err := preflightGuard(current, observation); guarded {
-		return decision, err
-	}
 
 	switch current {
-	case PhasePending:
-		return decidePending(current, observation)
-	case PhaseLocking:
-		return decideLocking(current, observation)
-	case PhaseEvicting:
-		return decideEvicting(current, observation)
 	case PhaseWaitingForUnpublish:
 		return decideWaitingForUnpublish(current, observation)
 	case PhaseWaitingForReplacement:
@@ -218,13 +196,11 @@ func ValidateTransition(from, to Phase) error {
 }
 
 var allowedTransitions = map[Phase][]Phase{
-	PhasePending:                      {PhasePending, PhasePreparing, PhaseLocking, PhaseBlocked, PhaseCanceling},
+	PhasePending:                      {PhasePending, PhasePreparing, PhaseBlocked, PhaseCanceling},
 	PhasePreparing:                    {PhasePreparing, PhaseStartingDisruption, PhaseCanceling},
 	PhaseStartingDisruption:           {PhaseStartingDisruption, PhaseWaitingForUnpublish, PhaseCanceling},
 	PhaseCanceling:                    {PhaseCanceling, PhaseCancelled},
 	PhaseCancelled:                    {PhaseCancelled},
-	PhaseLocking:                      {PhaseLocking, PhaseEvicting, PhaseBlocked},
-	PhaseEvicting:                     {PhaseEvicting, PhaseWaitingForUnpublish, PhaseBlocked},
 	PhaseWaitingForUnpublish:          {PhaseWaitingForUnpublish, PhaseWaitingForReplacement, PhaseBlocked, PhaseCanceling},
 	PhaseWaitingForReplacement:        {PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseBlocked, PhaseCanceling},
 	PhaseWaitingForDestination:        {PhaseWaitingForDestination, PhaseWaitingForCapacity, PhaseBlocked, PhaseCanceling},
@@ -295,12 +271,12 @@ func terminal(phase Phase) bool {
 }
 
 func beforeExecutionApproval(observation Observation) bool {
-	return observation.Prepared && !observation.CapacityApproved && !observation.DestinationIntentRecorded
+	return !observation.CapacityApproved && !observation.DestinationIntentRecorded
 }
 
 func beforeCommit(phase Phase) bool {
 	switch phase {
-	case PhasePending, PhaseLocking, PhaseEvicting, PhaseWaitingForUnpublish,
+	case PhasePending, PhaseWaitingForUnpublish,
 		PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseWaitingForCapacity, PhaseCopying, PhasePromoting,
 		PhaseCommitting:
 		return true

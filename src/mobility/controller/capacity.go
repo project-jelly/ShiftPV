@@ -18,38 +18,10 @@ func (r *Reconciler) ensureCapacity(ctx context.Context, move *volumeapi.Move, o
 	if observed.DestinationNode == "" || r.CapacityProbe == nil || r.PoolLocks == nil {
 		return fmt.Errorf("destination capacity admission is not configured")
 	}
-	if move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && move.Status.Preparation != nil {
-		return r.convertPreparation(ctx, move)
+	if move.Status.Preparation == nil {
+		return fmt.Errorf("execution approval requires its prepared destination reservation")
 	}
-	if err := r.measureSourceCopy(ctx, move); err != nil {
-		return err
-	}
-	pools, err := r.destinationPools(ctx, *move, observed.DestinationNode)
-	if err != nil {
-		return err
-	}
-	// Approval is a durable hold. A retry must retain its exact incarnation,
-	// even if capacity has since been spent or the node has another usable Pool.
-	if move.Status.CapacityApproved {
-		return nil
-	}
-	var denial string
-	for _, pool := range pools {
-		reason, err := r.approveDestinationPool(ctx, move, pool)
-		if err != nil {
-			return err
-		}
-		if reason == "" {
-			return nil
-		}
-		if denial == "" {
-			denial = reason
-		}
-	}
-	previous := move.Status
-	move.Status.DestinationNode = observed.DestinationNode
-	move.Status.CapacityReason = denial
-	return r.persistMoveStatus(ctx, move, previous)
+	return r.convertPreparation(ctx, move)
 }
 
 func (r *Reconciler) destinationPools(ctx context.Context, move volumeapi.Move, nodeName string) ([]volumeapi.Pool, error) {
@@ -86,45 +58,6 @@ func (r *Reconciler) destinationPools(ctx context.Context, move volumeapi.Move, 
 	return eligible, nil
 }
 
-func (r *Reconciler) approveDestinationPool(ctx context.Context, move *volumeapi.Move, pool volumeapi.Pool) (string, error) {
-	unlock, acquired := r.PoolLocks.TryLock(pool.UID)
-	if !acquired {
-		return "", errPoolBusy
-	}
-	defer unlock()
-	requested, logicalReserved, physicalPending, limit, err := r.destinationCapacityForPool(ctx, *move, pool)
-	if err != nil {
-		return "", err
-	}
-	stats, err := r.CapacityProbe.StatFSForPool(ctx, pool)
-	if err != nil {
-		return "", fmt.Errorf("inspect destination Pool filesystem: %w", err)
-	}
-	if requested > limit-logicalReserved {
-		return "DestinationReservationLimit", nil
-	}
-	if physicalPending > stats.AvailableBytes || move.Status.SourceBytes > stats.AvailableBytes-physicalPending {
-		return "DestinationFilesystemSpace", nil
-	}
-	previous := move.Status
-	planned := *move
-	planned.Status.DestinationNode = pool.NodeName
-	planned.Status.DestinationPoolUID = pool.UID
-	if err := prepareMoveCopyIdentitiesForPool(&planned, pool); err != nil {
-		return "", err
-	}
-	planned.Status.CapacityApproved = true
-	planned.Status.CapacityReason = ""
-	*move = planned
-	if err := r.persistMoveStatus(ctx, move, previous); err != nil {
-		// The write may have been accepted despite a lost response. Leave the
-		// durable state for the next observation; diagnostics cannot replay this
-		// newly mutated approval after releasing the capacity lock.
-		return "", errors.Join(errCapacityApprovalPersistence, err)
-	}
-	return "", nil
-}
-
 func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current volumeapi.Move, pool volumeapi.Pool) (requested, logicalReserved, physicalPending, limit int64, err error) {
 	limit, err = poolcapacity.LimitBytes(pool)
 	if err != nil {
@@ -150,10 +83,8 @@ func (r *Reconciler) destinationCapacityForPool(ctx context.Context, current vol
 		return 0, 0, 0, 0, fmt.Errorf("volume %q has invalid capacity", current.Spec.VolumeID)
 	}
 	requested = state.CapacityBytes
-	if current.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && current.Status.Preparation != nil {
-		if err := preparedCapacitySnapshot(current, state, moves, pool); err != nil {
-			return 0, 0, 0, 0, err
-		}
+	if err := preparedCapacitySnapshot(current, state, moves, pool); err != nil {
+		return 0, 0, 0, 0, err
 	}
 	logicalReserved, err = poolcapacity.ReservedBytesForPool(volumes, moves, pool.UID)
 	if err != nil {

@@ -112,7 +112,7 @@ func (r *Runner) sourceUsageResult(ctx context.Context, move volumeapi.Move, pod
 	if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 		return 0, false, nil
 	}
-	terminated, terminationErr := creationTermination(pod)
+	terminated, terminationErr := helperPodTermination(pod)
 	if terminationErr == nil && pod.Status.Phase == corev1.PodSucceeded && terminated.ExitCode == 0 {
 		bytes, err := strconv.ParseInt(strings.TrimSpace(terminated.Message), 10, 64)
 		if err == nil && bytes > 0 {

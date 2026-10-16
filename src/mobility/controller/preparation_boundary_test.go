@@ -2,6 +2,7 @@ package controller
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -227,7 +228,7 @@ func TestPreparationConversionRetainsOneLogicalReservation(t *testing.T) {
 	assertPreparationReserved(t, f, preparationRequestedBytes)
 }
 
-func TestPreparedAndLegacyMovesCoexist(t *testing.T) {
+func TestPreparedProgressesWhileLegacyRemainsReadOnly(t *testing.T) {
 	f := newPreparationRegistryFixture(t, 2)
 	object, err := f.dynamic.Resource(volumeapi.MoveResource).Get(f.ctx, f.moveNames[1], metav1.GetOptions{})
 	if err != nil {
@@ -237,14 +238,15 @@ func TestPreparedAndLegacyMovesCoexist(t *testing.T) {
 	if _, err = f.dynamic.Resource(volumeapi.MoveResource).Update(f.ctx, object, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err = f.reconciler.ReconcileAll(f.ctx); err != nil {
-		t.Fatal(err)
+	before := f.move(t, 1)
+	if err = f.reconciler.ReconcileAll(f.ctx); err == nil {
+		t.Fatal("active legacy Move was not reported")
 	}
 	if f.move(t, 0).Status.SourceCopy == nil || f.move(t, 0).Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 {
 		t.Fatal("prepared route did not initialize")
 	}
-	if legacy := f.move(t, 1); legacy.Spec.ProtocolVersion != "" || legacy.Status.Phase == "Pending" {
-		t.Fatalf("legacy route did not progress: %+v", legacy)
+	if legacy := f.move(t, 1); !reflect.DeepEqual(legacy, before) {
+		t.Fatalf("legacy record changed: %+v", legacy)
 	}
 }
 

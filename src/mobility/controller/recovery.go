@@ -169,7 +169,7 @@ func (r *Reconciler) recoveryClaim(ctx context.Context, move volumeapi.Move) (*c
 		return nil, err
 	}
 	if !validBinding(pv, claim, move.Spec.VolumeID) ||
-		(move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1 && !preparedBindingMatches(move, pv, claim)) {
+		!preparedBindingMatches(move, pv, claim) {
 		return nil, fmt.Errorf("PV/PVC binding or volume handle changed")
 	}
 	namespace, err := r.Client.CoreV1().Namespaces().Get(ctx, claim.Namespace, metav1.GetOptions{})

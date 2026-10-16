@@ -10,10 +10,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
@@ -21,6 +23,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 const handoffCapacity = int64(8 << 20)
@@ -84,7 +87,7 @@ func testLedgerHandoffAdmission(t *testing.T, sourceAdmission bool) {
 	admission := make(chan admissionResult, 1)
 	go func() {
 		candidate := f.candidate
-		reason, err := reader.approveDestinationPool(ctx, &candidate, pool)
+		reason, err := f.reserve(ctx, &reader, &candidate, pool)
 		admission <- admissionResult{reason, err}
 	}()
 	select {
@@ -97,21 +100,43 @@ func testLedgerHandoffAdmission(t *testing.T, sourceAdmission bool) {
 		// A source reader must not prevent an independent destination grant.
 		// Its old Volume snapshot already retains the source reservation, so
 		// even owner handoff and terminal settlement may proceed before Moves.
-		reason, err := f.reconciler.approveDestinationPool(ctx, &f.move, f.destinationPool)
+		reason, err := f.reserve(ctx, f.reconciler, &f.move, f.destinationPool)
 		if err != nil || reason != "" {
 			close(paused.resume)
 			t.Fatalf("destination approval while source admission holds its lock: reason=%q err=%v", reason, err)
 		}
 		stored, err := f.registry.GetMove(ctx, f.move.Name)
-		if err != nil || !stored.Status.CapacityApproved {
+		if err != nil || stored.Status.Preparation == nil {
 			close(paused.resume)
 			t.Fatalf("destination approval was not durable: move=%+v err=%v", stored, err)
 		}
-		f.move.Status.Phase = "Committing"
-		if err := f.registry.SetMoveStatus(ctx, f.move.Name, f.move.UID, f.move.Status); err != nil {
+		state, err := f.registry.Get(ctx, f.move.Spec.VolumeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := state
+		next.Phase = volumeapi.PhaseMoving
+		if err := f.registry.CompareAndSetSourceState(ctx, f.move.Spec.VolumeID, state, next); err != nil {
+			t.Fatal(err)
+		}
+		status := f.move.Status
+		status.Phase = "WaitingForCapacity"
+		f.move, err = f.registry.CompareAndSetMoveStatus(ctx, f.move, status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.reconciler.convertPreparation(ctx, &f.move); err != nil {
+			t.Fatal(err)
+		}
+		status = f.move.Status
+		status.Phase = "Committing"
+		f.move, err = f.registry.CompareAndSetMoveStatus(ctx, f.move, status)
+		if err != nil {
 			close(paused.resume)
 			t.Fatalf("advance approved handoff to commit: %v", err)
 		}
+		f.observed.Volume = next
+
 	}
 
 	started := make(chan struct{})
@@ -230,27 +255,13 @@ func TestLedgerHandoffReobservesCommittedOwnerAfterLostResponse(t *testing.T) {
 	f.assertReserved(t, f.destinationPool.UID, handoffCapacity)
 	// Both admission paths must regain the original shared locks even though
 	// the successful owner write returned an error to its caller.
-	admissions := make(chan error, 2)
 	for _, pool := range []volumeapi.Pool{f.sourcePool, f.destinationPool} {
-		go func() {
-			candidate := f.candidate
-			reason, err := f.reconciler.approveDestinationPool(ctx, &candidate, pool)
-			if err == nil && reason != "DestinationReservationLimit" {
-				err = fmt.Errorf("Pool %s accepted a conflicting reservation: reason=%q", pool.UID, reason)
-			}
-			admissions <- err
-		}()
-	}
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	for range 2 {
-		select {
-		case err := <-admissions:
-			if err != nil {
-				t.Fatal(err)
-			}
-		case <-deadline.C:
-			t.Fatal("response loss leaked a Pool lock and blocked capacity admission")
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		candidate := f.candidate
+		reason, err := f.reserve(probeCtx, f.reconciler, &candidate, pool)
+		cancel()
+		if err != nil || reason != "DestinationReservationLimit" {
+			t.Fatalf("Pool %s did not release its lock with reservation intact: reason=%q err=%v", pool.UID, reason, err)
 		}
 	}
 
@@ -289,6 +300,58 @@ type ledgerHandoffFixture struct {
 	observed                    observation
 }
 
+func (f *ledgerHandoffFixture) reserve(ctx context.Context, r *Reconciler, move *volumeapi.Move, pool volumeapi.Pool) (string, error) {
+	placement, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, namesFor(move.Name).PlacementPod, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		placement = r.placementPod(*move, &corev1.Pod{}, namesFor(move.Name))
+		placement.UID, placement.Spec.NodeName = types.UID(move.Status.PlacementPodUID), pool.NodeName
+		placement, err = r.Client.CoreV1().Pods(r.Namespace).Create(ctx, placement, metav1.CreateOptions{})
+	}
+	if err != nil {
+		return "", err
+	}
+	if placement.Spec.NodeName != pool.NodeName {
+		placement.Spec.NodeName = pool.NodeName
+		placement, err = r.Client.CoreV1().Pods(r.Namespace).Update(ctx, placement, metav1.UpdateOptions{})
+		if err != nil {
+			return "", err
+		}
+	}
+	granted, err := r.grantPreparation(ctx, move, pool, placement)
+	if err != nil || granted {
+		return "", err
+	}
+	return "DestinationReservationLimit", nil
+}
+
+// Construct persisted setup, including already-approved transactions, without a
+// production legacy writer or bypassing the candidate's admission under test.
+func seedLedgerMove(ctx context.Context, client *dynamicfake.FakeDynamicClient, move volumeapi.Move) error {
+	object, err := client.Resource(volumeapi.MoveResource).Get(ctx, move.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	s := move.Status
+	status := map[string]any{"phase": s.Phase, "persistentVolumeName": s.PersistentVolumeName, "persistentVolumeUID": s.PersistentVolumeUID,
+		"persistentVolumeClaimNamespace": s.ClaimNamespace, "persistentVolumeClaimName": s.ClaimName, "persistentVolumeClaimUID": s.ClaimUID,
+		"consumerName": s.ConsumerName, "consumerUID": s.ConsumerUID, "placementPodUID": s.PlacementPodUID,
+		"sourceBytes": s.SourceBytes, "capacityApproved": s.CapacityApproved, "destinationNode": s.DestinationNode,
+		"destinationPoolUID": s.DestinationPoolUID, "copyOperationID": s.CopyOperationID, "promotionOperationID": s.PromotionOperationID,
+		"copyJobName": s.CopyJobName, "promotionJobName": s.PromotionJobName, "lastTransitionTime": s.LastTransitionTime}
+	for name, copy := range map[string]*volume.CopyIdentity{"sourceCopy": s.SourceCopy, "incomingCopy": s.IncomingCopy, "destinationCopy": s.DestinationCopy} {
+		if copy != nil {
+			encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(copy)
+			if err != nil {
+				return err
+			}
+			status[name] = encoded
+		}
+	}
+	object.Object["status"] = status
+	_, err = client.Resource(volumeapi.MoveResource).UpdateStatus(ctx, object, metav1.UpdateOptions{})
+	return err
+}
+
 func newLedgerHandoffFixture(t *testing.T, approved bool) *ledgerHandoffFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -303,7 +366,9 @@ func newLedgerHandoffFixture(t *testing.T, approved bool) *ledgerHandoffFixture 
 		candidate: volumeapi.Move{Name: "competing", UID: "competing-uid", Spec: volumeapi.MoveSpec{VolumeID: other.VolumeID, SourceNode: other.NodeName},
 			Status: volumeapi.MoveStatus{Phase: "WaitingForCapacity", SourceCopy: &other, SourceBytes: 1 << 20}},
 	}
-	objects := []runtime.Object{}
+	f.move, f.candidate = preparedFixtureMove(f.move), preparedFixtureMove(f.candidate)
+	f.move.Status.Phase, f.candidate.Status.Phase = "Preparing", "Preparing"
+	objects := []runtime.Object{preparationPool("source", "8Mi"), preparationPool("destination", "8Mi"), preparationPool("other", "8Mi")}
 	for _, move := range []volumeapi.Move{f.move, f.candidate} {
 		copy, err := runtime.DefaultUnstructuredConverter.ToUnstructured(move.Status.SourceCopy)
 		if err != nil {
@@ -314,16 +379,16 @@ func newLedgerHandoffFixture(t *testing.T, approved bool) *ledgerHandoffFixture 
 				"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
 				"metadata": map[string]any{"name": move.Spec.VolumeID, "uid": move.Status.SourceCopy.VolumeUID, "resourceVersion": "1"},
 				"spec":     map[string]any{"volumeID": move.Spec.VolumeID, "requestName": move.Name, "initialNode": move.Spec.SourceNode, "capacityBytes": handoffCapacity},
-				"status":   map[string]any{"phase": volumeapi.PhaseMoving, "ownerNode": move.Spec.SourceNode, "activeMove": move.Name, "currentCopy": copy},
+				"status":   map[string]any{"phase": volumeapi.PhaseReady, "ownerNode": move.Spec.SourceNode, "activeMove": move.Name, "currentCopy": copy},
 			}},
 			&unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
 				"metadata": map[string]any{"name": move.Name, "uid": move.UID, "resourceVersion": "1", "generation": int64(1), "finalizers": []any{volumeapi.MoveProtectionFinalizer}},
-				"spec":     map[string]any{"volumeID": move.Spec.VolumeID, "sourceNode": move.Spec.SourceNode},
+				"spec":     map[string]any{"volumeID": move.Spec.VolumeID, "sourceNode": move.Spec.SourceNode, "protocolVersion": volumeapi.MoveProtocolPreparedV1},
 			}})
 	}
 	f.client = dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList",
+		volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList",
 	}, objects...)
 	f.registry = &volumeapi.Registry{Client: f.client}
 	f.reconciler = &Reconciler{Client: fake.NewSimpleClientset(), Namespace: "system", HelperImage: "helper", Repository: f.registry,
@@ -338,12 +403,23 @@ func newLedgerHandoffFixture(t *testing.T, approved bool) *ledgerHandoffFixture 
 		f.move.Status.Phase = "Committing"
 	}
 	for _, move := range []volumeapi.Move{f.move, f.candidate} {
-		if err := f.registry.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
+		if err := seedLedgerMove(ctx, f.client, move); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if approved {
+		state, err := f.registry.Get(ctx, f.move.Spec.VolumeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := state
+		next.Phase = volumeapi.PhaseMoving
+		if err := f.registry.CompareAndSetSourceState(ctx, f.move.Spec.VolumeID, state, next); err != nil {
 			t.Fatal(err)
 		}
 	}
 	placement := f.reconciler.placementPod(f.move, &corev1.Pod{}, namesFor(f.move.Name))
-	placement.Spec.NodeName = f.destinationPool.NodeName
+	placement.Spec.NodeName, placement.UID = f.destinationPool.NodeName, types.UID(f.move.Status.PlacementPodUID)
 	if _, err := f.reconciler.Client.CoreV1().Pods("system").Create(ctx, placement, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -415,8 +491,14 @@ func (f *ledgerHandoffFixture) completeMove(ctx context.Context) error {
 	if _, err := f.client.Resource(volumeapi.MoveResource).UpdateStatus(ctx, object, metav1.UpdateOptions{}); err != nil {
 		return err
 	}
-	move.Status.Phase = "Completing"
-	if err := f.registry.SetMoveStatus(ctx, move.Name, move.UID, move.Status); err != nil {
+	move, err = f.registry.GetMove(ctx, move.Name)
+	if err != nil {
+		return err
+	}
+	next := move.Status
+	next.Phase = "Completing"
+	move, err = f.registry.CompareAndSetMoveStatus(ctx, move, next)
+	if err != nil {
 		return err
 	}
 	state, err := f.registry.Get(ctx, move.Spec.VolumeID)
@@ -426,6 +508,8 @@ func (f *ledgerHandoffFixture) completeMove(ctx context.Context) error {
 	if err := f.reconciler.markSucceeded(ctx, &move, observation{Volume: state, Names: namesFor(move.Name)}); err != nil {
 		return fmt.Errorf("complete committed Move: %w", err)
 	}
-	move.Status.Phase = "Succeeded"
-	return f.registry.SetMoveStatus(ctx, move.Name, move.UID, move.Status)
+	next = move.Status
+	next.Phase = "Succeeded"
+	_, err = f.registry.CompareAndSetMoveStatus(ctx, move, next)
+	return err
 }
