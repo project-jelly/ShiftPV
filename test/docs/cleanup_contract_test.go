@@ -72,7 +72,7 @@ func TestParentCleanupJournalSchemasMatchRuntimeContract(t *testing.T) {
 		file, parentKind string
 		reasons          []string
 	}{
-		{"shiftpv.io_shiftpvvolumes.yaml", "ShiftPVVolume", []string{"VolumeDelete"}},
+		{"shiftpv.io_shiftpvvolumes.yaml", "ShiftPVVolume", []string{"VolumeDelete", "CreationCancelled"}},
 		{"shiftpv.io_shiftpvmoves.yaml", "ShiftPVMove", []string{"MoveSource", "MoveRollback"}},
 	} {
 		t.Run(tc.parentKind, func(t *testing.T) {
