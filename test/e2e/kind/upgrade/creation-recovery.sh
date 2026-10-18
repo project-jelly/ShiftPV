@@ -136,6 +136,7 @@ EOF
 	# and its webhook available; no second background Controller is started.
 	kubectl apply --field-manager=shiftpv-crd-upgrade -f "${ROOT_DIR}/charts/shiftpv/crds/"
 	helm template "${RELEASE}" "${ROOT_DIR}/charts/shiftpv" --namespace "${NAMESPACE}" \
+		--kube-version "$(kubectl version -o json | jq -er '.serverVersion.gitVersion')" \
 		--set storageClass.defaultClass=true \
 		--set-string node.image.repository="${CANDIDATE_IMAGE%%:*}" --set-string node.image.tag="${CANDIDATE_IMAGE#*:}" \
 		--set node.image.pullPolicy=IfNotPresent "${READINESS_ARGS[@]}" >"${RECOVERY_EVIDENCE}/node-stage.yaml"
