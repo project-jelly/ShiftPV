@@ -262,9 +262,20 @@ func TestPreparedCancellationWaitsForExactPlacementAbsence(t *testing.T) {
 					t.Fatal(err)
 				}
 				pod.UID, pod.ResourceVersion = "", ""
-				if _, err := pods.Create(f.ctx, pod, metav1.CreateOptions{}); err != nil {
+				created, err := pods.Create(f.ctx, pod, metav1.CreateOptions{})
+				if err != nil {
 					t.Fatal(err)
 				}
+				if string(created.UID) == move.Status.PlacementPodUID {
+					t.Fatal("recreated reservation kept the old UID")
+				}
+				f.client.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+					options := action.(ktesting.DeleteAction).GetDeleteOptions()
+					if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != created.UID {
+						t.Fatal("placement DELETE was not fenced to the observed current UID")
+					}
+					return false, nil, nil
+				})
 			case "terminating":
 				now := metav1.Now()
 				pod.DeletionTimestamp = &now
@@ -286,20 +297,12 @@ func TestPreparedCancellationWaitsForExactPlacementAbsence(t *testing.T) {
 			}
 			f.client.ClearActions()
 			err = f.reconciler.reconcilePersistedMove(f.ctx, move)
-			if (err != nil) != (boundary != "terminating") {
+			if (err != nil) != (boundary == "delete response lost") {
 				t.Fatalf("unexpected placement cancellation result: %v", err)
 			}
 			stored := f.move(t, 0)
 			if stored.Status.Phase != "Canceling" || stored.Status.Preparation == nil || f.state(t, 0).ActiveMove != move.Name {
 				t.Fatal("placement without observed absence released its holds")
-			}
-			if boundary == "recreated UID" {
-				for _, action := range f.client.Actions() {
-					if action.GetVerb() == "delete" {
-						t.Fatal("deleted a same-name replacement placement")
-					}
-				}
-				return
 			}
 			if boundary == "terminating" {
 				if err := f.client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), pod.Namespace, pod.Name); err != nil {

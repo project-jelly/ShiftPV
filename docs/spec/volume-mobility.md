@@ -62,6 +62,13 @@ retiring the journal. Cancellation needs no surviving PVC or consumer. After
 `StartingDisruption`, an already submitted eviction can still complete for the
 original UID; cancellation restores source authority, not that Pod's lifetime.
 
+The recorded placement Pod UID fences preparation through execution approval.
+After approval, the controller may recreate the same Move-owned reservation on
+the persisted destination; this does not change the Pool, copy plan or owner.
+Cancellation may remove a recreated reservation owned by the exact Move UID.
+Removal uses the current observed Pod UID as a DELETE precondition and waits for
+actual API absence before releasing its hold. Foreign ownership remains a conflict.
+
 Before switching, settle active legacy work with its compatible old controller
 and helper images. Exclude new work through cutover, run the candidate image's
 read-only `upgrade-check`, and require a complete report with no blockers before

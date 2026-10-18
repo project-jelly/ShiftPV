@@ -43,11 +43,11 @@ func (r *Reconciler) observeCancellation(ctx context.Context, move volumeapi.Mov
 	if err != nil {
 		return result, fmt.Errorf("observe cancelled placement: %w", err)
 	}
-	if err := validatePlacementIdentity(pod, move, result.Names); err != nil {
+	if err := validatePlacementOwner(pod, move, result.Names); err != nil {
 		return result, err
 	}
-	if pod.UID == "" || (move.Status.PlacementPodUID != "" && string(pod.UID) != move.Status.PlacementPodUID) {
-		return result, fmt.Errorf("cancelled placement Pod UID changed")
+	if pod.UID == "" {
+		return result, fmt.Errorf("cancelled placement Pod has no UID")
 	}
 	result.Placement = pod
 	return result, nil
@@ -57,7 +57,7 @@ func (r *Reconciler) deleteCancelledPlacement(ctx context.Context, move volumeap
 	if pod == nil || pod.DeletionTimestamp != nil {
 		return nil
 	}
-	if err := validatePlacementIdentity(pod, move, namesFor(move.Name)); err != nil {
+	if err := validatePlacementOwner(pod, move, namesFor(move.Name)); err != nil {
 		return err
 	}
 	uid := pod.UID

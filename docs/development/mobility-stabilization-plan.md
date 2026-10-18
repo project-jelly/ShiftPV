@@ -1,5 +1,8 @@
 # Mobility stabilization plan
 
+0.6.13 후속 작업은 [Lifecycle closure stabilization](lifecycle-closure-plan.md)을 따른다.
+아래는 기존 안정화 단계의 설계·진행 기록이다.
+
 상태: 2026-10-15 1단계 [PR #199](https://github.com/project-jelly/ShiftPV/pull/199),
 2A 저장 계약 [PR #200](https://github.com/project-jelly/ShiftPV/pull/200) 머지.
 2B-1 용량/owner 경계 [PR #201](https://github.com/project-jelly/ShiftPV/pull/201) 머지.
