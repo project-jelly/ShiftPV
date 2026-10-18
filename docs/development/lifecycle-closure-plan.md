@@ -22,7 +22,9 @@ successful checks and real API/native Kind partial-creation settlement tests.
 Step 5 admission budget isolation [PR #231](https://github.com/project-jelly/ShiftPV/pull/231)
 merged after 30 successful checks. Bounded deferred discovery
 [PR #232](https://github.com/project-jelly/ShiftPV/pull/232) merged after 30
-successful checks. The remaining matrix and integrated qualification are outstanding.
+successful checks. Independent retirement model and Registry trace mapping
+[PR #233](https://github.com/project-jelly/ShiftPV/pull/233) merged after 30
+successful checks. Integrated qualification is outstanding.
 
 ## Goal and invariants
 
@@ -143,5 +145,7 @@ does not introduce a permanent local fence.
 The Registry trace covers both owners, absent/replaced PVC, Delete/Retain policy
 and each accepted-write loss, with a fresh reconciler each pass. Its effect and
 scanner are injected; it proves API settlement, not native filesystem cleanup or
-subsequent CSI Delete. Native precommit Retain/postcommit Delete and the active
-0.6.13 upgrade transition remain integrated qualification requirements.
+subsequent CSI Delete. The required Kind `retirement` group supplies that layer:
+both owners × Delete/Retain, actual copy/purge, receipt loss and Controller restart,
+later generation-fenced absence, retained payload or normal CSI deletion. The
+active 0.6.13 upgrade transition remains a separate qualification requirement.

@@ -337,7 +337,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [g1, g2, g3, preparation, node-cleanup]
+        group: [g1, g2, g3, preparation, node-cleanup, retirement]
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
@@ -356,6 +356,14 @@ jobs:
           KEEP_CLUSTER: "1"
           KIND_MOBILITY_GROUP: ${{ matrix.group }}
         run: ./test/e2e/kind/mobility/run.sh
+
+      - name: Upload workload retirement evidence
+        if: always() && matrix.group == 'retirement'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: workload-retirement
+          path: .tmp/workload-retirement
+          retention-days: 14
 
       - name: Export failure diagnostics
         if: failure()

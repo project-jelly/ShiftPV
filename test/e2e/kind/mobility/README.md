@@ -16,6 +16,13 @@ then requires real Node NeedsReview, preserved source data and capacity hold.
 The restart suite also replaces a pre-receipt Node while its existing volume
 lock is held; the same operation must complete after the lock is released.
 
+`KIND_MOBILITY_GROUP=retirement` deletes the original PVC before/after owner CAS
+with Delete/Retain policies. Both real copies must exist first. A rejected native
+purge receipt must retain the exact owner and temporary hold across Controller
+restart. Replay, fresh absence, hold/gate/artifact release and normal CSI deletion
+must finish without a `ResumeOwner` request or invented publication. Retain also
+requires the original owner identity, payload and capacity to survive settlement.
+
 `g1` also exercises an early targeted drain with no eligible destination: admission
 holds the replacement, and uncordon must recover that same Pod UID without a Move.
 The ordinary case waits for Move success, cleanup settlement, empty ActiveMove and
@@ -74,7 +81,7 @@ The suites cover these assertions at the relevant boundaries:
 4. exact Pool/Volume/Move/copy/operation identities
 5. correct source and destination capacity holds at every boundary
 6. parent journal/finalizer persistence across Controller, helper and node restart
-7. no source purge before actual destination publication
+7. source purge requires actual destination publication or fenced retired-workload verification
 8. API purge receipt and a later fresh absence proof before completion
 9. no parentless executor or unexplained physical copy after terminal success/recovery
 
