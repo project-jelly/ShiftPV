@@ -97,6 +97,10 @@ Lifecycle closure work follows the [stage/event contracts](lifecycle-closure-pla
 Mobility test clients assign a fresh UID to each created instance. The g3 Kind
 scenario deletes an approved placement while the controller is stopped, observes
 the new API UID, and requires the original PVC/checksum and full Move settlement.
+It also holds the exact Volume's owner commit while recreating the consumer in
+Promoting, then requires the new held Pod to publish after commit. Reconciler
+tests cover recreation during destination publication wait and source cleanup,
+changed binding/owner/Pod UID on retry, and a stored release with a lost response.
 
 테스트 파일은 컴포넌트별로 유지한다. 각 변경은 다음 네 기준에서 검토하며, DI는 관찰·시간·요청
 예산의 실패를 주입한다. 실제 판정·Registry·lock을 연결하는 회귀 테스트도 함께 유지한다.

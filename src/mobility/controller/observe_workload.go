@@ -194,6 +194,33 @@ func (r *Reconciler) observePlacement(ctx context.Context, move volumeapi.Move, 
 	return nil
 }
 
+// recordedWorkloadClaim is the fresh binding check shared by service recovery
+// and release of a consumer on the committed owner. Names alone never rebind it.
+func (r *Reconciler) recordedWorkloadClaim(ctx context.Context, move volumeapi.Move) (*corev1.PersistentVolumeClaim, error) {
+	if move.Status.PersistentVolumeName == "" || move.Status.ClaimNamespace == "" || move.Status.ClaimName == "" {
+		return nil, fmt.Errorf("move has no recorded binding; do not patch Volume status")
+	}
+	pv, err := r.Client.CoreV1().PersistentVolumes().Get(ctx, move.Status.PersistentVolumeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	claim, err := r.Client.CoreV1().PersistentVolumeClaims(move.Status.ClaimNamespace).Get(ctx, move.Status.ClaimName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if !validBinding(pv, claim, move.Spec.VolumeID) || !preparedBindingMatches(move, pv, claim) {
+		return nil, fmt.Errorf("PV/PVC binding or volume handle changed")
+	}
+	namespace, err := r.Client.CoreV1().Namespaces().Get(ctx, claim.Namespace, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if namespace.Labels[admissionNamespaceLabel] != "enabled" {
+		return nil, fmt.Errorf("workload namespace must keep ShiftPV admission enabled")
+	}
+	return claim, nil
+}
+
 // validBinding is the single PV/PVC binding rule. Names can be reused after
 // PVC/namespace deletion while Retain PVs and ShiftPVVolumes survive, so the
 // pair must still be alive, still be this driver's volume, and still reference

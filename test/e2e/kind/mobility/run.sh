@@ -255,6 +255,7 @@ if group_selected g3; then
 	OLD_POD_UID=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.metadata.uid}')
 	SOURCE_NODE=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.spec.nodeName}')
 	CHECKSUM_BEFORE=$(pod_sha256 shiftpv-mobility-test "${OLD_POD}" /data/payload)
+	hold_owner_commit "${VOLUME_ID}"
 
 	if [[ "${SOURCE_NODE}" == "${CLUSTER_NAME}-worker" ]]; then
 		DESTINATION_NODE="${CLUSTER_NAME}-worker2"
@@ -317,6 +318,28 @@ if group_selected g3; then
 					test -n "${recreated_uid}"
 					test "${recreated_uid}" != "${placement_uid}"
 					echo "approved placement recreated: ${placement_uid} -> ${recreated_uid}"
+				elif [[ "${phase}" == Promoting ]]; then
+					controller_down
+					local old_replacement old_replacement_uid replacement_uid="" replacement_deadline
+					old_replacement=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.replacementName}')
+					old_replacement_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.replacementUID}')
+					test -n "${old_replacement_uid}"
+					kubectl -n shiftpv-mobility-test delete "pod/${old_replacement}" --wait=true --timeout=120s
+					controller_up
+					replacement_deadline=$((SECONDS + 120))
+					while ((SECONDS < replacement_deadline)); do
+						test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
+						replacement_uid=$(kubectl -n shiftpv-mobility-test get pods -l app=shiftpv-mobility-wffc -o json |
+							jq -r --arg old "${old_replacement_uid}" '[.items[] | select(.metadata.uid != $old and .metadata.deletionTimestamp == null) |
+							 select(any(.spec.schedulingGates[]?; .name == "shiftpv.io/placement-hold")) | .metadata.uid][0] // empty')
+						[[ -n "${replacement_uid}" ]] && break
+						sleep 0.2
+						done
+					test -n "${replacement_uid}"
+					test "${replacement_uid}" != "${old_replacement_uid}"
+					test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.replacementUID}')" = "${old_replacement_uid}"
+					release_owner_commit
+					echo "consumer recreated before owner commit: ${old_replacement_uid} -> ${replacement_uid}"
 				else
 					kubectl -n shiftpv-system delete "pod/${pod}" --grace-period=0 --force --wait=true
 					kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m

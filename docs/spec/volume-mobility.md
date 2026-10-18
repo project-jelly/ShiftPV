@@ -69,6 +69,14 @@ Cancellation may remove a recreated reservation owned by the exact Move UID.
 Removal uses the current observed Pod UID as a DELETE precondition and waits for
 actual API absence before releasing its hold. Foreign ownership remains a conflict.
 
+A replacement consumer can also be recreated while copying, promoting or waiting
+after commit. On the committed owner, release rechecks the recorded PV/PVC UIDs,
+current copy authority and the observed Pod UID. A new instance must be managed,
+held, unassigned and owned by a live supported workload controller. The same Pod
+update pins the destination and removes only ShiftPV's gate, preserving user
+constraints. Publication wait and source cleanup revisit held replacements;
+recreation does not require returning to the Copying phase or changing owner.
+
 Before switching, settle active legacy work with its compatible old controller
 and helper images. Exclude new work through cutover, run the candidate image's
 read-only `upgrade-check`, and require a complete report with no blockers before
