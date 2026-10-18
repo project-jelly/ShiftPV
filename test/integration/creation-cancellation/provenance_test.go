@@ -10,6 +10,7 @@ import (
 	controllercsi "github.com/project-jelly/ShiftPV/src/csi/controller"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/lifecycle/creationcontroller"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
 	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -161,5 +162,21 @@ func testClaimProvenance(t *testing.T, actorConfig *rest.Config, api dynamic.Int
 	if state.UID != string(created.GetUID()) || !unknown.UnstartedCreation() {
 		t.Fatal("provenance check changed creation approval")
 	}
-	t.Log("PASS real API preserved first-intent provenance, rejected changes/backfill, and rejected same-name replacement")
+	retirement := &creationcontroller.Reconciler{Volumes: registry,
+		Claims: creation.RetirementInspector{Reader: creation.KubernetesRetirementReader{Client: client}},
+		Cancel: &creation.Canceller{Volumes: registry},
+	}
+	if complete, err := retirement.Reconcile(ctx, created.GetName(), state.UID); !complete || err != nil {
+		t.Fatalf("automatic retirement did not settle original spec-only intent: %v %v", complete, err)
+	}
+	if _, err := registry.Get(ctx, created.GetName()); !apierrors.IsNotFound(err) {
+		t.Fatalf("original reservation remained after retirement: %v", err)
+	}
+	if complete, err := retirement.Reconcile(ctx, legacy.GetName(), unknown.UID); !complete || err != nil {
+		t.Fatal(complete, err)
+	}
+	if preserved, err := registry.Get(ctx, legacy.GetName()); err != nil || preserved.UID != unknown.UID || !preserved.UnstartedCreation() {
+		t.Fatalf("retirement adopted unknown history: %+v %v", preserved, err)
+	}
+	t.Log("PASS real API preserved immutable provenance and automatically retired only the ended original incarnation without effects or a future CSI retry")
 }

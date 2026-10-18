@@ -59,8 +59,18 @@ live original PVC before recording `spec.creationClaim` (namespace/name/UID) in
 the first protected intent. The CRD rejects later addition, removal or change.
 Unknown legacy/standalone provenance stays unknown. Pending retries recheck the
 recorded original; Ready replay and normal PV Delete/Retain behavior are unchanged.
-This provenance alone does not request cleanup; automatic claim retirement is a
-separate lifecycle step.
+The creation retirement reconciler observes known, unfinished initial requests.
+It requires the original PVC to be absent, replaced by a different UID, or
+terminating, with no recorded original binding or observed PV handoff. API errors,
+legacy helper responsibility and contradictory state preserve data and accounting.
+Ready Volumes and unknown provenance remain outside automatic retirement.
+
+CSI deletion and automatic retirement share the same creation-only canceller.
+Completion and cancellation compete on the Volume CAS; a Ready winner is never
+converted into normal deletion by this reconciler. A durable cancellation resumes
+after restart without requiring another CreateVolume/DeleteVolume request. Its
+workers use independent bounded API requests and advance resident cleanup without
+waiting for an RPC effect. Settlement continues while provisioning is quiesced.
 
 Explicit cancellation uses `Deleting`, `cancel-create-<VolumeUID>` and cleanup
 reason `CreationCancelled`. It shares the creation lock and verifies serving,
