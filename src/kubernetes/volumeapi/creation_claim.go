@@ -1,14 +1,41 @@
 package volumeapi
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
+
+// CreationReference is a discovery hint only. Callers must re-read and validate
+// the exact Volume before deciding or mutating anything.
+type CreationReference struct{ Name, UID string }
+
+// ListCreationIntents avoids decoding unrelated/damaged Volumes as one batch.
+// A malformed copy or claim can fail its own worker without hiding valid work.
+func (r *Registry) ListCreationIntents(ctx context.Context) ([]CreationReference, error) {
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	list, err := r.Client.Resource(VolumeResource).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var result []CreationReference
+	for _, object := range list.Items {
+		_, known, _ := unstructured.NestedFieldNoCopy(object.Object, "spec", "creationClaim")
+		phase, _, _ := unstructured.NestedString(object.Object, "status", "phase")
+		if known && phase != PhaseReady && object.GetName() != "" && object.GetUID() != "" {
+			result = append(result, CreationReference{Name: object.GetName(), UID: string(object.GetUID())})
+		}
+	}
+	return result, nil
+}
 
 // ClaimReference records the original PVC incarnation before any copy effect.
 // Missing provenance is unknown; a later same-name PVC cannot supply it.

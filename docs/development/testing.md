@@ -71,6 +71,7 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 |---|---|
 | Node creation | copy intent·stage mkdir·placement marker·rename·API receipt 경계의 중단 상태를 실제 Pool reconcile·승인 검사에 연결; inventory 수동 보정 없이 동일 작업으로 복구 |
 | Original creation claim | DI로 live PVC UID·선택 노드·API 오류 검증; 첫 intent 전 영속화, 응답 유실 뒤 재시도, 같은 이름의 새 UID 거절, Ready replay·기존 정보 없음 보존. API primitives에서 CRD pruning 회귀·변경/삭제/뒤늦은 추가 거부 및 정상 취소 확인 |
+| Automatic creation retirement | 실제 Registry/cleanup store로 완료 CAS 승자·취소 응답 유실·재시작·외부 finalizer·정산 전후 예약 확인. PVC 조회 오류·PV 인계·Ready/출처 불명 보존, 막힌 PVC와 독립 작업 진행 검증. API primitives는 같은 이름의 새 UID 뒤 spec-only 자동 정리를, Kind node-rpc는 완료 영수증 차단을 유지한 채 실제 부분 생성 디렉터리 정리를 검증 |
 | Owner commit | CAS 수락 전/후, 응답 유실, stale currentCopy/owner 관찰, 동시 delete/move |
 | Publication | NodePublish lock 획득 전/후, publishedNodes와 actual mount 관찰 차이, kubelet target 잔존, 재시작 |
 | Copy | partial write, ENOSPC, read-only, checksum mismatch, Job 교체, copy receipt 응답 유실 |

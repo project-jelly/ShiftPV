@@ -14,8 +14,10 @@ Unstarted creation cancellation [PR #227](https://github.com/project-jelly/Shift
 merged after required CI and real API deletion-fence qualification. Native partial
 creation cancellation [PR #228](https://github.com/project-jelly/ShiftPV/pull/228)
 merged after 31 successful checks, Linux boundary tests and Kind receipt/absence,
-full source-quota reuse and normal cleanup proof. Original claim provenance is
-under verification; automatic retirement and the remaining matrix are outstanding.
+full source-quota reuse and normal cleanup proof. Original claim provenance
+[PR #229](https://github.com/project-jelly/ShiftPV/pull/229) merged after exact-head
+CI and live API error/provenance qualification. Automatic retirement is under
+verification; the remaining matrix and integrated qualification are outstanding.
 
 ## Goal and invariants
 
@@ -53,8 +55,12 @@ outstanding. Explicit creation cancellation has the following boundaries:
   evidence across serving, create-stage and retired paths. An unplaced stage
   must be empty. Ambiguous data is retained for review.
 - A cleanup receipt and fresh generation-fenced complete absence precede Volume
-  finalization and reservation release. This does not yet detect a missing
-  original PVC automatically.
+  finalization and reservation release.
+- Automatic retirement uses only immutable original-claim provenance, a monotonic
+  end of that PVC incarnation and no PV handoff. Ready completion, unknown source,
+  legacy helper responsibility or an API error never grant cleanup authority.
+  CSI and background retirement share creation-only cancellation and exact cleanup
+  settlement. Background work does not wait for an RPC effect.
 
 | Event | Before execution approval | Approved, before owner CAS | After owner CAS |
 |---|---|---|---|

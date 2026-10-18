@@ -181,9 +181,11 @@ func main() {
 	controllerService.ObserveStep, controllerService.RetryRequests = exporter.ObserveProvisioningStep, capacityRetries
 	identityService := &identity.Service{Version: version}
 
-	errCh := make(chan error, 6)
+	errCh := make(chan error, 7)
 	go func() { errCh <- quiesceGate.Run(ctx) }()
 	go func() { errCh <- poolLifecycleReconciler.Run(ctx) }()
+	creationRetirement := newCreationRetirement(cfg, config, fatal)
+	go func() { errCh <- creationRetirement.Run(ctx) }()
 	go func() {
 		errCh <- csiserver.ServeContext(ctx, cfg.endpoint, func(server *grpc.Server) {
 			csi.RegisterIdentityServer(server, identityService)
