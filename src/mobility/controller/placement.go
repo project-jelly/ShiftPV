@@ -232,10 +232,9 @@ func validatePlacementOwner(pod *corev1.Pod, move volumeapi.Move, names resource
 	if pod.Labels["shiftpv.io/move"] != names.Base || pod.Labels["shiftpv.io/role"] != placementRole {
 		return fmt.Errorf("placement reservation Pod %q labels do not match move", pod.Name)
 	}
-	for _, owner := range pod.OwnerReferences {
-		if owner.APIVersion == "shiftpv.io/v1alpha1" && owner.Kind == "ShiftPVMove" && owner.Name == move.Name && string(owner.UID) == move.UID && move.UID != "" {
-			return nil
-		}
+	owner := metav1.GetControllerOf(pod)
+	if owner != nil && owner.APIVersion == "shiftpv.io/v1alpha1" && owner.Kind == "ShiftPVMove" && owner.Name == move.Name && string(owner.UID) == move.UID && move.UID != "" {
+		return nil
 	}
 	return fmt.Errorf("placement reservation Pod %q is not owned by move %q", pod.Name, move.Name)
 }

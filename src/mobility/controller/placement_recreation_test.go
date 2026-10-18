@@ -157,6 +157,11 @@ func TestPlacementUIDPolicyPreservesPreparationAndForeignOwnership(t *testing.T)
 		if err := validatePlacementIdentity(pod, move, namesFor(move.Name)); (err == nil) != approved {
 			t.Fatalf("approved=%t recreation verdict: %v", approved, err)
 		}
+		pod.OwnerReferences[0].Controller = boolPointer(false)
+		if err := validatePlacementIdentity(pod, move, namesFor(move.Name)); err == nil {
+			t.Fatalf("approved=%t accepted incidental Move ownership", approved)
+		}
+		pod.OwnerReferences[0].Controller = boolPointer(true)
 		pod.OwnerReferences[0].UID = "foreign-move"
 		if err := validatePlacementIdentity(pod, move, namesFor(move.Name)); err == nil {
 			t.Fatalf("approved=%t accepted foreign Move ownership", approved)
