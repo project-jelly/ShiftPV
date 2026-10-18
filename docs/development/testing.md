@@ -328,6 +328,15 @@ the shared budget must stall requests; releasing it must settle all exact
 creation receipts in their own Pool roots. These are dependency-injected
 contracts, not cluster latency measurements.
 
+Controller admission has its own 50 QPS/100 burst budget shared by its typed and
+dynamic readers. `webhook_budget_test.go` exercises the production constructor
+and HTTP `/mutate` path while a background request remains blocked in an inherited
+limiter. The request must still resolve PVC, PV, Volume and owner Node. The same
+suite checks `/validate-delete` with empty/retained dependencies, API denial and
+caller cancellation. Pool safety/quiesce/CSI clients cannot consume this budget;
+each role retains its own bounded client. These tests establish isolation and
+preserved admission policy, not production throughput or a latency percentage.
+
 For a live throughput comparison, enable the existing Node metrics endpoint
 and capture `node_api_effects_wait` and `node_api_effects_roundtrip` histogram
 sum/count before and after the same 20-volume workload. Record API failures and

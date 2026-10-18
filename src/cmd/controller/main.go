@@ -135,15 +135,15 @@ func main() {
 	cfg := parseFlags()
 	clients := wiring.InCluster(fatal)
 	config, client, dynamicClient := clients.Config, clients.Typed, clients.Dynamic
-	admissionClients := wiring.ForConfig(admissionRESTConfig(config), "lifecycle admission", fatal)
-	admissionClient, admissionDynamicClient := admissionClients.Typed, admissionClients.Dynamic
+	lifecycleClients := wiring.ForConfig(admissionRESTConfig(config), "lifecycle auxiliary", fatal)
+	lifecycleClient, lifecycleDynamicClient := lifecycleClients.Typed, lifecycleClients.Dynamic
 	controllerService, csiOperator := newCSILifecycle(cfg, config, fatal)
 	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
 	cleanupStore := &cleanupapi.Store{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	exporter := startMetrics(ctx, cfg, config)
-	permitStore := &uninstallcheck.PermitStore{Client: admissionClient, Namespace: cfg.namespace, Name: cfg.uninstallPermit, CSIDriver: admission.DriverName}
+	permitStore := &uninstallcheck.PermitStore{Client: lifecycleClient, Namespace: cfg.namespace, Name: cfg.uninstallPermit, CSIDriver: admission.DriverName}
 	quiesceGate := &uninstallcheck.QuiesceGate{Store: permitStore, Interval: 200 * time.Millisecond}
 	if err := wiring.BootstrapWithRetry(ctx, "uninstall quiesce state", quiesceGate.Bootstrap); err != nil {
 		klog.Fatalf("bootstrap uninstall quiesce gate: %v", err)
@@ -160,7 +160,7 @@ func main() {
 	apiCapacityProbe := &poolmeasurement.Client{Pools: probePools, Fallback: csiOperator, ObserveStep: exporter.ObserveProvisioningStep}
 	var capacityProbe controllercsi.PoolCapacityProbe = apiCapacityProbe
 	poolLocks := &poolcapacity.Locker{}
-	lifecycleChecker := newLifecycleChecker(cfg, admissionClient, admissionDynamicClient)
+	lifecycleChecker := newLifecycleChecker(cfg, lifecycleClient, lifecycleDynamicClient)
 	poolLifecycleReconciler := &poolcontroller.Reconciler{Pools: volumeRegistry, Safety: lifecycleChecker, Quiesce: permitStore, PoolLocks: poolLocks, Interval: 2 * time.Second}
 	effectClients := wiring.ForConfig(admissionRESTConfig(config), "resident Node effects", fatal)
 	effects := &nodeexecutor.Client{Discovery: nodeexecutor.Discovery{Client: effectClients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet}, Volumes: &volumeapi.Registry{Client: effectClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Inspector: &helperpod.Inspector{Client: effectClients.Typed, Namespace: cfg.namespace}, Timeout: cfg.helperWait}
@@ -204,7 +204,7 @@ func main() {
 		poolLocks:     poolLocks, cleanups: cleanupStore, cleanupOperator: effects, exporter: exporter, errCh: errCh,
 	})
 	defer stopMobility()
-	webhookServer := newWebhookServer(cfg, client, admissionClient, volumeRegistry, lifecycleChecker, certificateManager)
+	webhookServer := newWebhookServer(cfg, config, certificateManager, fatal)
 	go serveWebhook(webhookServer, cfg.webhookAddress, errCh)
 
 	klog.Infof("starting ShiftPV controller %s", version)
@@ -226,18 +226,18 @@ func capacityRetryRESTConfig(config *rest.Config) *rest.Config {
 // Live capacity reads have their own budget for pre/post measurement validation.
 func capacityProbeRESTConfig(config *rest.Config) *rest.Config {
 	probeConfig := admissionRESTConfig(config)
-	probeConfig.RateLimiter = wiring.NewAPIBudget(probeConfig.QPS, probeConfig.Burst)
 	probeConfig.Timeout = 0 // Probe requests have their own context deadline.
 	probeConfig.UserAgent = "shiftpv-capacity-probe"
 	return probeConfig
 }
 
-// admissionRESTConfig is the higher-throughput configuration the lifecycle
-// admission clients run with.
+// Each higher-throughput role owns a bounded API budget, including when the
+// supplied base config already carries another role's limiter.
 func admissionRESTConfig(restConfig *rest.Config) *rest.Config {
 	admissionConfig := rest.CopyConfig(restConfig)
 	admissionConfig.QPS = 50
 	admissionConfig.Burst = 100
+	admissionConfig.RateLimiter = wiring.NewAPIBudget(admissionConfig.QPS, admissionConfig.Burst)
 	return admissionConfig
 }
 
@@ -245,7 +245,6 @@ func admissionRESTConfig(restConfig *rest.Config) *rest.Config {
 // are injected by main; background observation retains its separate clients.
 func newCSILifecycle(cfg config, restConfig *rest.Config, fail wiring.Fail) (*controllercsi.Service, *helperpod.Runner) {
 	lifecycleConfig := admissionRESTConfig(restConfig)
-	lifecycleConfig.RateLimiter = wiring.NewAPIBudget(lifecycleConfig.QPS, lifecycleConfig.Burst)
 	lifecycleConfig.UserAgent = "shiftpv-csi-lifecycle"
 	clients := wiring.ForConfig(lifecycleConfig, "CSI lifecycle", fail)
 	volumes := &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
@@ -294,8 +293,7 @@ func newHelperRunner(cfg config, client kubernetes.Interface, pools *volumeapi.R
 	}
 }
 
-// newLifecycleChecker builds the uninstall safety checker the Pool lifecycle
-// reconciler and the delete-validating webhook share.
+// newLifecycleChecker builds the safety policy with the caller's own API role.
 func newLifecycleChecker(cfg config, admissionClient kubernetes.Interface, admissionDynamicClient dynamic.Interface) *uninstallcheck.Checker {
 	return &uninstallcheck.Checker{
 		Client: admissionClient, Volumes: &volumeapi.Registry{Client: admissionDynamicClient, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}, Cleanups: &cleanupapi.Store{Client: admissionDynamicClient}, StorageClassNames: cfg.storageClassNames.Values("shiftpv"), Namespace: cfg.namespace,
@@ -362,14 +360,18 @@ func startMobility(ctx context.Context, cfg config, components mobilityComponent
 	return eventBroadcaster.Shutdown
 }
 
-// newWebhookServer builds the admission HTTPS server serving the mobility
-// mutation, the lifecycle delete validation and the health endpoint.
-func newWebhookServer(cfg config, client kubernetes.Interface, admissionClient kubernetes.Interface, volumes *volumeapi.Registry,
-	lifecycleChecker *uninstallcheck.Checker, certificateManager *webhookcertificate.Manager) *http.Server {
+// newWebhookServer owns the API budget for all admission reads. Background Pool
+// safety, quiesce, discovery and CSI never consume this limiter.
+func newWebhookServer(cfg config, config *rest.Config, certificateManager *webhookcertificate.Manager, fail wiring.Fail) *http.Server {
+	admissionConfig := admissionRESTConfig(config)
+	admissionConfig.UserAgent = "shiftpv-admission"
+	clients := wiring.ForConfig(admissionConfig, "webhook admission", fail)
+	volumes := &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
+	lifecycleChecker := newLifecycleChecker(cfg, clients.Typed, clients.Dynamic)
 	mux := http.NewServeMux()
-	mux.Handle("/mutate", &admission.Handler{Client: client, Volumes: volumes})
+	mux.Handle("/mutate", &admission.Handler{Client: clients.Typed, Volumes: volumes})
 	mux.Handle("/validate-delete", &lifecycleadmission.Handler{Checker: lifecycleChecker,
-		Permit:            &uninstallcheck.PermitStore{Client: admissionClient, Namespace: cfg.namespace, Name: cfg.uninstallPermit, CSIDriver: admission.DriverName},
+		Permit:            &uninstallcheck.PermitStore{Client: clients.Typed, Namespace: cfg.namespace, Name: cfg.uninstallPermit, CSIDriver: admission.DriverName},
 		TrustedController: "system:serviceaccount:" + cfg.namespace + ":" + cfg.controllerServiceAccount})
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	return &http.Server{Addr: cfg.webhookAddress, Handler: mux, ReadHeaderTimeout: 5 * time.Second, TLSConfig: certificateManager.TLSConfig()}
