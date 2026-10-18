@@ -31,14 +31,18 @@ type volumeWork struct {
 	volumeID  string
 	volumeUID string
 	discover  bool
+	source    discoverySource
 	moves     []moveReference
 	ownerPods []podReference
 }
 
 type volumeDispatcher struct {
-	mu    sync.Mutex
-	hints map[string]volumeWork
-	queue workqueue.TypedRateLimitingInterface[string]
+	mu         sync.Mutex
+	hints      map[string]volumeWork
+	queue      workqueue.TypedRateLimitingInterface[string]
+	deferred   map[string]deferredDiscovery
+	retryAfter time.Duration
+	now        func() time.Time
 }
 
 func (d *volumeDispatcher) publish(work volumeWork) {
@@ -48,19 +52,33 @@ func (d *volumeDispatcher) publish(work volumeWork) {
 	d.queue.Add(work.volumeID)
 }
 
-func (d *volumeDispatcher) snapshot(id string) volumeWork {
+func (d *volumeDispatcher) snapshot(id string) (volumeWork, time.Duration) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	work := d.hints[id]
 	work.moves = slices.Clone(work.moves)
 	work.ownerPods = slices.Clone(work.ownerPods)
-	return work
+	if previous, exists := d.deferred[id]; exists {
+		if work.discover && work.source == previous.source {
+			if remaining := previous.until.Sub(d.now()); remaining > 0 {
+				work.discover = false
+				return work, remaining
+			}
+		}
+		delete(d.deferred, id)
+	}
+	return work, 0
 }
 
 func (d *volumeDispatcher) replace(hints map[string]volumeWork) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.hints = hints
+	for id, previous := range d.deferred {
+		if work := hints[id]; !work.discover || work.source != previous.source {
+			delete(d.deferred, id)
+		}
+	}
 }
 
 func mergeVolumeWork(current, next volumeWork) volumeWork {
@@ -69,6 +87,9 @@ func mergeVolumeWork(current, next volumeWork) volumeWork {
 		current.volumeUID = next.volumeUID
 	}
 	current.discover = current.discover || next.discover
+	if next.discover {
+		current.source = next.source
+	}
 	for _, ref := range next.moves {
 		if !slices.Contains(current.moves, ref) {
 			current.moves = append(current.moves, ref)
@@ -89,11 +110,16 @@ func (r *Reconciler) reconcileInterval() time.Duration {
 	return 2 * time.Second
 }
 
-func (r *Reconciler) runVolumes(ctx context.Context) error {
-	d := &volumeDispatcher{
-		hints: map[string]volumeWork{},
-		queue: workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
+func (r *Reconciler) newVolumeDispatcher() *volumeDispatcher {
+	return &volumeDispatcher{
+		hints:    map[string]volumeWork{},
+		queue:    workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
+		deferred: map[string]deferredDiscovery{}, retryAfter: r.reconcileInterval(), now: r.now,
 	}
+}
+
+func (r *Reconciler) runVolumes(ctx context.Context) error {
+	d := r.newVolumeDispatcher()
 	observations := newDiscoveryObservations(r.ObserveDiscovery)
 	var workers sync.WaitGroup
 	for range mobilityWorkers {
@@ -132,20 +158,33 @@ func (r *Reconciler) volumeWorker(ctx context.Context, d *volumeDispatcher, obse
 			return
 		}
 		if ctx.Err() == nil {
-			result, err := r.advanceVolume(ctx, d.snapshot(id))
-			observations.record(id, result)
-			switch {
-			case errors.Is(err, errPoolBusy), errors.Is(err, ErrCapacityProbePending):
-				d.queue.Forget(id)
-				d.queue.AddAfter(id, r.reconcileInterval())
-			case err != nil:
-				klog.ErrorS(err, "reconcile ShiftPV mobility Volume", "volume", id)
-				d.queue.AddRateLimited(id)
-			default:
-				d.queue.Forget(id)
-			}
+			r.processVolume(ctx, d, id, observations)
 		}
 		d.queue.Done(id)
+	}
+}
+
+func (r *Reconciler) processVolume(ctx context.Context, d *volumeDispatcher, id string, observations *discoveryObservations) {
+	work, remaining := d.snapshot(id)
+	if remaining > 0 {
+		// An older delayed entry for this reusable name may have fired before
+		// the current source's deadline. Always preserve the remaining retry.
+		d.queue.AddAfter(id, remaining)
+	}
+	result, err := r.advanceVolume(ctx, work)
+	if delay := d.deferDiscovery(work, result); delay > 0 {
+		d.queue.AddAfter(id, delay)
+	}
+	observations.record(id, result)
+	switch {
+	case errors.Is(err, errPoolBusy), errors.Is(err, ErrCapacityProbePending):
+		d.queue.Forget(id)
+		d.queue.AddAfter(id, r.reconcileInterval())
+	case err != nil:
+		klog.ErrorS(err, "reconcile ShiftPV mobility Volume", "volume", id)
+		d.queue.AddRateLimited(id)
+	default:
+		d.queue.Forget(id)
 	}
 }
 

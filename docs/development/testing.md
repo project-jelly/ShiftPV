@@ -144,6 +144,7 @@ changed binding/owner/Pod UID on retry, and a stored release with a lost respons
 | `e2e/kind/mobility/native-cleanup.sh` (node-cleanup) | 실제 API receipt 거절·commit 이후 drain·Node/controller 교체 뒤 같은 operation과 local receipt 재사용, fresh absence 후 완료·PVC/PV/checksum 보존 |
 | `mobility/controller`: `owner_placement_test.go`, `owner_placement_boundary_test.go` | 실제 admission patch → Move 생성 전 uncordon·controller 재시작 → ReplicaSet/VMI owner의 같은 Pod gate 회수; ownerRef·사용자 제약 보존, 충돌 뒤 UID/binding 재검증. 실제 VM 실행 시험은 아님 |
 | `mobility/controller`: `dispatcher_boundary_test.go`, `dispatch_scan_test.go`, `discovery_observations_test.go` | 실제 Registry/RV CAS + A의 API 대기 중 B 진행·동일 Volume 직렬화·재시작 relist; stale UID/잘못된 lane 거절·terminal GC·통계 합산 |
+| `mobility/controller`: `discovery_schedule_test.go` | fake clock + 실제 Registry로 보류 만료 뒤 live binding 재검증, 재시작·UID/owner/copy/Node 교체·API 오류·동일 lane Move 진행·coordinator 없는 타이머 재시도. 재사용 이름의 이른 타이머가 다음 재시도를 잃는 회귀도 검증 |
 | `pool/capacity`: `locker_test.go`; `mobility/controller`: `pool_busy_test.go`, `ledger_handoff_test.go` | 공유 Lock/TryLock 상호배제, busy 중 placement/hold 보존, fresh retry·owner CAS·용량 원장 경계 |
 | `node/executor`: `watch_progress_linux_test.go` | 실제 Node watch·파일 효과 + A cleanup 대기 중 독립 Pool B 생성, A 재개 뒤 exact receipt 정산 |
 | `e2e/kind/mobility/preflight.sh` (g1) | 격리된 workload selector로 early drain → held replacement → uncordon 후 같은 Pod UID Ready·Move 미생성; 정상 이동·cleanup·activeMove 정산 후 빈 source 대상 drain → destination Pod/PVC/PV/Volume/Move identity와 고유 checksum 보존 |
@@ -327,6 +328,20 @@ registered Pool identities and 20 volumes with real REST clients: exhausting
 the shared budget must stall requests; releasing it must settle all exact
 creation receipts in their own Pool roots. These are dependency-injected
 contracts, not cluster latency measurements.
+
+The running mobility dispatcher delays only repeated discovery with a known
+deferral, for the configured reconciliation interval. It retains a next-attempt
+time and routing identity, never an approval. Volume UID, owner/copy or Node UID
+changes invalidate the delay; workload/PVC policy changes are rechecked when the
+interval expires. Move and held-Pod work continues in the same lane. Timers retry
+without another coordinator wake, and restart discards the process-local delay.
+An explicit synchronous `ReconcileAll` still performs fresh inspection.
+
+In the DI API-cost regression, four unchanged deferred Volumes undergo 20 complete
+scan/work cycles inside one 30-second interval: API reads fall from 900 to 140,
+with no writes. Both modes execute the production Registry/dispatcher path; the
+baseline disables only the scheduling delay. This measures request amplification
+for that trace, not production latency or throughput.
 
 Controller admission has its own 50 QPS/100 burst budget shared by its typed and
 dynamic readers. `webhook_budget_test.go` exercises the production constructor
