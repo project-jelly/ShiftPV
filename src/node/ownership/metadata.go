@@ -194,7 +194,8 @@ func (s *Store) completedReclaim(name string) (Receipt, bool) {
 		return r, false
 	}
 	valid := r.Retired && r.Purged && r.Target.Validate() == nil && r.Target.InstallationID == s.pool.InstallationID &&
-		volume.ValidIdentityToken(r.OperationID) && name == operationMarker("receipt", r.OperationID) && r.Device != 0 && r.Inode != 0
+		volume.ValidIdentityToken(r.OperationID) && name == operationMarker("receipt", r.OperationID) &&
+		(r.Device != 0 && r.Inode != 0 || r.Device == 0 && r.Inode == 0 && volume.IsCreationCancellation(r.Target, r.OperationID))
 	return r, valid
 }
 func (s *Store) reclaimRecordExpired(receipt Receipt, now time.Time, retention time.Duration) bool {

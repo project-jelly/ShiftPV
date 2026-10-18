@@ -5,7 +5,10 @@ import (
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
+	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/volume"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -74,5 +77,80 @@ func TestUnstartedCreationCanSettleWithoutFilesystemEffects(t *testing.T) {
 	assertInitialReservation(t, registry, "pool-a-uid", 0)
 	if service.Operator.(*fakeDirectoryOperator).createCalls != 0 {
 		t.Fatal("cancellation invented a creation effect")
+	}
+}
+
+func TestPendingCreationCanFenceCleanupWithoutBecomingReady(t *testing.T) {
+	ctx := context.Background()
+	api, registry, newService, _ := initializationFixture(t)
+	api.PrependReactor("update", "shiftpvpools", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() == "" {
+			object := a.(k8stesting.UpdateAction).GetObject().(*unstructured.Unstructured)
+			object.SetGeneration(object.GetGeneration() + 1)
+		}
+		return false, nil, nil
+	})
+	id := "shiftpv-0123456789abcdef0123456789abcdef"
+	before, err := registry.BeginCreateInPool(ctx, id, "pvc-cancel", "worker-a", 64<<20, "pool-a", "pool-a-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newService()
+	s.CreationInspector = &helperpod.Inspector{Client: s.Client, Namespace: s.Namespace}
+	cleanup := &verifyingCleanupOperator{}
+	s.CleanupOperator = cleanup
+	if _, err := s.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("unfinished creation did not reach receipt/absence settlement: %v", err)
+	}
+	after, err := registry.Get(ctx, id)
+	if err != nil || after.UID != before.UID || !after.CancellingCreation() || after.CreationReceipt != nil {
+		t.Fatalf("cancellation identity/fence=%+v err=%v", after, err)
+	}
+	journal, err := s.Cleanups.Get(ctx, cleanupapi.Authority{Kind: "ShiftPVVolume", Name: id, UID: before.UID})
+	if err != nil || journal.Spec.Reason != "CreationCancelled" || cleanup.calls != 1 {
+		t.Fatalf("cancellation journal=%+v calls=%d err=%v", journal, cleanup.calls, err)
+	}
+	assertInitialReservation(t, registry, "pool-a-uid", 64<<20)
+}
+
+type creationInspectorFunc func(context.Context, volume.CopyIdentity) (bool, error)
+
+func (f creationInspectorFunc) CreationExists(ctx context.Context, copy volume.CopyIdentity) (bool, error) {
+	return f(ctx, copy)
+}
+
+func TestCreationCancellationPreservesLegacyOrUnknownResponsibility(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		inspect creationInspectorFunc
+		code    codes.Code
+	}{
+		{"unconfigured", nil, codes.Unavailable},
+		{"legacy helper", func(context.Context, volume.CopyIdentity) (bool, error) { return true, nil }, codes.FailedPrecondition},
+		{"unknown API observation", func(context.Context, volume.CopyIdentity) (bool, error) {
+			return false, apierrors.NewTimeoutError("lookup failed", 1)
+		}, codes.Unavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, registry, newService, _ := initializationFixture(t)
+			ctx := context.Background()
+			id := "shiftpv-0123456789abcdef0123456789abcdef"
+			initial, err := registry.BeginCreateInPool(ctx, id, "pvc-cancel", "worker-a", 64<<20, "pool-a", "pool-a-uid")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := newService()
+			if test.inspect != nil {
+				s.CreationInspector = test.inspect
+			}
+			if _, err := s.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: id}); status.Code(err) != test.code {
+				t.Fatalf("DeleteVolume: %v", err)
+			}
+			after, err := registry.Get(ctx, id)
+			if err != nil || after.UID != initial.UID || after.Phase != volumeapi.PhasePending || after.DeletionOperationID != "" || after.HasCleanup || after.CreationReceipt != nil {
+				t.Fatalf("unknown responsibility mutated: %+v err=%v", after, err)
+			}
+			assertInitialReservation(t, registry, "pool-a-uid", 64<<20)
+		})
 	}
 }

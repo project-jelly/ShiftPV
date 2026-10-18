@@ -174,6 +174,7 @@ func main() {
 		capacityProbe = &remotemeasurement.Client{RPC: rpc, Discovery: effects.Discovery, Pools: probePools, Fallback: capacityProbe, ObserveStep: exporter.ObserveProvisioningStep}
 	}
 	controllerService.Operator, controllerService.CleanupOperator = effects, effects
+	controllerService.CreationInspector = effects.Inspector
 	controllerService.CapacityProbe, controllerService.PoolLocks = capacityProbe, poolLocks
 	controllerService.ProvisioningGate = quiesceGate
 	controllerService.ObserveStep, controllerService.RetryRequests = exporter.ObserveProvisioningStep, capacityRetries

@@ -46,6 +46,7 @@ type VolumeRegistry interface {
 	Delete(context.Context, string, string) error
 	RemoveVolumeFinalizer(context.Context, string, string) error
 	CancelUnstartedCreation(context.Context, string, string) error
+	BeginCreationCancellation(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error)
 	PoolNodes(context.Context) ([]string, error)
 	PoolNodesForGroup(context.Context, string) ([]string, error)
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
@@ -65,10 +66,13 @@ type cleanupOperator interface {
 
 type Service struct {
 	csi.UnimplementedControllerServer
-	Client                  kubernetes.Interface
-	Namespace               string
-	Operator                DirectoryOperator
-	Volumes                 VolumeRegistry
+	Client            kubernetes.Interface
+	Namespace         string
+	Operator          DirectoryOperator
+	Volumes           VolumeRegistry
+	CreationInspector interface {
+		CreationExists(context.Context, volume.CopyIdentity) (bool, error)
+	}
 	ConsumerPlacement       consumer.Inspection
 	CapacityPools           PoolCapacityRegistry
 	CapacityProbe           PoolCapacityProbe

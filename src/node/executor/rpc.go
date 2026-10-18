@@ -61,7 +61,7 @@ func (n *Node) VerifyRPC(ctx context.Context) error {
 }
 
 func (n *Node) creationRPC(state volumeapi.State, req *protocol.EffectRequest) (bool, error) {
-	if state.CreationOperationID != req.OperationId || state.CreationExecutor == nil || *state.CreationExecutor != n.Identity {
+	if state.CreationOperationID != req.OperationId || state.CreationExecutor == nil || *state.CreationExecutor != n.Identity || state.DeletionOperationID != "" || state.HasCleanup {
 		return false, volumeapi.ErrStateConflict
 	}
 	if volumeapi.ValidCreationReceipt(state) {

@@ -22,6 +22,13 @@ func VerifyCleanupAuthority(ctx context.Context, registry *volumeapi.Registry, c
 			state.Phase != volumeapi.PhaseDeleting || state.DeletionOperationID != cleanup.Spec.OperationID || state.ActiveMove != "" || len(state.PublishedNodes) != 0 {
 			return fmt.Errorf("volume cleanup authority changed: %w", volumeapi.ErrStateConflict)
 		}
+		if cleanup.Spec.Reason == "CreationCancelled" {
+			if !state.CancellingCreation() {
+				return volumeapi.ErrStateConflict
+			}
+		} else if cleanup.Spec.Reason != "VolumeDelete" || state.DeletionOperationID == volume.CreationCancellationPrefix+state.UID {
+			return volumeapi.ErrStateConflict
+		}
 		return nil
 	case "ShiftPVMove":
 		return verifyMoveCleanupAuthority(ctx, registry, cleanup)

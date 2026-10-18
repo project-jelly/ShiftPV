@@ -42,6 +42,20 @@ func setVolumeStateFixture(t *testing.T, client dynamic.Interface, volumeID stri
 		}
 		status["currentCopy"] = encoded
 	}
+	if state.CreationExecutor != nil {
+		encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(state.CreationExecutor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status["creationExecutor"] = encoded
+	}
+	if state.CreationReceipt != nil {
+		encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(state.CreationReceipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status["creationReceipt"] = encoded
+	}
 	object.Object["status"] = status
 	if _, err := resource.UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update ShiftPVVolume fixture: %v", err)

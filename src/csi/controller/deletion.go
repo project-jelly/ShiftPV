@@ -38,7 +38,7 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		}
 		return &csi.DeleteVolumeResponse{}, nil
 	}
-	fenced, fenceErr := s.Volumes.BeginDelete(ctx, req.GetVolumeId(), volumeState.UID, *volumeState.CurrentCopy)
+	fenced, fenceErr := s.fenceDeletion(ctx, req.GetVolumeId(), volumeState)
 	if fenceErr != nil {
 		return nil, deletionAdmissionError(fenceErr)
 	}
@@ -52,6 +52,23 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 		return nil, kubernetesAPIError("release settled volume cleanup protection", err)
 	}
 	return &csi.DeleteVolumeResponse{}, nil
+}
+
+func (s *Service) fenceDeletion(ctx context.Context, id string, state volumeapi.State) (volumeapi.State, error) {
+	if !state.CancellableCreation() && !state.CancellingCreation() {
+		return s.Volumes.BeginDelete(ctx, id, state.UID, *state.CurrentCopy)
+	}
+	if s.CreationInspector == nil {
+		return volumeapi.State{}, status.Error(codes.Unavailable, "creation executor inspection is unavailable")
+	}
+	exists, err := s.CreationInspector.CreationExists(ctx, *state.CurrentCopy)
+	if err != nil {
+		return volumeapi.State{}, kubernetesAPIError("inspect creation responsibility before cancellation", err)
+	}
+	if exists {
+		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "legacy creation helper responsibility must settle before cancellation")
+	}
+	return s.Volumes.BeginCreationCancellation(ctx, id, state.UID, *state.CurrentCopy)
 }
 
 // deletableState reads the live volume state and reports whether a deletion
@@ -84,7 +101,7 @@ func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenc
 	cleanup, ensureErr := s.Cleanups.Ensure(ctx, cleanupapi.Spec{
 		OperationID: fenced.DeletionOperationID,
 		Target:      *fenced.CurrentCopy,
-		Reason:      "VolumeDelete",
+		Reason:      volumeCleanupReason(fenced),
 		Authority: cleanupapi.Authority{
 			Kind: "ShiftPVVolume", Name: volumeID, UID: fenced.UID,
 		},
@@ -122,8 +139,18 @@ func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenc
 	return nil
 }
 
+func volumeCleanupReason(state volumeapi.State) string {
+	if state.CancellingCreation() {
+		return "CreationCancelled"
+	}
+	return "VolumeDelete"
+}
+
 // deletionAdmissionError is the CSI retry policy for repository admission.
 func deletionAdmissionError(err error) error {
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
 	if errors.Is(err, volumeapi.ErrVolumeFinalizersPending) {
 		return status.Errorf(codes.Unavailable, "wait for other Volume protections before cancellation: %v", err)
 	}
