@@ -45,7 +45,7 @@ func (r *Reconciler) observeRecovery(ctx context.Context, move volumeapi.Move) (
 	if err := r.recoveryNodes(ctx, move, state); err != nil {
 		return result, recoveryObservationError{"NodeNotReady", err}
 	}
-	claim, err := r.recoveryClaim(ctx, move)
+	claim, err := r.recordedWorkloadClaim(ctx, move)
 	if err != nil {
 		return result, recoveryObservationError{"BindingMismatch", err}
 	}
@@ -154,32 +154,6 @@ func (r *Reconciler) recoveryNodes(ctx context.Context, move volumeapi.Move, sta
 		}
 	}
 	return nil
-}
-
-func (r *Reconciler) recoveryClaim(ctx context.Context, move volumeapi.Move) (*corev1.PersistentVolumeClaim, error) {
-	if move.Status.PersistentVolumeName == "" || move.Status.ClaimNamespace == "" || move.Status.ClaimName == "" {
-		return nil, fmt.Errorf("move has no recorded binding; do not patch Volume status")
-	}
-	pv, err := r.Client.CoreV1().PersistentVolumes().Get(ctx, move.Status.PersistentVolumeName, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	claim, err := r.Client.CoreV1().PersistentVolumeClaims(move.Status.ClaimNamespace).Get(ctx, move.Status.ClaimName, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	if !validBinding(pv, claim, move.Spec.VolumeID) ||
-		!preparedBindingMatches(move, pv, claim) {
-		return nil, fmt.Errorf("PV/PVC binding or volume handle changed")
-	}
-	namespace, err := r.Client.CoreV1().Namespaces().Get(ctx, claim.Namespace, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	if namespace.Labels[admissionNamespaceLabel] != "enabled" {
-		return nil, fmt.Errorf("workload namespace must keep ShiftPV admission enabled")
-	}
-	return claim, nil
 }
 
 // Do not edit workload templates, bypass PDBs, or re-add a removed scheduling gate.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
+	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,30 +79,34 @@ func (r *Reconciler) releasePlacement(ctx context.Context, move *volumeapi.Move,
 			}
 			return err
 		}
-		if pod.UID != uid || (move.Status.ReplacementUID != "" && string(pod.UID) != move.Status.ReplacementUID) {
+		if pod.UID != uid {
 			return fmt.Errorf("replacement Pod identity changed before placement release")
 		}
-		if pod.Spec.NodeSelector["kubernetes.io/hostname"] != move.Status.DestinationNode {
-			return fmt.Errorf("replacement Pod is not pinned to destination %q", move.Status.DestinationNode)
-		}
-		gates := pod.Spec.SchedulingGates[:0]
-		for _, gate := range pod.Spec.SchedulingGates {
-			if gate.Name != placementHoldName {
-				gates = append(gates, gate)
-			}
-		}
-		if len(gates) == len(pod.Spec.SchedulingGates) {
-			if pod.Annotations[placementAnnotationKey] == "owner" {
-				return nil
-			}
-			if pod.Annotations == nil {
-				pod.Annotations = map[string]string{}
-			}
-			pod.Annotations[placementAnnotationKey] = "owner"
-			_, err = r.Client.CoreV1().Pods(namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		if err := r.validateReplacementRelease(ctx, *move, pod); err != nil {
 			return err
 		}
-		pod.Spec.SchedulingGates = gates
+		selected := pod.Spec.NodeSelector[corev1.LabelHostname]
+		if selected != "" && selected != move.Status.DestinationNode {
+			return fmt.Errorf("replacement Pod requires node %q, not committed destination %q", selected, move.Status.DestinationNode)
+		}
+		if !hasPlacementHold(pod) {
+			if selected == move.Status.DestinationNode && pod.Annotations[placementAnnotationKey] == "owner" {
+				return nil
+			}
+			return fmt.Errorf("replacement Pod no longer has the placement hold")
+		}
+		if pod.DeletionTimestamp != nil || pod.Spec.NodeName != "" {
+			return fmt.Errorf("replacement Pod is not safely held before scheduling")
+		}
+		if pod.Spec.NodeSelector == nil {
+			pod.Spec.NodeSelector = map[string]string{}
+		}
+		// Pin and release in one RV-fenced update; a recreated consumer never
+		// becomes schedulable between these two effects.
+		pod.Spec.NodeSelector[corev1.LabelHostname] = move.Status.DestinationNode
+		pod.Spec.SchedulingGates = slices.DeleteFunc(pod.Spec.SchedulingGates, func(gate corev1.PodSchedulingGate) bool {
+			return gate.Name == placementHoldName
+		})
 		if pod.Annotations == nil {
 			pod.Annotations = map[string]string{}
 		}
@@ -111,6 +117,37 @@ func (r *Reconciler) releasePlacement(ctx context.Context, move *volumeapi.Move,
 		return fmt.Errorf("release replacement Pod placement hold: %w", err)
 	}
 	move.Status.ReplacementName = name
+	move.Status.ReplacementUID = string(uid)
+	return nil
+}
+
+func (r *Reconciler) validateReplacementRelease(ctx context.Context, move volumeapi.Move, pod *corev1.Pod) error {
+	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
+	if err != nil {
+		return err
+	}
+	if !hasCommittedDestinationAuthority(move, state, false) {
+		return fmt.Errorf("placement release requires the exact committed destination authority")
+	}
+	claim, err := r.recordedWorkloadClaim(ctx, move)
+	if err != nil {
+		return err
+	}
+	if pod.Namespace != claim.Namespace || len(pvcNames(pod.Spec)) != 1 || !podUsesClaim(pod, claim.Name) {
+		return fmt.Errorf("replacement Pod no longer uses the recorded claim exclusively")
+	}
+	if string(pod.UID) != move.Status.ReplacementUID {
+		if !ownerPlacementCandidate(pod) {
+			return fmt.Errorf("recreated replacement Pod is not managed and safely held")
+		}
+		_, reason, err := r.consumerTemplate(ctx, pod)
+		if err != nil {
+			return fmt.Errorf("observe recreated replacement controller: %w", err)
+		}
+		if reason != "" {
+			return fmt.Errorf("recreated replacement controller is unavailable: %s", reason)
+		}
+	}
 	return nil
 }
 

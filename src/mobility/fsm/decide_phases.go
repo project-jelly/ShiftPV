@@ -155,6 +155,9 @@ func decideWaitingForDestinationPublish(current Phase, observation Observation) 
 	if observation.DestinationUnavailable {
 		return transition(current, current, ActionWait, "DestinationUnavailable")
 	}
+	if observation.ReplacementExists && observation.ReplacementHeld {
+		return transition(current, current, ActionReleasePlacement, "")
+	}
 	if !observation.PublishedOnDestination {
 		return transition(current, current, ActionWait, "")
 	}
@@ -167,6 +170,9 @@ func decideCleaningSource(current Phase, observation Observation) (Decision, err
 	}
 	if observation.CleanupFailed {
 		return blockedWith(observation, "CleanupFailed"), nil
+	}
+	if observation.ReplacementExists && observation.ReplacementHeld {
+		return transition(current, current, ActionReleasePlacement, "")
 	}
 	if observation.CleanupComplete {
 		return transition(current, PhaseCompleting, ActionConfirmCleanup, "")

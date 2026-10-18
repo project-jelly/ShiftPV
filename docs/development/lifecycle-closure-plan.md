@@ -2,6 +2,10 @@
 
 Status: in progress, based on chart 0.6.13 (`9b4b768`).
 
+Step 1 placement/cancellation: [PR #222](https://github.com/project-jelly/ShiftPV/pull/222)
+merged; exact-head CI and local two-node Kind passed. Consumer replacement
+release is the remaining step 1 change.
+
 ## Goal and invariants
 
 Once a supported fault recovers and external changes stop, the operation must
