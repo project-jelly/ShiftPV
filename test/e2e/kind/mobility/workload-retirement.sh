@@ -80,6 +80,9 @@ wait_for_boundary() {
 		move=$(kubectl get "shiftpvmove/${MOVE}" -o json)
 		jq -e --arg uid "${VOLUME_UID}" '.metadata.uid == $uid' <<<"${object}" >/dev/null
 		if ! jq -e '.status.capacityApproved and .status.destinationCopy != null and .spec.recovery == null' <<<"${move}" >/dev/null; then sleep 1; continue; fi
+		jq -e --arg claim "${PVC_UID}" --arg pv "${PV}" --arg ns "${NS}" --argjson copy "${ORIGINAL_COPY}" '
+		 .status.claimUID == $claim and .status.claimName == "wffc" and .status.claimNamespace == $ns and
+		 .status.persistentVolumeName == $pv and .status.sourceCopy == $copy' <<<"${move}" >/dev/null
 		destination=$(jq -er '.status.destinationNode' <<<"${move}")
 		destination_mount=$(pool_mount_for_node "${destination}")
 		if [[ "${BOUNDARY}" == precommit ]]; then
@@ -236,6 +239,7 @@ for BOUNDARY in precommit postcommit; do
 		VOLUME=$(kubectl get "pv/${PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 		VOLUME_UID=$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.metadata.uid}')
 		SOURCE=$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.ownerNode}')
+		ORIGINAL_COPY=$(kubectl get "shiftpvvolume/${VOLUME}" -o json | jq -c '.status.currentCopy')
 		# shellcheck disable=SC2016
 		kubectl -n "${NS}" exec deployment/wffc -- sh -ec 'printf "%s\n" "$1" > /data/payload; sync' sh "retirement-${VOLUME_UID}"
 		CHECKSUM=$(pod_sha256 "${NS}" deployment/wffc /data/payload)
