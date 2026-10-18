@@ -70,6 +70,21 @@ func setMoveStatusFixture(t *testing.T, client dynamic.Interface, name string, s
 		"copyOperationID": state.CopyOperationID, "copyJobName": state.CopyJobName,
 		"promotionOperationID": state.PromotionOperationID, "promotionJobName": state.PromotionJobName,
 	}
+	for field, value := range map[string]string{
+		"persistentVolumeName": state.PersistentVolumeName, "persistentVolumeUID": state.PersistentVolumeUID,
+		"persistentVolumeClaimNamespace": state.ClaimNamespace, "persistentVolumeClaimName": state.ClaimName,
+		"persistentVolumeClaimUID": state.ClaimUID, "consumerName": state.ConsumerName, "consumerUID": state.ConsumerUID,
+	} {
+		if value != "" {
+			status[field] = value
+		}
+	}
+	if state.SettlementRequested {
+		status["settlementRequested"] = true
+	}
+	if state.RollbackRequiredGeneration > 0 {
+		status["rollbackRequiredGeneration"] = state.RollbackRequiredGeneration
+	}
 	for field, copy := range map[string]*volume.CopyIdentity{"sourceCopy": state.SourceCopy, "incomingCopy": state.IncomingCopy, "destinationCopy": state.DestinationCopy} {
 		if copy == nil {
 			continue

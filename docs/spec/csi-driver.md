@@ -148,7 +148,8 @@ Volume Ready + activeMove (source hold and publication retained)
 
 Pre-commit에는 Volume이 source capacity를, Move가 destination capacity를 소유한다. Commit에서는 Volume의
 current owner와 `currentCopy`를 destination으로 전환하고 Move가 retained source의 hold를 이어받는다.
-Destination publish가 실제 mount로 확인되기 전에는 source cleanup을 시작하지 않는다. Abort도 destination
+서비스를 계속할 때는 destination publish가 실제 mount로 확인되기 전에는 source cleanup을 시작하지 않는다.
+원본 PVC UID가 끝난 경우는 별도의 [workload retirement](volume-mobility.md#workload-retirement) 증거를 요구한다. Abort도 destination
 effect의 API receipt와 fresh absence proof 전에는 destination hold를 해제하지 않는다.
 
 어느 단계에서도 source와 destination의 동시 writable publication을 허용하지 않는다. stale, invalid,

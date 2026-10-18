@@ -76,6 +76,7 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | Promotion | rename 전/후, file/tree fsync 실패, marker mismatch, process kill |
 | Source cleanup | intent 전/후, unlink 전/후, local/API receipt 전/후, absence scan 전/후 |
 | Volume delete | mounted target, node down, already-absent-with-intent, unexpected absence, finalizer race |
+| Workload retirement | original UID absent/replaced versus API error/in-use deletion; pre/postcommit; CAS race, response loss, restart, retained bytes; CSI deletion after unlock |
 | Capacity | destination reserve, commit 직후 두 copy, 각 receipt 단독, fresh absence, abort cleanup |
 | Measurement | 측정 전후 Pool/mount/copy 변경, API·du 실패, read-only bind, mount 유실 |
 | Inventory | generation stale, invalid signature/identity, incomplete/truncated scan, copy reappearance, 물리 수집 전후 생성 완료, stage 이동·경로 타입 변경·parent symlink, 경로 변경 중 부재 승인 거부 |

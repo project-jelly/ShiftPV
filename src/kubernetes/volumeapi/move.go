@@ -62,6 +62,7 @@ type MoveStatus struct {
 	IncomingCopy               *volume.CopyIdentity
 	DestinationCopy            *volume.CopyIdentity
 	RollbackRequiredGeneration int64
+	SettlementRequested        bool
 	RecoveryPhase              string
 	RecoveryOwner              string
 	RecoveryReason             string
@@ -221,6 +222,10 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		return MoveStatus{}, fmt.Errorf("decode candidateNodes: %w", err)
 	}
 	evictionRequested, _, _ := unstructured.NestedBool(object.Object, "status", "evictionRequested")
+	settlementRequested, _, err := unstructured.NestedBool(object.Object, "status", "settlementRequested")
+	if err != nil {
+		return MoveStatus{}, fmt.Errorf("decode settlementRequested: %w", err)
+	}
 	rollbackGeneration, _, err := unstructured.NestedInt64(object.Object, "status", "rollbackRequiredGeneration")
 	if err != nil {
 		return MoveStatus{}, fmt.Errorf("decode rollbackRequiredGeneration: %w", err)
@@ -274,6 +279,7 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		CopyOperationID: read("copyOperationID"), PromotionOperationID: read("promotionOperationID"),
 		SourceCopy: sourceCopy, IncomingCopy: incomingCopy, DestinationCopy: destinationCopy,
 		RollbackRequiredGeneration: rollbackGeneration,
+		SettlementRequested:        settlementRequested,
 		RecoveryPhase:              read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
 		RecoveryReason: read("recoveryReason"), RecoveryMessage: read("recoveryMessage"),
 	}, nil
@@ -307,6 +313,9 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 	}
 	if status.RollbackRequiredGeneration > 0 {
 		next["rollbackRequiredGeneration"] = status.RollbackRequiredGeneration
+	}
+	if status.SettlementRequested {
+		next["settlementRequested"] = true
 	}
 	object.Object["status"] = next
 	encoded := next

@@ -56,6 +56,7 @@ const (
 	ActionRetireRecovery        Action = "RetireRecovery"
 	ActionResumeRecovery        Action = "ResumeRecovery"
 	ActionCompleteRecovery      Action = "CompleteRecovery"
+	ActionRequestSettlement     Action = "RequestSettlement"
 )
 
 const (
@@ -75,6 +76,8 @@ type State struct {
 }
 
 type Observation struct {
+	WorkloadRetired            bool
+	SettlementOnly             bool
 	ProtectionPresent          bool
 	SourcePlanRecorded         bool
 	SourceClaimed              bool

@@ -3,7 +3,7 @@
 This describes the current implementation. Qualification requirements are in [Testing](../development/testing.md).
 
 ShiftPV moves one RWO Filesystem PVC from its current node-local owner to another
-registered Pool. PVC, PV, and CSI volume handle identity remain stable. The
+registered Pool. For a continuing workload, PVC, PV, and CSI volume handle identity remain stable. The
 operation is eventually consistent when interrupted nodes or disks later return;
 permanent authoritative disk or node loss is outside this contract.
 
@@ -296,7 +296,7 @@ cleanup subjournal waits; it does not infer absence.
 
 ## Blocked Recovery
 
-Blocked recovery never guesses a new owner. Before owner CAS, recovery verifies
+Service recovery never guesses a new owner. Before owner CAS, recovery verifies
 the source owner and either resumes from source or aborts the Move. After owner
 CAS, recovery verifies the destination owner and only converges forward through
 destination publish, source cleanup, receipt settlement, and capacity release.
@@ -323,6 +323,30 @@ Approval without its recorded full destination plan requires review and preserve
 the hold. Recovery does not infer copy identities, request a scan from an inferred
 plan, or fabricate cleanup authority.
 
+### Workload retirement
+
+For an approved prepared Move, confirmed absence of the original PVC UID (including
+same-name replacement) automatically records `status.settlementRequested`. An
+exact-copy Volume CAS fences execution and competes with owner commit. This
+intent is monotonic, has no legacy default, and does not authorize Volume deletion.
+
+Retirement reuses quiesce, owner verification, cleanup and hold settlement, skipping
+service resumption. Before commit, retain the source and settle exact destination
+effects. After commit, retain the destination; source cleanup requires its verified
+blocked authority, empty publication and a fresh post-Retiring inventory fence.
+Ordinary service recovery still requires actual destination publication.
+
+Completion releases only Move holds and `activeMove`; the authoritative Volume and
+its bytes remain accounted. Delete policy then uses the independent CSI deletion
+fence; Retain preserves the owner copy. Accepted CSI deletion after unlock cannot
+strand Move metadata: recorded cleanup/absence evidence and verifier termination
+must still close. Unknown API reads or changed owner/copy remain errors.
+
+A still-present original UID remains subject to PVC protection and normal workload
+teardown. No replacement claim or workload is adopted. Before approval, the existing
+preparation cancellation path applies. This feature needs the updated CRD,
+Controller, Node and helper; older writers cannot erase its stored intent.
+
 ### Operator procedure
 
 For planned maintenance, use **cordon → Move completion → drain**. Confirm the
@@ -347,11 +371,9 @@ For `Blocked` after execution approval on a new `prepared-v1` Move:
    readiness. Completion is `Recovered` with cleared `activeMove` and settled
    cleanup/holds, not merely acceptance of the patch.
 
-A missing/recreated claim after prepared execution approval remains an operator
-recovery case. `ResumeOwner` does not adopt a new UID or fabricate absent publication
-proof. Legacy Moves must settle on their compatible old writer before upgrade.
-Before approval, preparation cancellation settles metadata without those objects;
-restoring application availability still requires a valid workload and binding.
+`ResumeOwner` restores service only for the recorded live binding. Confirmed claim
+retirement follows the separate settlement path above. Legacy Moves must settle
+on their compatible old writer before upgrade.
 
 ## Safety Invariants
 
@@ -360,7 +382,7 @@ restoring application availability still requires a valid workload and binding.
 | One owner | Only one committed owner copy exists in metadata at a time. |
 | One commit | Only owner CAS changes authoritative ownership. |
 | Forward after commit | Postcommit recovery never rolls back to source. |
-| Delete after publish | Source cleanup cannot start before destination actual-publish proof. |
+| Source retirement | A continuing workload requires destination publish; claim retirement requires separately fenced and verified destination authority. |
 | Fresh absence | Completion and capacity release require fresh absence proof after purge receipt. |
 | Bounded destructiveness | Unknown paths, stale observations, and contradictory identity preserve data. |
 
