@@ -20,7 +20,7 @@ import (
 
 func nativeCancellationFixture(t *testing.T) (*Registry, *dynamicfake.FakeDynamicClient, State) {
 	t.Helper()
-	object := newVolumeObject(unstartedCancellationID, "pvc-original", "worker-a", 64, Pool{Name: "pool-a", UID: "pool-uid"})
+	object := newVolumeObject(CreationRequest{VolumeID: unstartedCancellationID, RequestName: "pvc-original", NodeName: "worker-a", CapacityBytes: 64}, Pool{Name: "pool-a", UID: "pool-uid"})
 	object.SetUID("volume-uid")
 	copy := volume.CopyIdentity{InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid", VolumeID: object.GetName(), VolumeUID: "volume-uid", CopyID: "initial-volume-uid", NodeName: "worker-a", Role: volume.RoleServing}
 	state := State{UID: "volume-uid", Phase: PhasePending, OwnerNode: "worker-a", CurrentCopy: &copy, CreationOperationID: "create-volume-uid"}
@@ -61,7 +61,7 @@ func TestCreationCancellationPreservesIdentityAndReplaysAcceptedFence(t *testing
 	if err := r.CompleteCreate(ctx, unstartedCancellationID, initial.UID, *initial.CurrentCopy); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("late creator crossed cancellation fence: %v", err)
 	}
-	if _, err := r.BeginCreateInPool(ctx, unstartedCancellationID, initial.RequestName, initial.InitialNode, initial.CapacityBytes, "pool-a", "pool-uid"); !errors.Is(err, ErrStateConflict) {
+	if _, err := r.BeginCreate(ctx, CreationRequest{VolumeID: unstartedCancellationID, RequestName: initial.RequestName, NodeName: initial.InitialNode, CapacityBytes: initial.CapacityBytes, Pool: &PoolReference{Name: "pool-a", UID: "pool-uid"}}); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("late create retry crossed cancellation fence: %v", err)
 	}
 }

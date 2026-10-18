@@ -123,6 +123,34 @@ func TestParentCleanupJournalSchemasMatchRuntimeContract(t *testing.T) {
 	}
 }
 
+func TestOriginalCreationClaimIsOptionalAndCannotBeBackfilled(t *testing.T) {
+	crd := readYAMLMap(t, filepath.Join(repositoryRoot(t), "charts", "shiftpv", "crds", "shiftpv.io_shiftpvvolumes.yaml"))
+	spec := requiredMap(t, singleCRDVersion(t, crd), "schema", "openAPIV3Schema", "properties", "spec")
+	for _, field := range requiredStrings(t, spec, "required") {
+		if field == "creationClaim" {
+			t.Fatal("legacy Volumes require unknown provenance compatibility")
+		}
+	}
+	claim := requiredMap(t, spec, "properties", "creationClaim")
+	assertStringSet(t, requiredStrings(t, claim, "required"), []string{"namespace", "name", "uid"}, "original claim identity")
+	rules, _, _ := unstructured.NestedSlice(spec, "x-kubernetes-validations")
+	want := map[string]bool{"has(self.creationClaim) == has(oldSelf.creationClaim) && (!has(self.creationClaim) || self.creationClaim == oldSelf.creationClaim)": false, "!has(self.creationClaim) || self.requestName == 'pvc-' + self.creationClaim.uid": false}
+	for _, value := range rules {
+		if rule, ok := value.(map[string]any); ok {
+			if text, ok := rule["rule"].(string); ok {
+				if _, needed := want[text]; needed {
+					want[text] = true
+				}
+			}
+		}
+	}
+	for rule, found := range want {
+		if !found {
+			t.Fatalf("missing original-claim contract: %s", rule)
+		}
+	}
+}
+
 func readYAMLMap(t *testing.T, path string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)

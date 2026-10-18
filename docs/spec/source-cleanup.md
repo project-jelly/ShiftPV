@@ -13,7 +13,7 @@ still use Jobs; measurement helpers remain (existing-copy usage uses read-only b
 
 | Owner | Scope |
 |---|---|
-| Volume journal/finalizer | Delete the committed Volume copy during `DeleteVolume`. |
+| Volume journal/finalizer | Delete the committed copy or cancel the exact unfinished initial copy during `DeleteVolume`. |
 | Move journal/finalizer | Delete rollback artifacts before commit and source copy after commit. |
 | Resident Node | Execute retire, purge, and local receipt effects for the parent journal. |
 | Pool inventory | Report observations; never grants deletion authority by itself. |
@@ -51,6 +51,23 @@ Valid destructive authority requires all of the following:
 | `Verifying` | API receipt records the exact purged local effect | Request a post-receipt Pool scan |
 | `ConfirmingAbsence` | Post-receipt `scanEpoch` generation fence is recorded | Wait for fresh valid complete absence proof |
 | `Completed` | Receipt and absence proof match operation | Release parent finalizer and capacity hold |
+
+## Initial creation
+
+For the chart's `pvc-<UID>` requests with PVC metadata, the controller verifies the
+live original PVC before recording `spec.creationClaim` (namespace/name/UID) in
+the first protected intent. The CRD rejects later addition, removal or change.
+Unknown legacy/standalone provenance stays unknown. Pending retries recheck the
+recorded original; Ready replay and normal PV Delete/Retain behavior are unchanged.
+This provenance alone does not request cleanup; automatic claim retirement is a
+separate lifecycle step.
+
+Explicit cancellation uses `Deleting`, `cancel-create-<VolumeUID>` and cleanup
+reason `CreationCancelled`. It shares the creation lock and verifies serving,
+create-stage and retired paths. An unplaced stage must be empty. A local
+no-effects receipt may contain zero device/inode only for this exact initial-copy
+cancellation; all paths must be absent. The API cleanup receipt and a later
+generation-fenced complete inventory still precede finalization and hold release.
 | `NeedsReview` | Identity or receipt authority contradiction | Preserve data; no destructive action |
 
 `Completed` is terminal for that exact cleanup operation. It proves one

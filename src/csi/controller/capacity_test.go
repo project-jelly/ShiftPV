@@ -172,11 +172,12 @@ func (r *capacityTrackingVolumeRegistry) PoolForIdentity(_ context.Context, name
 	return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
 }
 
-func (r *capacityTrackingVolumeRegistry) BeginCreate(ctx context.Context, volumeID, requestName, nodeName string, capacityBytes int64) (volumeapi.State, error) {
-	return r.BeginCreateInPool(ctx, volumeID, requestName, nodeName, capacityBytes, "pool", "pool-uid")
-}
-
-func (r *capacityTrackingVolumeRegistry) BeginCreateInPool(ctx context.Context, volumeID, requestName, nodeName string, capacityBytes int64, poolName, poolUID string) (volumeapi.State, error) {
+func (r *capacityTrackingVolumeRegistry) BeginCreate(ctx context.Context, request volumeapi.CreationRequest) (volumeapi.State, error) {
+	volumeID, requestName, nodeName, capacityBytes := request.VolumeID, request.RequestName, request.NodeName, request.CapacityBytes
+	poolName, poolUID := "pool", "pool-uid"
+	if request.Pool != nil {
+		poolName, poolUID = request.Pool.Name, request.Pool.UID
+	}
 	unlock := writeLock(r.mu)
 	defer unlock()
 	if state, ok := r.volumes[volumeID]; ok {
@@ -191,7 +192,7 @@ func (r *capacityTrackingVolumeRegistry) BeginCreateInPool(ctx context.Context, 
 		NodeName: nodeName, Role: volume.RoleServing,
 	}
 	state := volumeapi.State{
-		UID: copy.VolumeUID, RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: nodeName,
+		UID: copy.VolumeUID, RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: nodeName, CreationClaim: request.Claim,
 		Phase: volumeapi.PhasePending, OwnerNode: nodeName, CurrentCopy: &copy,
 	}
 	r.volumes[volumeID] = state

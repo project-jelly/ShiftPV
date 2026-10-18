@@ -22,7 +22,7 @@ const unstartedCancellationID = "shiftpv-0123456789abcdef0123456789abcdef"
 // protection exists, and only the last finalizer removal deletes the object.
 func cancellationFixture(t *testing.T, loss string) (*Registry, *dynamicfake.FakeDynamicClient, *unstructured.Unstructured) {
 	t.Helper()
-	object := newVolumeObject(unstartedCancellationID, "pvc-request", "worker-a", 64, Pool{Name: "pool-a", UID: "pool-uid"})
+	object := newVolumeObject(CreationRequest{VolumeID: unstartedCancellationID, RequestName: "pvc-request", NodeName: "worker-a", CapacityBytes: 64}, Pool{Name: "pool-a", UID: "pool-uid"})
 	object.SetUID("volume-uid")
 	object.SetResourceVersion("1")
 	api := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{VolumeResource: "ShiftPVVolumeList"}, object)
@@ -131,7 +131,7 @@ func TestUnstartedCancellationTimestampFencesLateInitialization(t *testing.T) {
 	if err := r.CancelUnstartedCreation(context.Background(), unstartedCancellationID, "volume-uid"); !apierrors.IsTimeout(err) {
 		t.Fatal(err)
 	}
-	if _, err := r.BeginCreateInPool(context.Background(), unstartedCancellationID, "pvc-request", "worker-a", 64, "pool-a", "pool-uid"); !errors.Is(err, ErrStateConflict) {
+	if _, err := r.BeginCreate(context.Background(), CreationRequest{VolumeID: unstartedCancellationID, RequestName: "pvc-request", NodeName: "worker-a", CapacityBytes: 64, Pool: &PoolReference{Name: "pool-a", UID: "pool-uid"}}); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("late initialization crossed deletion fence: %v", err)
 	}
 	if err := r.CancelUnstartedCreation(context.Background(), unstartedCancellationID, "volume-uid"); err != nil {

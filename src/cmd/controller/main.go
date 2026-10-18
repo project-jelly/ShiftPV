@@ -45,6 +45,7 @@ import (
 	remotemeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement/remote"
 	"github.com/project-jelly/ShiftPV/src/provisioning"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	webhookcertificate "github.com/project-jelly/ShiftPV/src/webhook/certificate"
 )
@@ -249,6 +250,7 @@ func newCSILifecycle(cfg config, restConfig *rest.Config, fail wiring.Fail) (*co
 	service := &controllercsi.Service{
 		Client: clients.Typed, Namespace: cfg.namespace, Volumes: volumes, CapacityPools: volumes,
 		ConsumerPlacement: consumer.Inspector{Reader: consumer.KubernetesReader{Client: clients.Typed}},
+		CreationClaims:    creation.ClaimInspector{Reader: consumer.KubernetesReader{Client: clients.Typed}},
 		Cleanups:          &cleanupapi.Store{Client: clients.Dynamic}, CleanupAbsenceWait: cfg.cleanupAbsenceWait,
 		PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter,
 	}

@@ -17,7 +17,7 @@ func (s *Service) resumeInitializingCreate(ctx context.Context, existing volumea
 		// Old releases could leave a spec without an admitted Pool. No effect
 		// was authorized; re-admit the same request under its exact UID before
 		// recording the newly selected Pool reservation.
-		state, err := s.placeNewCreate(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, parameters, existing.UID)
+		state, err := s.placeNewCreate(ctx, volumeapi.CreationRequest{VolumeID: request.id, RequestName: existing.RequestName, NodeName: existing.InitialNode, CapacityBytes: existing.CapacityBytes, Claim: existing.CreationClaim}, parameters, existing.UID)
 		if status.Code(err) == codes.ResourceExhausted {
 			// The recorded initialNode is immutable even for a scheduler-managed
 			// consumer. Do not tell the provisioner to reschedule this request.
@@ -51,5 +51,5 @@ func (s *Service) resumeInitializingCreate(ctx context.Context, existing volumea
 	}
 	// The spec already owns its reservation. Do not charge it twice or
 	// require new free space when completing the first status write.
-	return s.Volumes.BeginCreateInPool(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, pool.Name, pool.UID)
+	return s.Volumes.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: request.id, RequestName: existing.RequestName, NodeName: existing.InitialNode, CapacityBytes: existing.CapacityBytes, Pool: &volumeapi.PoolReference{Name: pool.Name, UID: pool.UID}, Claim: existing.CreationClaim})
 }

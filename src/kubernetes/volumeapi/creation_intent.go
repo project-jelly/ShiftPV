@@ -129,7 +129,7 @@ func (r *Registry) initializeCreate(ctx context.Context, object *unstructured.Un
 		if err := r.bindInitialPool(ctx, id, state, pool); err != nil {
 			return State{}, err
 		}
-		return r.beginCreate(ctx, id, state.RequestName, state.InitialNode, state.CapacityBytes, pool.Name, pool.UID)
+		return r.BeginCreate(ctx, CreationRequest{VolumeID: id, RequestName: state.RequestName, NodeName: state.InitialNode, CapacityBytes: state.CapacityBytes, Pool: &PoolReference{Name: pool.Name, UID: pool.UID}, Claim: state.CreationClaim})
 	}
 	if poolName != "" && (state.InitialPool.Name != poolName || state.InitialPool.UID != poolUID) {
 		return State{}, fmt.Errorf("%w: initial Pool reservation changed", ErrStateConflict)

@@ -24,6 +24,7 @@ type State struct {
 	CapacityBytes       int64
 	InitialNode         string
 	InitialPool         *PoolReference
+	CreationClaim       *ClaimReference
 	HasCleanup          bool
 	Deleting            bool
 	Phase               string
@@ -45,26 +46,19 @@ func CreationOperationID(volumeUID string) (string, error) {
 	return operationID, nil
 }
 
-// BeginCreate persists the exact copy identity before node-local filesystem work.
-func (r *Registry) BeginCreate(ctx context.Context, volumeID, requestName, ownerNode string, capacityBytes int64) (State, error) {
-	return r.beginCreate(ctx, volumeID, requestName, ownerNode, capacityBytes, "", "")
-}
-
-// BeginCreateInPool anchors a new copy to the Pool selected by capacity
-// admission. A retry must name the same Pool incarnation as the durable copy.
-func (r *Registry) BeginCreateInPool(ctx context.Context, volumeID, requestName, ownerNode string, capacityBytes int64, poolName, poolUID string) (State, error) {
-	if poolName == "" || poolUID == "" {
-		return State{}, ErrPoolConfiguration
-	}
-	return r.beginCreate(ctx, volumeID, requestName, ownerNode, capacityBytes, poolName, poolUID)
-}
-
-func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, ownerNode string, capacityBytes int64, poolName, poolUID string) (State, error) {
+// BeginCreate persists placement and original claim provenance before copying.
+// Retries preserve existing provenance; unknown history is never backfilled.
+func (r *Registry) BeginCreate(ctx context.Context, request CreationRequest) (State, error) {
 	if err := r.validate(); err != nil {
 		return State{}, err
 	}
-	if requestName == "" || ownerNode == "" || capacityBytes <= 0 {
-		return State{}, ErrStateConflict
+	if err := request.validate(); err != nil {
+		return State{}, err
+	}
+	volumeID, requestName, ownerNode, capacityBytes := request.VolumeID, request.RequestName, request.NodeName, request.CapacityBytes
+	var poolName, poolUID string
+	if request.Pool != nil {
+		poolName, poolUID = request.Pool.Name, request.Pool.UID
 	}
 	resource := r.Client.Resource(VolumeResource)
 	object, err := resource.Get(ctx, volumeID, metav1.GetOptions{})
@@ -72,6 +66,9 @@ func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, owner
 		state, stateErr := stateFrom(object)
 		if stateErr != nil {
 			return State{}, stateErr
+		}
+		if request.Claim != nil && !sameClaim(state.CreationClaim, request.Claim) {
+			return State{}, ErrStateConflict
 		}
 		if state.Phase != "" {
 			return r.resumeCreate(ctx, object, state, volumeID, requestName, ownerNode, capacityBytes, poolName, poolUID)
@@ -88,7 +85,7 @@ func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, owner
 	if err != nil {
 		return State{}, err
 	}
-	object, err = resource.Create(ctx, newVolumeObject(volumeID, requestName, ownerNode, capacityBytes, pool), metav1.CreateOptions{})
+	object, err = resource.Create(ctx, newVolumeObject(request, pool), metav1.CreateOptions{})
 	if err != nil {
 		return State{}, fmt.Errorf("begin ShiftPVVolume creation: %w", err)
 	}
@@ -98,6 +95,9 @@ func (r *Registry) beginCreate(ctx context.Context, volumeID, requestName, owner
 	}
 	if state.InitialPool == nil || *state.InitialPool != (PoolReference{Name: pool.Name, UID: pool.UID}) {
 		return State{}, fmt.Errorf("%w: initial Pool reservation was not stored; upgrade the Volume CRD", ErrStateConflict)
+	}
+	if !sameClaim(state.CreationClaim, request.Claim) {
+		return State{}, fmt.Errorf("%w: original claim was not stored; upgrade the Volume CRD", ErrStateConflict)
 	}
 	return r.completeInitialization(ctx, object, state, pool, installationID, volumeID)
 }
@@ -124,14 +124,18 @@ func (r *Registry) freshCreationPlacement(ctx context.Context, volumeID, ownerNo
 	return installationID, pool, nil
 }
 
-func newVolumeObject(volumeID, requestName, ownerNode string, capacityBytes int64, pool Pool) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]any{
+func newVolumeObject(request CreationRequest, pool Pool) *unstructured.Unstructured {
+	object := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVVolume",
-		"metadata":   map[string]any{"name": volumeID, "finalizers": []any{VolumeProtectionFinalizer}},
-		"spec": map[string]any{"volumeID": volumeID, "requestName": requestName, "initialNode": ownerNode, "capacityBytes": capacityBytes,
+		"metadata":   map[string]any{"name": request.VolumeID, "finalizers": []any{VolumeProtectionFinalizer}},
+		"spec": map[string]any{"volumeID": request.VolumeID, "requestName": request.RequestName, "initialNode": request.NodeName, "capacityBytes": request.CapacityBytes,
 			"initialPool": map[string]any{"name": pool.Name, "uid": pool.UID}},
 	}}
+	if request.Claim != nil {
+		object.Object["spec"].(map[string]any)["creationClaim"] = map[string]any{"namespace": request.Claim.Namespace, "name": request.Claim.Name, "uid": request.Claim.UID}
+	}
+	return object
 }
 
 // initialServingCopy builds the exact identity the first serving copy carries,
@@ -171,7 +175,7 @@ func (r *Registry) recordCreationIntent(ctx context.Context, volumeID string, ne
 			return current, nil
 		}
 		if !current.Initializing() || current.InitialPool == nil || next.InitialPool == nil || *current.InitialPool != *next.InitialPool ||
-			current.RequestName != next.RequestName || current.InitialNode != next.InitialNode || current.CapacityBytes != next.CapacityBytes {
+			current.RequestName != next.RequestName || current.InitialNode != next.InitialNode || current.CapacityBytes != next.CapacityBytes || !sameClaim(current.CreationClaim, next.CreationClaim) {
 			return State{}, ErrStateConflict
 		}
 		return next, nil
@@ -499,6 +503,10 @@ func (r *Registry) getVolume(ctx context.Context, volumeID string) (*unstructure
 }
 
 func stateFrom(object *unstructured.Unstructured) (State, error) {
+	claim, err := claimFrom(object)
+	if err != nil {
+		return State{}, err
+	}
 	initialPool, err := initialPoolFrom(object)
 	if err != nil {
 		return State{}, err
@@ -542,7 +550,7 @@ func stateFrom(object *unstructured.Unstructured) (State, error) {
 	}
 	return State{
 		UID: string(object.GetUID()), Finalizers: append([]string(nil), object.GetFinalizers()...),
-		InitialPool: initialPool, HasCleanup: cleanup != nil, Deleting: object.GetDeletionTimestamp() != nil,
+		InitialPool: initialPool, CreationClaim: claim, HasCleanup: cleanup != nil, Deleting: object.GetDeletionTimestamp() != nil,
 		RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: initialNode,
 		Phase: phase, OwnerNode: ownerNode, ActiveMove: activeMove,
 		CreationExecutor: executor, CreationReceipt: receipt,
