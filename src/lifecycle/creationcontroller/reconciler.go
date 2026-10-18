@@ -41,8 +41,13 @@ type Reconciler struct {
 type key struct{ name, uid string }
 
 func candidate(state volumeapi.State) bool {
+	// An exact creation-only CAS is already durable cancellation authority,
+	// including an operator's explicit recovery of pre-provenance native work.
+	if state.CancellingCreation() {
+		return true
+	}
 	return state.CreationClaim != nil && state.CreationClaim.Valid() && state.RequestName == "pvc-"+state.CreationClaim.UID &&
-		(state.UnstartedCreation() || state.CancellableCreation() || state.CancellingCreation())
+		(state.UnstartedCreation() || state.CancellableCreation())
 }
 
 // Reconcile re-reads the exact Volume; discovery is never delete authority.

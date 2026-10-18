@@ -12,6 +12,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	"github.com/project-jelly/ShiftPV/src/provisioning/reclaim"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
@@ -26,20 +27,26 @@ func newCreationRetirement(cfg config, config *rest.Config, fail wiring.Fail) *c
 	background.UserAgent = "shiftpv-creation-retirement"
 	clients := wiring.ForConfig(background, "creation retirement", fail)
 	volumes := &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
-	inspector := &helperpod.Inspector{Client: clients.Typed, Namespace: cfg.namespace}
+	return &creationcontroller.Reconciler{
+		Volumes: volumes, Claims: creation.RetirementInspector{Reader: creation.KubernetesRetirementReader{Client: clients.Typed}},
+		Cancel:   newCreationCanceller(clients.Typed, volumes, cfg.namespace, cfg.nodeDaemonSet),
+		Interval: 10 * time.Second, WorkTimeout: 10 * time.Second, Workers: 2,
+	}
+}
+
+// Both automatic retirement and explicit per-UID recovery use the same exact
+// creation-only capability and non-waiting native settlement path.
+func newCreationCanceller(client kubernetes.Interface, volumes *volumeapi.Registry, namespace, daemonSet string) *creation.Canceller {
+	inspector := &helperpod.Inspector{Client: client, Namespace: namespace}
 	effects := &nodeexecutor.Client{
-		Discovery: nodeexecutor.Discovery{Client: clients.Typed, Namespace: cfg.namespace, DaemonSet: cfg.nodeDaemonSet},
+		Discovery: nodeexecutor.Discovery{Client: client, Namespace: namespace, DaemonSet: daemonSet},
 		Volumes:   volumes, Inspector: inspector,
 	}
-	settler := &reclaim.Settler{Store: &cleanupapi.Store{Client: clients.Dynamic},
+	settler := &reclaim.Settler{Store: &cleanupapi.Store{Client: volumes.Client},
 		Reclaim: func(ctx context.Context, current cleanupapi.Cleanup, journal cleanupapi.Journal) (cleanupapi.Cleanup, error) {
 			next, _, err := effects.AdvanceReclaim(ctx, current, journal)
 			return next, err
 		},
 	}
-	return &creationcontroller.Reconciler{
-		Volumes: volumes, Claims: creation.RetirementInspector{Reader: creation.KubernetesRetirementReader{Client: clients.Typed}},
-		Cancel:   &creation.Canceller{Volumes: volumes, Inspector: inspector, Cleanups: settler},
-		Interval: 10 * time.Second, WorkTimeout: 10 * time.Second, Workers: 2,
-	}
+	return &creation.Canceller{Volumes: volumes, Inspector: inspector, Cleanups: settler}
 }

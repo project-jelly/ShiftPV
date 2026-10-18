@@ -8,7 +8,13 @@ source "${ROOT_DIR}/test/e2e/kind/lib/artifact.sh"
 # shellcheck source=test/e2e/kind/lib/cluster.sh
 source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
 
-LOCK_FILE=${ARTIFACT_LOCK_FILE:-"${TEST_DIR}/versions.env"}
+UPGRADE_SCENARIO=${UPGRADE_SCENARIO:-ready}
+case "${UPGRADE_SCENARIO}" in
+ready) DEFAULT_LOCK="${TEST_DIR}/versions.env" ;;
+creation-recovery) DEFAULT_LOCK="${TEST_DIR}/native-versions.env" ;;
+*) echo "unsupported upgrade scenario: ${UPGRADE_SCENARIO}" >&2; exit 1 ;;
+esac
+LOCK_FILE=${ARTIFACT_LOCK_FILE:-${DEFAULT_LOCK}}
 CLUSTER_NAME=${CLUSTER_NAME:-shiftpv-upgrade-e2e}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 CANDIDATE_IMAGE=${CANDIDATE_IMAGE:-shiftpv:upgrade-dev}
@@ -261,6 +267,15 @@ docker build \
 	-t "${CANDIDATE_IMAGE}" \
 	"${ROOT_DIR}"
 kind load docker-image "${CANDIDATE_IMAGE}" --name "${CLUSTER_NAME}"
+
+if [[ "${UPGRADE_SCENARIO}" == creation-recovery ]]; then
+	set -o errtrace
+	trap 'printf "creation recovery failed at line %s: %s\n" "${LINENO}" "${BASH_COMMAND}" >&2' ERR
+	# shellcheck source=test/e2e/kind/upgrade/creation-recovery.sh
+	source "${TEST_DIR}/creation-recovery.sh"
+	test_creation_recovery_transition
+	exit 0
+fi
 
 # reclaimPolicy is immutable. When the published class disagrees with the chart,
 # a plain helm upgrade fails on the field instead of on anything the suite is

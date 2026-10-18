@@ -24,7 +24,9 @@ merged after 30 successful checks. Bounded deferred discovery
 [PR #232](https://github.com/project-jelly/ShiftPV/pull/232) merged after 30
 successful checks. Independent retirement model and Registry trace mapping
 [PR #233](https://github.com/project-jelly/ShiftPV/pull/233) merged after 30
-successful checks. Integrated qualification is outstanding.
+successful checks. Native retirement matrix [PR #234](https://github.com/project-jelly/ShiftPV/pull/234)
+merged after 31 successful checks and four before/after-commit × Delete/Retain
+cases. Integrated qualification is outstanding.
 
 ## Goal and invariants
 
