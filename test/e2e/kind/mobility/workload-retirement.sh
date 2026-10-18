@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -o errtrace
+trap 'printf "workload retirement failed at line %s: %s\n" "${LINENO}" "${BASH_COMMAND}" >&2' ERR
 
 : "${CLUSTER_NAME:?owned Kind cluster required}"
 : "${KUBECONFIG:?private kubeconfig required}"
@@ -80,9 +82,10 @@ wait_for_boundary() {
 		move=$(kubectl get "shiftpvmove/${MOVE}" -o json)
 		jq -e --arg uid "${VOLUME_UID}" '.metadata.uid == $uid' <<<"${object}" >/dev/null
 		if ! jq -e '.status.capacityApproved and .status.destinationCopy != null and .spec.recovery == null' <<<"${move}" >/dev/null; then sleep 1; continue; fi
-		jq -e --arg claim "${PVC_UID}" --arg pv "${PV}" --arg ns "${NS}" --argjson copy "${ORIGINAL_COPY}" '
-		 .status.claimUID == $claim and .status.claimName == "wffc" and .status.claimNamespace == $ns and
-		 .status.persistentVolumeName == $pv and .status.sourceCopy == $copy' <<<"${move}" >/dev/null
+		jq -e --arg claim "${PVC_UID}" --arg pv "${PV}" --arg pvuid "${PV_UID}" --arg ns "${NS}" --argjson copy "${ORIGINAL_COPY}" '
+		 .status.persistentVolumeClaimUID == $claim and .status.persistentVolumeClaimName == "wffc" and
+		 .status.persistentVolumeClaimNamespace == $ns and .status.persistentVolumeName == $pv and
+		 .status.persistentVolumeUID == $pvuid and .status.sourceCopy == $copy' <<<"${move}" >/dev/null
 		destination=$(jq -er '.status.destinationNode' <<<"${move}")
 		destination_mount=$(pool_mount_for_node "${destination}")
 		if [[ "${BOUNDARY}" == precommit ]]; then
