@@ -15,6 +15,53 @@ import (
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
+// ErrRetiredMoveRejected means a per-UID maintenance request has no retirement
+// authority. Retrying API/effect uncertainty must never widen this capability.
+var ErrRetiredMoveRejected = errors.New("Move is not eligible for retirement settlement")
+
+// AdvanceRetiredMove reuses normal settlement for one exact recorded Move.
+// The caller must exclude normal writers throughout maintenance. This does not
+// approve a new Move, restore a workload, adopt legacy execution or GC history.
+func (r *Reconciler) AdvanceRetiredMove(ctx context.Context, name, uid string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := r.validate(); err != nil {
+		return false, fmt.Errorf("%w: %v", ErrRetiredMoveRejected, err)
+	}
+	if !volume.ValidObjectName(name) || !volume.ValidIdentityToken(uid) {
+		return false, fmt.Errorf("%w: exact Move name and UID are required", ErrRetiredMoveRejected)
+	}
+	move, err := r.Repository.GetMove(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	if move.UID != uid || !supportedMoveProtocol(move) {
+		return false, fmt.Errorf("%w: Move UID or prepared-v1 protocol does not match", ErrRetiredMoveRejected)
+	}
+	if !move.Status.SettlementRequested {
+		state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
+		if err != nil {
+			return false, err
+		}
+		retired, handled, err := r.observeWorkloadRetirement(ctx, move, state)
+		if err != nil {
+			return false, err
+		}
+		if !handled || !retired.FSM.WorkloadRetired {
+			return false, fmt.Errorf("%w: original claim has not retired from an approved Move", ErrRetiredMoveRejected)
+		}
+		if err := workloadSettlementAuthority(move, state); err != nil {
+			return false, fmt.Errorf("%w: %v", ErrRetiredMoveRejected, err)
+		}
+	}
+	if move.Status.SettlementRequested && volumeapi.MoveCleanupSettled(move) && len(move.Finalizers) == 0 {
+		err := r.validateSettledMoves(ctx, []volumeapi.Move{move})
+		return err == nil, err
+	}
+	return false, r.reconcilePersistedMove(ctx, move)
+}
+
 // Original claim lifetime is independent of service health and copy authority.
 // Only confirmed original-UID retirement requests settlement. An in-use claim
 // still waiting on PVC protection must finish normal workload teardown first.
@@ -74,11 +121,10 @@ func needsWorkloadLifetime(move volumeapi.Move) bool {
 // CAS loses, reobserve the winner; a stale phase never chooses rollback/forward.
 func (r *Reconciler) requestWorkloadSettlement(ctx context.Context, move *volumeapi.Move, observed observation) error {
 	state := observed.Volume
-	if !observed.FSM.WorkloadRetired || state.ActiveMove != move.Name || state.Deleting || state.HasCleanup ||
-		(state.Phase != volumeapi.PhaseMoving && state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseBlocked) {
-		return fmt.Errorf("workload settlement requires this Move's exact live authority")
+	if !observed.FSM.WorkloadRetired {
+		return fmt.Errorf("workload settlement requires original claim retirement")
 	}
-	if err := recordedOwnerIntact(*move, state); err != nil {
+	if err := workloadSettlementAuthority(*move, state); err != nil {
 		return err
 	}
 	next := state
@@ -90,6 +136,14 @@ func (r *Reconciler) requestWorkloadSettlement(ctx context.Context, move *volume
 	move.Status.RecoveryOwner, move.Status.RecoveryPhase = "", ""
 	move.Status.RecoveryReason, move.Status.RecoveryMessage = "", ""
 	return nil
+}
+
+func workloadSettlementAuthority(move volumeapi.Move, state volumeapi.State) error {
+	if state.ActiveMove != move.Name || state.Deleting || state.HasCleanup ||
+		(state.Phase != volumeapi.PhaseMoving && state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseBlocked) {
+		return fmt.Errorf("workload settlement requires this Move's exact live authority")
+	}
+	return recordedOwnerIntact(move, state)
 }
 
 func recordedOwnerIntact(move volumeapi.Move, state volumeapi.State) error {

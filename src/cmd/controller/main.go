@@ -67,6 +67,7 @@ type config struct {
 	helperServiceAccount                      string
 	poolReadinessStaleAfter                   time.Duration
 	mobilityEnabled                           bool
+	admissionOnly                             bool
 	mobilityInterval, moveJournalRetention    time.Duration
 	mobilityImage                             string
 	mobilityPlacementPriorityClass            string
@@ -96,6 +97,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.helperServiceAccount, "helper-service-account", "", "service account used by identity-aware helper Pods")
 	flag.DurationVar(&cfg.poolReadinessStaleAfter, "pool-readiness-stale-after", 3*time.Minute, "maximum age of a successful node Pool readiness probe")
 	flag.BoolVar(&cfg.mobilityEnabled, "mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
+	flag.BoolVar(&cfg.admissionOnly, "admission-only", false, "serve existing admission policies for maintenance without starting CSI or lifecycle writers")
 	flag.DurationVar(&cfg.mobilityInterval, "mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
 	flag.DurationVar(&cfg.moveJournalRetention, "move-journal-retention", mobilitycontroller.DefaultMoveJournalRetention, "minimum retention for settled terminal ShiftPVMove journals")
 	flag.StringVar(&cfg.mobilityImage, "mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
@@ -125,6 +127,15 @@ func parseFlags() config {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "settle-retired-move" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runSettleRetiredMove(ctx, os.Args[2:], os.Stdout, loadRetiredMoveRuntime); err != nil && !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(os.Stderr, "ShiftPV retired Move settlement failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "cancel-creation" {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
@@ -142,6 +153,10 @@ func main() {
 		return
 	}
 	cfg := parseFlags()
+	if cfg.admissionOnly {
+		runAdmissionOnly(cfg)
+		return
+	}
 	clients := wiring.InCluster(fatal)
 	config, client, dynamicClient := clients.Config, clients.Typed, clients.Dynamic
 	lifecycleClients := wiring.ForConfig(admissionRESTConfig(config), "lifecycle auxiliary", fatal)

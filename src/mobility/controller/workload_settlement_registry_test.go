@@ -25,6 +25,15 @@ import (
 // embedded cleanup journal and reconciler. Only API storage, scanner and effect
 // results are injected; this test does not establish real filesystem behavior.
 func TestWorkloadSettlementRegistryTrace(t *testing.T) {
+	workloadSettlementRegistryTrace(t, false)
+}
+
+func TestExplicitRetiredMoveRegistryTrace(t *testing.T) {
+	workloadSettlementRegistryTrace(t, true)
+}
+
+func workloadSettlementRegistryTrace(t *testing.T, explicit bool) {
+	t.Helper()
 	for _, owner := range []string{"source", "destination"} {
 		for _, policy := range []corev1.PersistentVolumeReclaimPolicy{corev1.PersistentVolumeReclaimDelete, corev1.PersistentVolumeReclaimRetain} {
 			for _, replaced := range []bool{false, true} {
@@ -53,6 +62,7 @@ func TestWorkloadSettlementRegistryTrace(t *testing.T) {
 							return nil
 						}
 						pendingPasses, stalePasses := 0, 0
+						completed := false
 						var lastWait error
 						for range 64 {
 							// A fresh process reads both the Move and its embedded journal.
@@ -60,7 +70,14 @@ func TestWorkloadSettlementRegistryTrace(t *testing.T) {
 								r.Cleanups = &cleanupapi.Store{Client: f.dynamic}
 								r.CleanupOperator, r.ServiceAccountName = operator, "shiftpv-controller"
 							})
-							err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0))
+							complete := false
+							var err error
+							if explicit {
+								move := f.move(t, 0)
+								complete, err = f.reconciler.AdvanceRetiredMove(f.ctx, move.Name, move.UID)
+							} else {
+								err = f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0))
+							}
 							if errors.Is(err, io.ErrUnexpectedEOF) {
 								sawLoss = true
 							} else if err != nil {
@@ -98,7 +115,8 @@ func TestWorkloadSettlementRegistryTrace(t *testing.T) {
 								t.Fatal("Move protection released while it still owned the Volume gate")
 							}
 							assertRetirementReservations(t, f, move, original)
-							if volumeapi.MoveCleanupSettled(move) && len(move.Finalizers) == 0 && live.ActiveMove == "" {
+							if volumeapi.MoveCleanupSettled(move) && len(move.Finalizers) == 0 && live.ActiveMove == "" && (!explicit || complete && err == nil) {
+								completed = true
 								break
 							}
 							retirementRegistryScan(t, f, original, operator.receipted, withholdAbsence, journal)
@@ -107,7 +125,7 @@ func TestWorkloadSettlementRegistryTrace(t *testing.T) {
 						if move.Spec.Recovery != "" {
 							t.Fatal("automatic settlement required an operator ResumeOwner request")
 						}
-						if !lost || !sawLoss || pendingPasses < 3 || stalePasses != 3 || !volumeapi.MoveCleanupSettled(move) || len(move.Finalizers) != 0 || state.ActiveMove != "" {
+						if !completed || !lost || !sawLoss || pendingPasses < 3 || stalePasses != 3 || !volumeapi.MoveCleanupSettled(move) || len(move.Finalizers) != 0 || state.ActiveMove != "" {
 							t.Fatalf("trace did not close all boundaries: lost=%v observed=%v pending=%d stale=%d state=%+v move=%+v lastWait=%v", lost, sawLoss, pendingPasses, stalePasses, state, move.Status, lastWait)
 						}
 						pv, err := f.client.CoreV1().PersistentVolumes().Get(f.ctx, f.workloads[0].PV.Name, metav1.GetOptions{})

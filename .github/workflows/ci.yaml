@@ -305,6 +305,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Upload read-only Unpublish evidence
+        if: always() && matrix.group == 'g2'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: readonly-unpublish
+          path: .tmp/readonly-unpublish
+          retention-days: 14
+
       - name: Export failure diagnostics
         if: failure() || cancelled()
         uses: ./.github/actions/kind-teardown
@@ -480,7 +488,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [ready, creation-recovery]
+        scenario: [ready, creation-recovery, move-recovery]
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.scenario }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.scenario }}-kubeconfig
@@ -506,6 +514,14 @@ jobs:
         with:
           name: native-creation-recovery
           path: .tmp/creation-recovery
+          retention-days: 14
+
+      - name: Upload native Move recovery evidence
+        if: always() && matrix.scenario == 'move-recovery'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-move-recovery
+          path: .tmp/move-recovery
           retention-days: 14
 
       - name: Export failure diagnostics
