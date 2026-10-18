@@ -171,6 +171,12 @@ cleanup 권한을 추론하거나 추론한 계획으로 scan하지 않는다.
 
 정확한 Ready copy가 아직 게시 중이면 `DeleteVolume`은 `Unavailable`로 unpublish를 기다린다. 이때 삭제 fence·cleanup·예약 반환을 시작하지 않는다. copy/UID/owner 불일치, active Move, 잘못된 phase는 계속 `FailedPrecondition`으로 거부한다.
 
+첫 status 쓰기 전의 보호된 spec-only 생성 의도는 아직 copy·operation·executor를 승인하지 않았다.
+`DeleteVolume`은 이 상태를 UID·resourceVersion이 일치하는 DELETE로 취소한다. 초기화가 먼저 이기면
+DELETE가 충돌하고, 삭제 timestamp가 먼저 저장되면 이후 초기화는 거부된다. 디스크 receipt를 만들지
+않으며 다른 finalizer가 있으면 보호와 예약을 유지한다. 객체가 삭제된 뒤에만 예약이 사라진다.
+`Pending`·`NodeCreating`의 부분 실행 정리는 별도 경계이며 이 예외로 삭제하지 않는다.
+
 Delete는 Volume을 먼저 fenced 상태로 만들고 신규 publication을 차단한다. Node가 actual unpublish를 다시
 확인하고 `publishedNodes`가 비어 있으면 exact target과 executor를 durable delete journal에 결합하고
 node-local purge를 실행한다.

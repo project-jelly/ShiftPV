@@ -8,8 +8,10 @@ and read-only Unpublish [PR #224](https://github.com/project-jelly/ShiftPV/pull/
 merged; exact-head CI and local two-node Kind passed. Step 3 workload-retirement
 settlement [PR #225](https://github.com/project-jelly/ShiftPV/pull/225) merged after
 31 successful checks and precommit Delete/postcommit Retain Kind qualification.
-Step 4 read-only allocation admission is under verification; unfinished-creation
-settlement and the remaining integrated matrix are outstanding.
+Step 4 read-only allocation admission [PR #226](https://github.com/project-jelly/ShiftPV/pull/226)
+merged after 30 successful checks and real Linux/Kind RO-to-RW qualification.
+Unstarted creation cancellation is under verification. Partial native creation,
+original-claim retirement and the remaining integrated matrix are outstanding.
 
 ## Goal and invariants
 

@@ -119,6 +119,7 @@ changed binding/owner/Pod UID on retry, and a stored release with a lost respons
 | `csi/controller`: `TestDeleteWaitsForPublicationWithoutStartingCleanup` | CSI 응답 + 실제 Registry + cleanup effect 호출 여부 |
 | `csi/controller`: `TestConcurrentAdmissionKeepsIndependentPoolHoldsOnSameNode`, `TestConcurrentAdmissionToSamePoolCannotOversubscribe` | 실제 Pool Locker + capacity probe 지연 + durable hold |
 | `csi/controller`: `TestCreateInitializationRecoversAPIWriteBoundaries`, `TestLegacyInitializationsReadmitWithoutBlockingEachOther` | 실제 Registry/ledger + Create·status 실패/응답 유실 + 재시작 + 다른 Pool 진행 |
+| `volumeapi`: `TestUnstartedCancellation*`; `csi/controller`: `TestUnstartedCreationCanSettleWithoutFilesystemEffects`; API integration: `TestAPIServerUnstartedCancellation` | UID/RV 삭제·초기화 경합, 응답 유실·재시작, 외부 finalizer와 예약 보존, 실제 API에서 CSI 취소와 지연 초기화 거부 |
 | `csi/controller`: `placement_progress_test.go`, `TestMissingPoolUsesPlacementAuthority` | 등록 부재·일시 NotReady·소비자 배치 권한을 구분하고 원래 생성 intent·예약을 보존 |
 | `pool/readiness`: `backing_boundary_test.go`; `volumeapi`: `pool_backing_test.go` | 실제 Registry·Probe DI로 승인된 peer 유실/복구, 신규 등록 경쟁, own 실패·세대·구버전 condition 호환을 검증 |
 | `node/executor`: `peer_backing_progress_linux_test.go`; `csi/node`, `node/observation`, `mobility/controller`: `backing_test.go` | peer 장애 중 기존 작업·실제 create/purge 진행, 실행 전후 own identity 변경 거절, receipt 이후 fresh absence 전 hold 유지 |

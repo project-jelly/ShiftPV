@@ -45,6 +45,7 @@ type VolumeRegistry interface {
 	Get(context.Context, string) (volumeapi.State, error)
 	Delete(context.Context, string, string) error
 	RemoveVolumeFinalizer(context.Context, string, string) error
+	CancelUnstartedCreation(context.Context, string, string) error
 	PoolNodes(context.Context) ([]string, error)
 	PoolNodesForGroup(context.Context, string) ([]string, error)
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)

@@ -48,6 +48,14 @@ type retryDeleteVolumeRegistry struct {
 	events            []string
 }
 
+func (*retryDeleteVolumeRegistry) CancelUnstartedCreation(context.Context, string, string) error {
+	return volumeapi.ErrStateConflict
+}
+
+func (*fakeVolumeRegistry) CancelUnstartedCreation(context.Context, string, string) error {
+	return volumeapi.ErrStateConflict
+}
+
 func (r *retryDeleteVolumeRegistry) BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error) {
 	return r.state, nil
 }

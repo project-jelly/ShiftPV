@@ -43,7 +43,7 @@ func ownerPoolUID(volumeID string, state volumeapi.State) (string, error) {
 	if state.HasInitialReservation() {
 		return state.InitialPool.UID, nil
 	}
-	if state.Initializing() && state.InitialPool == nil {
+	if state.UnstartedCreation() && state.InitialPool == nil {
 		// Legacy spec-only objects never authorized execution. Each must pass
 		// admission before acquiring a durable InitialPool reservation.
 		return "", nil
