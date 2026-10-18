@@ -68,13 +68,19 @@ func (r *Reconciler) scanDiscovery(ctx context.Context, volumes map[string]volum
 		return fmt.Errorf("list discovery Nodes: %w", err)
 	}
 	cordoned := map[string]bool{}
+	nodeUIDs := map[string]string{}
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
 		cordoned[node.Name] = node.Spec.Unschedulable && admission.NodeReady(node)
+		nodeUIDs[node.Name] = string(node.UID)
 	}
 	for id, state := range candidates {
 		if cordoned[state.OwnerNode] {
-			emit(volumeWork{volumeID: id, volumeUID: state.UID, discover: true})
+			source := discoverySource{volumeUID: state.UID, ownerNode: state.OwnerNode, nodeUID: nodeUIDs[state.OwnerNode]}
+			if state.CurrentCopy != nil {
+				source.copy = *state.CurrentCopy
+			}
+			emit(volumeWork{volumeID: id, volumeUID: state.UID, discover: true, source: source})
 		} else {
 			idle[id] = discoveryResult{uid: state.UID}
 		}

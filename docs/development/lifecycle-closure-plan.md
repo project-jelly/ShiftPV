@@ -19,7 +19,8 @@ full source-quota reuse and normal cleanup proof. Original claim provenance
 CI and live API error/provenance qualification. Automatic retirement
 [PR #230](https://github.com/project-jelly/ShiftPV/pull/230) merged after 30
 successful checks and real API/native Kind partial-creation settlement tests.
-Step 5 admission budget isolation is under verification; deferred discovery,
+Step 5 admission budget isolation [PR #231](https://github.com/project-jelly/ShiftPV/pull/231)
+merged after 30 successful checks. Bounded deferred discovery is under verification;
 the remaining matrix and integrated qualification are outstanding.
 
 ## Goal and invariants
