@@ -16,8 +16,11 @@ creation cancellation [PR #228](https://github.com/project-jelly/ShiftPV/pull/22
 merged after 31 successful checks, Linux boundary tests and Kind receipt/absence,
 full source-quota reuse and normal cleanup proof. Original claim provenance
 [PR #229](https://github.com/project-jelly/ShiftPV/pull/229) merged after exact-head
-CI and live API error/provenance qualification. Automatic retirement is under
-verification; the remaining matrix and integrated qualification are outstanding.
+CI and live API error/provenance qualification. Automatic retirement
+[PR #230](https://github.com/project-jelly/ShiftPV/pull/230) merged after 30
+successful checks and real API/native Kind partial-creation settlement tests.
+Step 5 admission budget isolation is under verification; deferred discovery,
+the remaining matrix and integrated qualification are outstanding.
 
 ## Goal and invariants
 
