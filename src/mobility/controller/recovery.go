@@ -31,11 +31,19 @@ const (
 func (r *Reconciler) observeRecovery(ctx context.Context, move volumeapi.Move) (observation, error) {
 	result := observation{Names: namesFor(move.Name)}
 	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
+	if move.Status.SettlementRequested && move.Status.RecoveryPhase == recoveryCompleting {
+		if released, handled, releaseErr := r.observeSettlementRelease(ctx, move, state, err); handled {
+			return released, releaseErr
+		}
+	}
 	if err != nil {
 		return result, err
 	}
 	result.Volume = state
 	if move.Status.RecoveryPhase == recoveryCompleting && state.Phase == volumeapi.PhaseReady && state.ActiveMove == "" && state.OwnerNode == move.Status.RecoveryOwner {
+		if err := recordedOwnerIntact(move, state); err != nil {
+			return result, recoveryObservationError{"AuthorityMismatch", err}
+		}
 		result.FSM.RecoveryUnlockObserved = true
 		return result, nil
 	}
@@ -44,6 +52,9 @@ func (r *Reconciler) observeRecovery(ctx context.Context, move volumeapi.Move) (
 	}
 	if err := r.recoveryNodes(ctx, move, state); err != nil {
 		return result, recoveryObservationError{"NodeNotReady", err}
+	}
+	if move.Status.SettlementRequested {
+		return result, nil
 	}
 	claim, err := r.recordedWorkloadClaim(ctx, move)
 	if err != nil {
@@ -64,11 +75,8 @@ func (e recoveryObservationError) Unwrap() error { return e.error }
 // recovery step runs. It returns the exact status reason and error the caller
 // records, or an empty reason and nil when recovery may proceed.
 func recoveryGuards(move volumeapi.Move, state volumeapi.State) (string, error) {
-	if state.ActiveMove != move.Name || (state.OwnerNode != move.Spec.SourceNode && state.OwnerNode != move.Status.DestinationNode) || state.OwnerNode == "" {
-		return "AuthorityMismatch", fmt.Errorf("expected this move and source or committed destination owner")
-	}
-	if move.Status.RecoveryOwner != "" && state.OwnerNode != move.Status.RecoveryOwner {
-		return "AuthorityMismatch", fmt.Errorf("owner changed since recovery request")
+	if err := recoveryAuthorityIntact(move, state); err != nil {
+		return "AuthorityMismatch", err
 	}
 	if move.Status.DestinationNode == "" && (move.Status.CopyJobName != "" || move.Status.PromotionJobName != "") {
 		return "DestinationUnknown", fmt.Errorf("disk work was recorded without a destination; operator investigation required")
@@ -85,6 +93,22 @@ func recoveryGuards(move volumeapi.Move, state volumeapi.State) (string, error) 
 	return "", nil
 }
 
+func recoveryAuthorityIntact(move volumeapi.Move, state volumeapi.State) error {
+	if move.Status.SettlementRequested && (state.Deleting || state.HasCleanup) {
+		return fmt.Errorf("Volume has conflicting deletion authority")
+	}
+	if err := recordedOwnerIntact(move, state); err != nil {
+		return err
+	}
+	if state.ActiveMove != move.Name || (state.OwnerNode != move.Spec.SourceNode && state.OwnerNode != move.Status.DestinationNode) || state.OwnerNode == "" {
+		return fmt.Errorf("expected this move and source or committed destination owner")
+	}
+	if move.Status.RecoveryOwner != "" && state.OwnerNode != move.Status.RecoveryOwner {
+		return fmt.Errorf("owner changed since recovery request")
+	}
+	return nil
+}
+
 func (r *Reconciler) executeRecovery(ctx context.Context, move *volumeapi.Move, observed observation, action fsm.Action) (bool, error) {
 	switch action {
 	case fsm.ActionBeginRecovery:
@@ -99,7 +123,7 @@ func (r *Reconciler) executeRecovery(ctx context.Context, move *volumeapi.Move, 
 	case fsm.ActionResumeRecovery:
 		return r.resumeRecovery(ctx, *move, observed.Volume, observed.Claim)
 	case fsm.ActionCompleteRecovery:
-		return r.completeRecovery(ctx, *move, observed.Volume)
+		return r.completeRecovery(ctx, *move, observed.Volume, observed.VolumeMissing)
 	default:
 		return false, fmt.Errorf("unsupported recovery action %q", action)
 	}
@@ -115,14 +139,25 @@ func (r *Reconciler) resumeRecovery(ctx context.Context, move volumeapi.Move, st
 	return placed && slices.Contains(state.PublishedNodes, state.OwnerNode), err
 }
 
-func (r *Reconciler) completeRecovery(ctx context.Context, move volumeapi.Move, state volumeapi.State) (bool, error) {
+func (r *Reconciler) completeRecovery(ctx context.Context, move volumeapi.Move, state volumeapi.State, volumeMissing bool) (bool, error) {
+	if move.Status.SettlementRequested {
+		if err := r.settlementArtifactsClosed(ctx, move); err != nil {
+			return false, err
+		}
+	}
 	done, err := r.removeRecoveryJobs(ctx, move)
 	if err != nil || !done {
 		return false, err
 	}
+	if move.Status.SettlementRequested && (volumeMissing || state.ActiveMove == "") {
+		return true, nil
+	}
 	next := state
 	next.ActiveMove = ""
-	err = r.Repository.CompareAndSetState(ctx, move.Spec.VolumeID, volumeapi.PhaseReady, move.Name, state.OwnerNode, next)
+	if move.Status.SettlementRequested {
+		next.Phase = volumeapi.PhaseReady
+	}
+	err = r.Repository.CompareAndSetSourceState(ctx, move.Spec.VolumeID, state, next)
 	return err == nil, err
 }
 
@@ -138,7 +173,7 @@ func (r *Reconciler) recoveryNodes(ctx context.Context, move volumeapi.Move, sta
 		if !admission.NodeReady(node) || node.DeletionTimestamp != nil {
 			return fmt.Errorf("node %q must be Ready", name)
 		}
-		if name == state.OwnerNode && node.Spec.Unschedulable {
+		if name == state.OwnerNode && node.Spec.Unschedulable && !move.Status.SettlementRequested {
 			return fmt.Errorf("uncordon current owner %q before requesting service recovery", name)
 		}
 	}

@@ -78,11 +78,18 @@ spec:
             status:
               type: object
               x-kubernetes-validations:
+                - rule: '!has(oldSelf.settlementRequested) || !oldSelf.settlementRequested || (has(self.settlementRequested) && self.settlementRequested)'
+                  message: settlement intent cannot be removed
+                - rule: '!has(self.settlementRequested) || !self.settlementRequested || (has(self.phase) && self.phase == "Blocked")'
+                  message: settlement requires a blocked Move
                 - rule: '!has(self.preparation) || self.preparation == null || ((!has(self.capacityApproved) || !self.capacityApproved) && !has(self.incomingCopy) && !has(self.destinationCopy) && (!has(self.copyOperationID) || self.copyOperationID == "") && (!has(self.promotionOperationID) || self.promotionOperationID == "") && (!has(self.copyJobName) || self.copyJobName == "") && (!has(self.promotionJobName) || self.promotionJobName == "") && !has(self.cleanup) && !has(self.rollbackRequiredGeneration))'
                   message: preparation cannot coexist with destination execution authority
                 - rule: '!has(self.preparation) || self.preparation == null || (has(self.sourceCopy) && has(self.persistentVolumeName) && self.persistentVolumeName != "" && has(self.persistentVolumeUID) && has(self.persistentVolumeClaimNamespace) && self.persistentVolumeClaimNamespace != "" && has(self.persistentVolumeClaimName) && self.persistentVolumeClaimName != "" && has(self.persistentVolumeClaimUID) && has(self.consumerName) && self.consumerName != "" && has(self.consumerUID) && self.consumerUID != "" && has(self.placementPodUID))'
                   message: preparation requires the exact source copy, binding, consumer and placement identities
               properties:
+                settlementRequested:
+                  description: The original claim lifetime ended; settle this operation without requiring a replacement workload or granting Volume deletion authority.
+                  type: boolean
                 preparation:
                   type: object
                   nullable: true

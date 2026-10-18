@@ -79,6 +79,12 @@ func (r *Reconciler) observeEligibility(ctx context.Context, move volumeapi.Move
 	if done, err := r.observeVolume(ctx, move, result); done || err != nil {
 		return poolIndex{}, true, err
 	}
+	if retired, handled, err := r.observeWorkloadRetirement(ctx, move, result.Volume); handled || err != nil {
+		if err == nil {
+			*result = retired
+		}
+		return poolIndex{}, true, err
+	}
 	pools, err := r.observePools(ctx)
 	if err != nil {
 		return pools, true, err

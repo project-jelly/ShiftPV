@@ -101,6 +101,9 @@ func (r *Reconciler) settleSourceRollback(ctx context.Context, move *volumeapi.M
 // before the ordinary retained-source cleanup may run. It reports whether the
 // hold may now be released.
 func (r *Reconciler) settleDestinationCleanup(ctx context.Context, move *volumeapi.Move, state volumeapi.State) (bool, error) {
+	if move.Status.SettlementRequested {
+		return r.settleUnpublishedDestination(ctx, move, state)
+	}
 	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name || move.Status.DestinationCopy == nil ||
 		state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.DestinationCopy || state.UID != move.Status.DestinationCopy.VolumeUID ||
 		!slices.Contains(state.PublishedNodes, move.Status.DestinationNode) || slices.Contains(state.PublishedNodes, move.Spec.SourceNode) {

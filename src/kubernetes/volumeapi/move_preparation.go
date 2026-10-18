@@ -191,6 +191,9 @@ func moveCleanup(object *unstructured.Unstructured) any {
 }
 
 func validatePreparedTransition(current Move, next MoveStatus) error {
+	if err := validateSettlementTransition(current, next); err != nil {
+		return err
+	}
 	if err := preserveMoveIdentity(current.Status, next); err != nil {
 		return err
 	}

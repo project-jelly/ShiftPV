@@ -63,6 +63,9 @@ func verifyMoveSourceCleanupAuthority(ctx context.Context, registry *volumeapi.R
 	if cleanup.Spec.OperationID != volumeapi.MoveCleanupOperationID(move.UID) || *move.Status.SourceCopy != cleanup.Spec.Target || move.Status.DestinationCopy == nil {
 		return fmt.Errorf("move source cleanup identity changed: %w", volumeapi.ErrStateConflict)
 	}
+	if move.Status.SettlementRequested {
+		return verifyUnpublishedDestination(ctx, registry, move, state)
+	}
 	settling := movePostcommitCleanupPhase(move) || moveRetiringUnderRecoveryOwner(move, move.Status.DestinationNode)
 	if !settling || !destinationOwnsPublishedCopy(move, state) {
 		return fmt.Errorf("move source cleanup authority changed: %w", volumeapi.ErrStateConflict)
@@ -101,8 +104,23 @@ func movePostcommitCleanupPhase(move volumeapi.Move) bool {
 // moveRetiringUnderRecoveryOwner reports whether the blocked Move is retiring
 // artifacts with owner as the verified recovery authority.
 func moveRetiringUnderRecoveryOwner(move volumeapi.Move, owner string) bool {
-	return move.Status.Phase == "Blocked" && move.Spec.Recovery == "ResumeOwner" &&
+	return move.Status.Phase == "Blocked" && (move.Spec.Recovery == "ResumeOwner" || move.Status.SettlementRequested) &&
 		move.Status.RecoveryPhase == "Retiring" && move.Status.RecoveryOwner == owner
+}
+
+func verifyUnpublishedDestination(ctx context.Context, registry *volumeapi.Registry, move volumeapi.Move, state volumeapi.State) error {
+	if !volumeapi.MoveRetiresUnpublishedSource(move, state) {
+		return fmt.Errorf("unpublished destination settlement authority changed: %w", volumeapi.ErrStateConflict)
+	}
+	copy := move.Status.DestinationCopy
+	pool, err := registry.InventoryPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
+	if err != nil {
+		return err
+	}
+	if !volumeapi.PoolHasUnpublishedCopy(pool, copy, move.Status.RollbackRequiredGeneration) {
+		return fmt.Errorf("unpublished destination settlement inventory changed: %w", volumeapi.ErrStateConflict)
+	}
+	return nil
 }
 
 // destinationOwnsPublishedCopy reports whether the Volume state proves the

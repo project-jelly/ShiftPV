@@ -408,9 +408,13 @@ func TestMoveCleanupSettledRetainsPreparedAndUnknownRecords(t *testing.T) {
 }
 
 func TestCompareAndSetMoveStatusRejectsPrunedResponseWithoutReplay(t *testing.T) {
-	for _, field := range []string{"preparation", "persistentVolumeUID", "persistentVolumeClaimUID", "placementPodUID", "cleanup"} {
+	for _, field := range []string{"preparation", "persistentVolumeUID", "persistentVolumeClaimUID", "placementPodUID", "cleanup", "settlementRequested"} {
 		t.Run(field, func(t *testing.T) {
 			move := preparedMoveFixture()
+			if field == "settlementRequested" {
+				move.Status = approvedPreparation(move)
+				move.Status.Phase, move.Status.SettlementRequested = "Blocked", true
+			}
 			object := preparedMoveObject(move)
 			if field == "cleanup" {
 				move.Status.Preparation = nil

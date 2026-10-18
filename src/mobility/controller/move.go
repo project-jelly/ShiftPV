@@ -32,7 +32,8 @@ func lifecycleFacts(move volumeapi.Move, observed *observation) {
 	facts.ConsumerExists = observed.Consumer != nil
 	facts.ReplacementExists = observed.Replacement != nil
 	facts.ReplacementHeld = observed.Replacement != nil && hasPlacementHold(observed.Replacement) && observed.Replacement.Spec.NodeName == ""
-	facts.RecoveryRequested = move.Spec.Recovery == "ResumeOwner"
+	facts.RecoveryRequested = recoveryRequested(move)
+	facts.SettlementOnly = move.Status.SettlementRequested
 	facts.RecoveryOwnerIsDestination = observed.Volume.OwnerNode != "" && observed.Volume.OwnerNode == move.Status.DestinationNode
 }
 
@@ -49,7 +50,7 @@ func preparationLifecycle(move volumeapi.Move) bool {
 // cancelled. An unapproved Blocked record must first fence its Move writer;
 // missing recovery prerequisites cannot prevent that intent from being saved.
 func needsRecoveryObservation(move volumeapi.Move) bool {
-	if move.Status.Phase != string(fsm.PhaseBlocked) || move.Spec.Recovery != "ResumeOwner" || move.Status.RecoveryPhase == recoveryRecovered {
+	if move.Status.Phase != string(fsm.PhaseBlocked) || !recoveryRequested(move) || move.Status.RecoveryPhase == recoveryRecovered {
 		return false
 	}
 	return move.Status.CapacityApproved ||
@@ -71,7 +72,7 @@ func (r *Reconciler) reconcileMove(ctx context.Context, move volumeapi.Move) err
 		if preparationLifecycle(move) {
 			return err
 		}
-		if move.Status.Phase == string(fsm.PhaseBlocked) && move.Spec.Recovery == "ResumeOwner" {
+		if move.Status.Phase == string(fsm.PhaseBlocked) && recoveryRequested(move) {
 			reason := "ObservationFailed"
 			var observationErr recoveryObservationError
 			if errors.As(err, &observationErr) {
@@ -97,10 +98,7 @@ func (r *Reconciler) observeLifecycle(ctx context.Context, move volumeapi.Move) 
 	case phase == fsm.PhaseCanceling:
 		return r.observeCancellation(ctx, move)
 	case phase == fsm.PhaseBlocked:
-		if needsRecoveryObservation(move) {
-			return r.observeRecovery(ctx, move)
-		}
-		return observation{}, nil
+		return r.observeBlockedLifecycle(ctx, move)
 	}
 	switch phase {
 	case "", fsm.PhasePending, fsm.PhasePreparing, fsm.PhaseStartingDisruption:
@@ -144,7 +142,7 @@ func (r *Reconciler) advanceMove(ctx context.Context, move *volumeapi.Move, obse
 		if errors.Is(err, errCapacityApprovalPersistence) || errors.Is(err, errMoveStatusPersistence) || preparationLifecycle(*move) {
 			return err
 		}
-		if move.Status.Phase == string(fsm.PhaseBlocked) && move.Spec.Recovery == "ResumeOwner" {
+		if move.Status.Phase == string(fsm.PhaseBlocked) && recoveryRequested(*move) {
 			reason := "RecoveryStepFailed"
 			if errors.Is(err, errRecoveryCleanupNeedsReview) {
 				reason = "CleanupNeedsReview"
@@ -168,12 +166,16 @@ func (r *Reconciler) advanceMove(ctx context.Context, move *volumeapi.Move, obse
 func (r *Reconciler) applyMoveDecision(move *volumeapi.Move, decision fsm.Decision) {
 	before := lifecycleState(*move)
 	move.Status.Phase, move.Status.RecoveryPhase = string(decision.Next.Phase), decision.Next.RecoveryPhase
+	if move.Status.SettlementRequested {
+		r.applySettlementDecision(move, before, decision)
+		return
+	}
 	if before.RecoveryPhase != decision.Next.RecoveryPhase {
 		move.Status.RecoveryReason, move.Status.RecoveryMessage = "", ""
 		move.Status.Message = recoveryPhaseMessage(move.Status.RecoveryPhase, move.Status.RecoveryOwner)
 		return
 	}
-	if before.Phase == fsm.PhaseBlocked && decision.Next.Phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" {
+	if before.Phase == fsm.PhaseBlocked && decision.Next.Phase == fsm.PhaseBlocked && recoveryRequested(*move) && decision.Action != fsm.ActionRequestSettlement {
 		return
 	}
 	if before.Phase == fsm.PhaseCanceling || before.Phase == fsm.PhaseCancelled {
@@ -212,6 +214,8 @@ func actionComplete(err error) (bool, error) {
 
 func (r *Reconciler) executeLifecycle(ctx context.Context, move *volumeapi.Move, observed observation, decision fsm.Decision) (bool, error) {
 	switch decision.Action {
+	case fsm.ActionRequestSettlement:
+		return actionComplete(r.requestWorkloadSettlement(ctx, move, observed))
 	case fsm.ActionProtectMove:
 		return false, r.Repository.AddMoveFinalizer(ctx, move.Name, move.UID)
 	case fsm.ActionInitializePreparation:

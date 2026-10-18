@@ -39,10 +39,11 @@ jq '
         .properties.status.properties.persistentVolumeUID,
         .properties.status.properties.persistentVolumeClaimUID,
         .properties.status.properties.placementPodUID)
+    | del(.properties.status.properties.settlementRequested)
     | .properties.status.properties.phase.enum -= ["Preparing", "StartingDisruption", "Canceling", "Cancelled"]
     | walk(if type == "object" and has("x-kubernetes-validations") then
         .["x-kubernetes-validations"] |= map(select(
-          .rule | test("protocolVersion|preparation|persistentVolumeUID|persistentVolumeClaimUID|placementPodUID") | not))
+          .rule | test("protocolVersion|preparation|persistentVolumeUID|persistentVolumeClaimUID|placementPodUID|settlementRequested") | not))
       else . end)
   )' "${probe_dir}/move-crd.json" >"${probe_dir}/legacy-move-crd.json"
 kubectl --kubeconfig "${probe_kubeconfig}" apply -f "${probe_dir}/legacy-move-crd.json" >/dev/null
@@ -174,6 +175,30 @@ get_move "${prepared_name}" | jq '.status.preparation = null' >"${probe_dir}/pre
 kubectl --kubeconfig "${probe_kubeconfig}" replace --raw "${move_api}/${prepared_name}/status?fieldValidation=Strict" \
   -f "${probe_dir}/prepared-null.json" >/dev/null
 get_move "${prepared_name}" | jq -e '.status | has("preparation") and .preparation == null' >/dev/null
+
+# Retirement intent survives restarts and older writers. This is a schema
+# predicate only; runtime copy/owner/cleanup authority is checked independently.
+get_move "${prepared_name}" | jq '.status.phase = "Blocked" | .status.settlementRequested = true' \
+  >"${probe_dir}/settlement-intent.json"
+kubectl --kubeconfig "${probe_kubeconfig}" replace --raw "${move_api}/${prepared_name}/status?fieldValidation=Strict" \
+  -f "${probe_dir}/settlement-intent.json" >/dev/null
+for mutation in 'del(.status.settlementRequested)' '.status.settlementRequested = false'; do
+  get_move "${prepared_name}" | jq "${mutation}" >"${probe_dir}/settlement-erased.json"
+  expect_rejected 'settlement intent cannot be removed' \
+    kubectl --kubeconfig "${probe_kubeconfig}" replace --raw "${move_api}/${prepared_name}/status?fieldValidation=Strict" \
+    -f "${probe_dir}/settlement-erased.json"
+done
+get_move "${prepared_name}" | jq '.status.phase = "Copying"' >"${probe_dir}/settlement-unblocked.json"
+expect_rejected 'settlement requires a blocked Move' \
+  kubectl --kubeconfig "${probe_kubeconfig}" replace --raw "${move_api}/${prepared_name}/status?fieldValidation=Strict" \
+  -f "${probe_dir}/settlement-unblocked.json"
+get_move "${prepared_name}" | jq '.status.message = "compatible writer retains retirement intent"' \
+  >"${probe_dir}/settlement-message.json"
+kubectl --kubeconfig "${probe_kubeconfig}" replace --raw "${move_api}/${prepared_name}/status?fieldValidation=Strict" \
+  -f "${probe_dir}/settlement-message.json" >/dev/null
+get_move "${prepared_name}" | jq -e '.status.settlementRequested == true' >/dev/null
+get_move "${legacy_name}" | jq -e '(.status // {} | has("settlementRequested") | not)' >/dev/null
+echo 'Settlement intent is monotonic across status writers; no legacy default was stored'
 
 # Old records can still update metadata and finish finalization without a
 # protocol rewrite. Neither required nor default is added to the old field.

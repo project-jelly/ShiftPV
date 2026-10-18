@@ -37,7 +37,7 @@ Valid destructive authority requires all of the following:
 |---|---|
 | Parent intent | Exact Volume or Move journal entry exists and still owns the operation |
 | Volume authority | Target is not a live current owner unless this is the Volume delete path |
-| Move authority | Destination owner CAS and actual-publish proof exist before source cleanup |
+| Move authority | Destination owner CAS plus actual publish or separately fenced [workload-retirement proof](volume-mobility.md#workload-retirement) |
 | Publication | No live kubelet mount references the target copy |
 | Pool identity | Pool name/UID/node still match and the protection finalizer is present |
 | Local marker | Copy marker and directory device/inode match the target |
@@ -156,7 +156,7 @@ helper images; the candidate provides history inspection, not old Job execution.
 | Case | Rule |
 |---|---|
 | Precommit abort | Destination incoming or promoted non-owner copy may be purged only from exact Move intent. |
-| Postcommit source cleanup | Source copy may be purged only after destination owner CAS and destination actual-publish proof. |
+| Postcommit source cleanup | Requires committed destination authority and actual publish, or the separate verified workload-retirement proof. |
 | Rollback artifact | Partial copy never promotes; cleanup removes only the exact non-authoritative artifact. |
 | Source capacity | After commit, the Move holds retained source capacity until receipt and fresh absence proof. |
 | Forward recovery | Postcommit cleanup waits and resumes; it never rolls ownership back to source. |

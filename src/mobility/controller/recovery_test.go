@@ -130,7 +130,7 @@ func TestRecoveryResumesOnlyCurrentOwnerAndSurvivesEveryBoundary(t *testing.T) {
 }
 
 func TestRecoveryFailsClosedOnUnsafeObservation(t *testing.T) {
-	for _, scenario := range []string{"foreign writer", "unknown owner", "changed owner", "different move", "not blocked", "cordoned owner", "unready peer", "binding UID changed", "API failure", "unrecorded destination"} {
+	for _, scenario := range []string{"foreign writer", "unknown owner", "changed owner", "different move", "not blocked", "cordoned owner", "unready peer", "binding changed", "API failure", "unrecorded destination"} {
 		t.Run(scenario, func(t *testing.T) {
 			r, repo, client := recoveryFixture(t, "source")
 			id := repo.moves[0].Spec.VolumeID
@@ -161,9 +161,9 @@ func TestRecoveryFailsClosedOnUnsafeObservation(t *testing.T) {
 					node.Status.Conditions = nil
 				}
 				_, _ = client.CoreV1().Nodes().Update(context.Background(), node, metav1.UpdateOptions{})
-			case "binding UID changed":
+			case "binding changed":
 				claim, _ := client.CoreV1().PersistentVolumeClaims("workload").Get(context.Background(), "claim", metav1.GetOptions{})
-				claim.UID = "replacement-claim"
+				claim.Spec.VolumeName = "other-pv"
 				_, _ = client.CoreV1().PersistentVolumeClaims("workload").Update(context.Background(), claim, metav1.UpdateOptions{})
 			case "API failure":
 				client.PrependReactor("get", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, fmt.Errorf("timeout") })
@@ -323,7 +323,8 @@ func TestDiscoveryWaitsForDestinationRecoveryJournalAfterFinalCAS(t *testing.T) 
 	id := repo.moves[0].Spec.VolumeID
 	repo.moves[0].Status.RecoveryPhase = recoveryCompleting
 	repo.moves[0].Status.RecoveryOwner = "destination"
-	repo.volumes[id] = volumeapi.State{Phase: "Ready", OwnerNode: "destination", PublishedNodes: []string{"destination"}}
+	repo.volumes[id] = volumeapi.State{UID: repo.moves[0].Status.DestinationCopy.VolumeUID,
+		Phase: "Ready", OwnerNode: "destination", CurrentCopy: repo.moves[0].Status.DestinationCopy, PublishedNodes: []string{"destination"}}
 	node, _ := client.CoreV1().Nodes().Get(context.Background(), "destination", metav1.GetOptions{})
 	node.Spec.Unschedulable = true
 	_, _ = client.CoreV1().Nodes().Update(context.Background(), node, metav1.UpdateOptions{})

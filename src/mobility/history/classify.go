@@ -23,6 +23,9 @@ func ValidateSettled(move volumeapi.Move, current *volumeapi.State, journal *cle
 	if move.Spec.ProtocolVersion != "" && move.Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 {
 		return fmt.Errorf("Move history protocol %q is unsupported", move.Spec.ProtocolVersion)
 	}
+	if move.Status.SettlementRequested && move.Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 {
+		return fmt.Errorf("workload retirement requires prepared Move history")
+	}
 	if move.Status.Preparation != nil || current != nil && current.ActiveMove == move.Name {
 		return fmt.Errorf("Move still owns a preparation reservation or Volume reference")
 	}
@@ -84,9 +87,33 @@ func validateTransaction(move volumeapi.Move) error {
 }
 
 func validateRecovered(move volumeapi.Move, journal *cleanupapi.Cleanup) error {
-	if move.Spec.Recovery != "ResumeOwner" || move.Status.RecoveryPhase != "Recovered" ||
-		move.Status.CapacityApproved || move.Status.CapacityReason != "RecoverySettled" {
+	if (move.Spec.Recovery != "ResumeOwner" && !move.Status.SettlementRequested) || move.Status.RecoveryPhase != "Recovered" {
 		return fmt.Errorf("Move recovery or capacity settlement is incomplete")
+	}
+	return validateRecoveryArtifacts(move, journal)
+}
+
+// ValidateSettlementCompletion checks the recorded artifacts before the final
+// Volume unlock. If CSI deletion wins after that unlock, only owned read-only
+// verification Jobs and Move metadata remain; no new disk authority is granted.
+func ValidateSettlementCompletion(move volumeapi.Move, journal *cleanupapi.Cleanup) error {
+	if !move.Status.SettlementRequested || move.Status.Phase != "Blocked" || move.Status.RecoveryPhase != "Completing" || move.Status.Preparation != nil {
+		return fmt.Errorf("Move is not completing workload retirement")
+	}
+	if err := volumeapi.ValidatePreparedMovePlan(move); err != nil {
+		return err
+	}
+	return validateRecoveryArtifacts(move, journal)
+}
+
+func validateRecoveryArtifacts(move volumeapi.Move, journal *cleanupapi.Cleanup) error {
+	if move.Status.CapacityApproved || move.Status.CapacityReason != "RecoverySettled" {
+		return fmt.Errorf("Move capacity settlement is incomplete")
+	}
+	if move.Status.SettlementRequested {
+		if err := validateTransaction(move); err != nil {
+			return err
+		}
 	}
 	if move.Status.RecoveryOwner == move.Spec.SourceNode && !hasDestinationIntent(move) {
 		// Legacy partial approvals can have no execution plan but still require

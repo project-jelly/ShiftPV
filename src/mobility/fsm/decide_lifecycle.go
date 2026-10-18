@@ -43,6 +43,9 @@ func validateReservedSource(observation Observation) error {
 // Lifecycle routing precedes execution health checks. Cancellation does not
 // require a live workload binding, and terminal history cannot regain authority.
 func decideLifecycle(current State, observation Observation) (Decision, bool, error) {
+	if canRequestSettlement(current, observation) {
+		return Decision{Next: State{Phase: PhaseBlocked}, Action: ActionRequestSettlement, Reason: "WorkloadRetired"}, true, nil
+	}
 	switch current.Phase {
 	case PhaseSucceeded:
 		return Decision{Next: current, Action: ActionFinalizeHistory}, true, nil
@@ -76,6 +79,17 @@ func decideLifecycle(current State, observation Observation) (Decision, bool, er
 		return decision, true, err
 	}
 	return Decision{}, false, nil
+}
+
+func canRequestSettlement(current State, observation Observation) bool {
+	if !observation.WorkloadRetired || current.RecoveryPhase == RecoveryRecovered || beforeExecutionApproval(observation) {
+		return false
+	}
+	switch current.Phase {
+	case PhaseSucceeded, PhaseCancelled, PhaseCanceling:
+		return false
+	}
+	return true
 }
 
 func decidePreparation(current Phase, observation Observation) (Decision, error) {
@@ -162,12 +176,12 @@ func decideRecovery(current State, observation Observation) (Decision, error) {
 		next.RecoveryPhase, action = RecoveryVerifying, ActionQuiesceRecovery
 	case RecoveryVerifying:
 		next.RecoveryPhase, action = RecoveryRetiring, ActionVerifyRecovery
-		if observation.RecoveryOwnerIsDestination {
+		if observation.RecoveryOwnerIsDestination && !observation.SettlementOnly {
 			next.RecoveryPhase = RecoveryResuming
 		}
 	case RecoveryRetiring:
 		next.RecoveryPhase, action = RecoveryResuming, ActionRetireRecovery
-		if observation.RecoveryOwnerIsDestination {
+		if observation.RecoveryOwnerIsDestination || observation.SettlementOnly {
 			next.RecoveryPhase = RecoveryCompleting
 		}
 	case RecoveryResuming:
