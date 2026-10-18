@@ -20,8 +20,9 @@ CI and live API error/provenance qualification. Automatic retirement
 [PR #230](https://github.com/project-jelly/ShiftPV/pull/230) merged after 30
 successful checks and real API/native Kind partial-creation settlement tests.
 Step 5 admission budget isolation [PR #231](https://github.com/project-jelly/ShiftPV/pull/231)
-merged after 30 successful checks. Bounded deferred discovery is under verification;
-the remaining matrix and integrated qualification are outstanding.
+merged after 30 successful checks. Bounded deferred discovery
+[PR #232](https://github.com/project-jelly/ShiftPV/pull/232) merged after 30
+successful checks. The remaining matrix and integrated qualification are outstanding.
 
 ## Goal and invariants
 
@@ -118,3 +119,29 @@ Kind qualification asserts data checksums and original identities together with
 settlement, not only Pod readiness. Physical reboot/soak and load measurements
 remain separately reported. This goal ends at release readiness; publishing
 images/charts and Home rollout are separate operations.
+
+### Workload-retirement trace coverage
+
+`test/model/workload_settlement_model_test.go` independently models retirement
+without importing the production FSM or cleanup predicates. Its state keeps
+claim lifetime, owner CAS, publication, effect evidence and capacity settlement
+separate. The normal mobility model continues to require destination publication;
+retirement instead verifies the fenced, unpublished retained owner, with a causal
+Pool scan for destination-owner retirement. Unlock clears the API gate; the model
+does not introduce a permanent local fence.
+
+| Boundary | Independent model event | Actual Registry/reconciler coverage |
+|---|---|---|
+| Original claim absent/replaced; timeout or terminating original is insufficient | `retireClaim`, `observeClaimEnd`, `observeUnknownClaim` | `TestWorkloadSettlementRegistryTrace`; `TestWorkloadRetirementRequiresAbsenceRatherThanAPIFailure` |
+| Commit competes with retirement on exact current copy | `commitBeforeFence`, `fenceOwner` | `TestWorkloadSettlementAndOwnerCommitCompeteOnExactVolumeCAS` |
+| Fence/intent/unlock stored but response lost; restart reads durable state | Separate fence, intent and unlock transitions | `TestWorkloadSettlementRegistryTrace`, all three accepted-write boundaries |
+| Quiesce and verify owner without restarting service | `quiesceEffects`, `verifyOwner`, `observeUnpublishedOwner` | Registry trace preserves exact UID/copy/capacity and empty publication |
+| Effect or API receipt alone cannot release capacity | `removeOtherCopy`, `recordLocalPurge`, `reportPurge` | Registry trace holds the actual embedded journal Pending across retries |
+| Only a later complete scan closes cleanup | `requestAbsenceScan`, `observeFreshAbsence` | Registry trace withholds the target Pool scan for three retries |
+| Release temporary hold, remove verifier, unlock, retire metadata | Final four settlement transitions | Registry trace checks per-Pool reservations, jobs, activeMove and finalizer |
+
+The Registry trace covers both owners, absent/replaced PVC, Delete/Retain policy
+and each accepted-write loss, with a fresh reconciler each pass. Its effect and
+scanner are injected; it proves API settlement, not native filesystem cleanup or
+subsequent CSI Delete. Native precommit Retain/postcommit Delete and the active
+0.6.13 upgrade transition remain integrated qualification requirements.
