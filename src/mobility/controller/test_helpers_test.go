@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -78,11 +79,18 @@ func withCleanupsFrom(other *Reconciler) func(*Reconciler) {
 }
 
 func assignJobUIDs(client *fake.Clientset) {
+	var mu sync.Mutex
+	creations := map[string]int{}
 	for _, resource := range []string{"jobs", "pods", "services", "configmaps", "secrets"} {
 		client.PrependReactor("create", resource, func(action ktesting.Action) (bool, runtime.Object, error) {
 			object := action.(ktesting.CreateAction).GetObject().(metav1.Object)
 			if object.GetUID() == "" {
-				object.SetUID(types.UID(object.GetName() + "-uid"))
+				mu.Lock()
+				key := resource + "/" + action.GetNamespace() + "/" + object.GetName()
+				creations[key]++
+				generation := creations[key]
+				mu.Unlock()
+				object.SetUID(types.UID(fmt.Sprintf("%s-uid-%d", object.GetName(), generation)))
 			}
 			return false, nil, nil
 		})

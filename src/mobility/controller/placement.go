@@ -217,9 +217,18 @@ func (r *Reconciler) deletePlacement(ctx context.Context, move volumeapi.Move) e
 }
 
 func validatePlacementIdentity(pod *corev1.Pod, move volumeapi.Move, names resourceNames) error {
-	if move.Status.PlacementPodUID != "" && string(pod.UID) != move.Status.PlacementPodUID {
+	if err := validatePlacementOwner(pod, move, names); err != nil {
+		return err
+	}
+	// The UID is an admission snapshot, not execution authority. Once approved,
+	// the FSM may recreate this reservation on the persisted destination.
+	if !move.Status.CapacityApproved && move.Status.PlacementPodUID != "" && string(pod.UID) != move.Status.PlacementPodUID {
 		return fmt.Errorf("placement reservation Pod UID changed")
 	}
+	return nil
+}
+
+func validatePlacementOwner(pod *corev1.Pod, move volumeapi.Move, names resourceNames) error {
 	if pod.Labels["shiftpv.io/move"] != names.Base || pod.Labels["shiftpv.io/role"] != placementRole {
 		return fmt.Errorf("placement reservation Pod %q labels do not match move", pod.Name)
 	}
