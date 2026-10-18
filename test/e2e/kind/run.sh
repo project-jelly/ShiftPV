@@ -205,6 +205,7 @@ wait_for_lifecycle_webhook
 if [[ "${NODE_EFFECTS_ONLY:-0}" == "1" ]]; then
  CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/node-executor.sh"
  CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/creation-retirement.sh"
+ CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/delayed-pv-handoff.sh"
  echo "ShiftPV focused resident Node E2E passed"
  exit 0
 fi

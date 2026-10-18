@@ -18,6 +18,12 @@ recovery_command() {
 	kubectl apply -f - <<<"${pod}"
 	kubectl -n "${NAMESPACE}" wait "pod/${name}" --for="jsonpath={.status.phase}=${expected}" --timeout=180s
 	kubectl -n "${NAMESPACE}" logs "pod/${name}" >"${RECOVERY_EVIDENCE}/${name}.log" 2>&1
+	if [[ "${command}" == upgrade-check ]]; then
+		# Kubernetes merges stdout/stderr without preserving their relative order.
+		jq -Rsc 'split("\n") | map(fromjson? | select(type == "object" and has("complete") and has("blockers"))) |
+		 if length == 1 then .[0] else error("missing unique upgrade report") end' \
+		 "${RECOVERY_EVIDENCE}/${name}.log" >"${RECOVERY_EVIDENCE}/${name}-report.json"
+	fi
 	kubectl -n "${NAMESPACE}" get "pod/${name}" -o json >"${RECOVERY_EVIDENCE}/${name}.json"
 	kubectl -n "${NAMESPACE}" delete "pod/${name}" --wait=true --timeout=60s
 }
@@ -148,8 +154,8 @@ EOF
 	assert_marker shiftpv-upgrade-existing "${MARKER}"
 
 	recovery_command native-check-before Failed upgrade-check --namespace="${NAMESPACE}" --node-daemonset-name=shiftpv-node
-	head -n 1 "${RECOVERY_EVIDENCE}/native-check-before.log" | jq -e --arg id "${partial}" \
-		'.complete and any(.blockers[]; .kind == "ShiftPVVolume" and .name == $id)' >/dev/null
+	jq -e --arg id "${partial}" '.complete and any(.blockers[]; .kind == "ShiftPVVolume" and .name == $id)' \
+		"${RECOVERY_EVIDENCE}/native-check-before-report.json" >/dev/null
 	recovery_command native-ready-preserved Failed cancel-creation --namespace="${NAMESPACE}" --volume-id="${ready_volume}" --volume-uid="${ready_uid}"
 	assert_marker shiftpv-upgrade-existing "${MARKER}"
 	# This call records cancellation but cannot finish while the API receipt is
@@ -169,7 +175,7 @@ EOF
 	assert_node_absent "${node}" "${mount}/.shiftpv/incoming/create-$(jq -er '.copyID' <<<"${copy}")"
 	assert_node_absent "${node}" "${mount}/.shiftpv/retired/$(jq -er '.copyID' <<<"${copy}")"
 	recovery_command native-check-settled Succeeded upgrade-check --namespace="${NAMESPACE}" --node-daemonset-name=shiftpv-node
-	jq -e '.complete and (.blockers|length) == 0' "${RECOVERY_EVIDENCE}/native-check-settled.log" >/dev/null
+	jq -e '.complete and (.blockers|length) == 0' "${RECOVERY_EVIDENCE}/native-check-settled-report.json" >/dev/null
 
 	# The strict transition check is now SAFE, before replacing the sole writer.
 	upgrade_candidate

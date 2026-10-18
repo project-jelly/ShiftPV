@@ -51,6 +51,13 @@ Valid destructive authority requires all of the following:
 | `Verifying` | API receipt records the exact purged local effect | Request a post-receipt Pool scan |
 | `ConfirmingAbsence` | Post-receipt `scanEpoch` generation fence is recorded | Wait for fresh valid complete absence proof |
 | `Completed` | Receipt and absence proof match operation | Release parent finalizer and capacity hold |
+| `NeedsReview` | Identity or receipt authority contradiction | Preserve data; no destructive action |
+
+`Completed` is terminal for that exact cleanup operation. It proves one
+operation's receipt and later absence fence; it is not a license to delete again.
+If the exact copy reappears after settlement, it is a report-only anomaly for
+operator review; cleanup does not reopen or auto-delete from the completed
+operation.
 
 ## Initial creation
 
@@ -63,9 +70,13 @@ The creation retirement reconciler observes known, unfinished initial requests.
 It requires the original PVC to be absent, replaced by a different UID, or
 terminating, with no recorded original binding or observed PV handoff. API errors,
 legacy helper responsibility and contradictory state preserve data and accounting.
-Ready Volumes and unknown provenance remain outside automatic retirement.
+Ready Volumes and unfenced unknown provenance remain outside automatic retirement.
+The provisioner's [PV store queue](https://github.com/kubernetes-sigs/sig-storage-lib-external-provisioner/blob/v13.0.0/controller/volume_store.go)
+can finish registering a PV after its PVC ends. No PV yet is not cancellation
+authority for Ready data; preserve the exact copy and its original reservation.
 
-CSI deletion and automatic retirement share the same creation-only canceller.
+CSI deletion, automatic retirement and explicit per-UID recovery share the same
+creation-only canceller.
 Completion and cancellation compete on the Volume CAS; a Ready winner is never
 converted into normal deletion by this reconciler. A durable cancellation resumes
 after restart without requiring another CreateVolume/DeleteVolume request. Its
@@ -78,13 +89,8 @@ create-stage and retired paths. An unplaced stage must be empty. A local
 no-effects receipt may contain zero device/inode only for this exact initial-copy
 cancellation; all paths must be absent. The API cleanup receipt and a later
 generation-fenced complete inventory still precede finalization and hold release.
-| `NeedsReview` | Identity or receipt authority contradiction | Preserve data; no destructive action |
 
-`Completed` is terminal for that exact cleanup operation. It proves one
-operation's receipt and later absence fence; it is not a license to delete again.
-If the exact copy reappears after settlement, it is a report-only anomaly for
-operator review; cleanup does not reopen or auto-delete from the completed
-operation.
+## Execution compatibility
 
 An unfinished legacy creation Pod or Job-bound cleanup, including `Verifying`
 and `ConfirmingAbsence`, must settle on its compatible old writer and helper
