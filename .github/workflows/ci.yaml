@@ -296,6 +296,15 @@ jobs:
           NODE_EFFECTS_ONLY: ${{ matrix.group == 'node-rpc' && '1' || '0' }}
         run: ./test/e2e/kind/run.sh
 
+      - name: Upload delayed PV handoff evidence
+        if: always() && matrix.group == 'node-rpc'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: delayed-pv-handoff
+          path: .tmp/delayed-pv-handoff
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Export failure diagnostics
         if: failure() || cancelled()
         uses: ./.github/actions/kind-teardown

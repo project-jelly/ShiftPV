@@ -83,8 +83,10 @@ Volume 생성과 함께 `spec.initialPool`에 Pool name/UID를 저장한다. 첫
 계산하며, 재시도는 같은 Pool에서 API가 부여한 Volume UID로 copy intent를 완성한다. 구버전의 spec만
 남은 객체는 실행 증거가 전혀 없는 경우에만 원래 node·요청 크기로 용량 승인을 다시 받는다.
 이때 용량이 부족해도 `Unavailable`로 같은 node에서 기다리며 재스케줄을 요청하지 않는다.
-이 복구는 PVC의 생성 재시도로 진행한다. 초기화 중 PVC가 취소되거나 Pool이 삭제 중이면 자동 취소로
-예약을 반환하지 않으며, 해당 객체와 Pool 보호를 유지한다.
+차트의 PVC 생성 요청은 실행 전에 원본의 namespace·name·UID를 `spec.creationClaim`으로 고정한다.
+원본 요청이 종료된 미완료 생성은 별도 reconciler가 [생성 취소 계약](source-cleanup.md#initial-creation)에
+따라 정산한다. 출처가 불명확하면 추측해 취소하지 않는다. `Ready`는 PV 등록이 지연될 수 있으므로
+PVC가 사라지고 PV가 아직 없어도 자동 생성 취소 대상이 아니며 기존 사본과 예약을 보존한다.
 
 승인된 생성의 실행·복구는 동일한 Volume·copy·operation·executor와 보호된 Pool의 최신 backing을
 재검증한다. 생성 중간 경로 때문에 inventory가 invalid여도 이 작업은 복구할 수 있으며, 로컬 marker와
@@ -176,6 +178,10 @@ cleanup 권한을 추론하거나 추론한 계획으로 scan하지 않는다.
 DELETE가 충돌하고, 삭제 timestamp가 먼저 저장되면 이후 초기화는 거부된다. 디스크 receipt를 만들지
 않으며 다른 finalizer가 있으면 보호와 예약을 유지한다. 객체가 삭제된 뒤에만 예약이 사라진다.
 `Pending`·`NodeCreating`의 부분 실행 정리는 별도 경계이며 이 예외로 삭제하지 않는다.
+
+승인된 초기 사본의 부분 실행은 생성 전용 CAS로 취소한다. 생성 완료가 먼저 이기면 Ready를
+보존하며, 취소가 먼저 이기면 `CreationCancelled` journal의 영수증과 최신 부재 증명을 확인한 뒤
+예약을 해제한다. CSI 삭제·자동 정산·명시적 복구 명령은 같은 생성 취소 기능을 사용한다.
 
 Delete는 Volume을 먼저 fenced 상태로 만들고 신규 publication을 차단한다. Node가 actual unpublish를 다시
 확인하고 `publishedNodes`가 비어 있으면 exact target과 executor를 durable delete journal에 결합하고
