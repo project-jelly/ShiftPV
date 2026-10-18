@@ -285,3 +285,35 @@ func TestOptionalMetadataOrOpaqueRequestKeepsUnknownProvenance(t *testing.T) {
 		})
 	}
 }
+
+func TestPendingClaimObservationUncertaintyRemainsRetryable(t *testing.T) {
+	for _, observationErr := range []error{errors.New("connection lost"), apierrors.NewInternalError(errors.New("API server unavailable")), apierrors.NewForbidden(corev1.Resource("persistentvolumeclaims"), "claim", errors.New("permissions unavailable"))} {
+		t.Run(observationErr.Error(), func(t *testing.T) {
+			ctx := context.Background()
+			api, r, newService, _ := initializationFixture(t)
+			s := newService()
+			req := claimCreateRequest()
+			id, _ := volume.IDFromName(req.Name)
+			before, err := r.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: id, RequestName: req.Name, NodeName: "worker-a", CapacityBytes: req.CapacityRange.RequiredBytes, Pool: &volumeapi.PoolReference{Name: "pool-a", UID: "pool-a-uid"}, Claim: &volumeapi.ClaimReference{Namespace: "app", Name: "claim", UID: "uid"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.CreationClaims = claimInspectionFunc(func(context.Context, creation.ClaimRequest) (*volumeapi.ClaimReference, error) {
+				return nil, observationErr
+			})
+			api.ClearActions()
+			if _, err := s.CreateVolume(ctx, req); status.Code(err) != codes.Unavailable {
+				t.Fatalf("pending operation was classified finished after uncertain source observation: %v", err)
+			}
+			after, err := r.Get(ctx, id)
+			if err != nil || !reflect.DeepEqual(before, after) || s.Operator.(*fakeDirectoryOperator).createCalls != 0 {
+				t.Fatal("unknown observation changed pending authority")
+			}
+			for _, a := range api.Actions() {
+				if a.GetVerb() == "update" || a.GetVerb() == "delete" || a.GetVerb() == "create" {
+					t.Fatalf("unknown observation mutated state: %s", a.GetVerb())
+				}
+			}
+		})
+	}
+}

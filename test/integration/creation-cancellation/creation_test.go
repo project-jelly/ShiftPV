@@ -197,4 +197,5 @@ func TestAPIServerUnstartedCancellation(t *testing.T) {
 		})
 	}
 	t.Run("claim provenance", func(t *testing.T) { testClaimProvenance(t, cfg, api, client) })
+	t.Run("pending source uncertainty", func(t *testing.T) { testPendingSourceUncertainty(t, cfg, api) })
 }

@@ -50,7 +50,12 @@ func (s *Service) inspectCreationClaim(ctx context.Context, request creation.Cla
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	if err != nil {
-		return nil, kubernetesAPIError("verify original creation claim", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, kubernetesAPIError("verify original creation claim", err)
+		}
+		// A previous native approval may still be running. Unknown observation
+		// must retain the provisioner's in-progress classification.
+		return nil, status.Errorf(codes.Unavailable, "verify original creation claim: %v", err)
 	}
 	if claim == nil || !claim.Valid() {
 		return nil, status.Error(codes.Unavailable, "original creation claim identity is unproven")
