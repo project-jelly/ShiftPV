@@ -57,9 +57,10 @@ type renderedObject struct {
 		Annotations map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Rules []struct {
-		APIGroups []string `json:"apiGroups"`
-		Resources []string `json:"resources"`
-		Verbs     []string `json:"verbs"`
+		APIGroups     []string `json:"apiGroups"`
+		Resources     []string `json:"resources"`
+		Verbs         []string `json:"verbs"`
+		ResourceNames []string `json:"resourceNames"`
 	} `json:"rules"`
 	Subjects []struct {
 		Kind      string `json:"kind"`
