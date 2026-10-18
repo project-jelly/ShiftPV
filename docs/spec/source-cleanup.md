@@ -7,7 +7,7 @@ standalone durable cleanup CR. Durable truth lives in `status.cleanup` on the
 parent `ShiftPVVolume` delete journal/finalizer or the parent `ShiftPVMove`
 rollback/source-cleanup journal/finalizer. New creation, Volume deletion and Move
 cleanup execute only on resident Nodes. Copy, owner verification and promotion
-still use Jobs; read-only measurement helpers remain.
+still use Jobs; measurement helpers remain (existing-copy usage uses read-only binds).
 
 ## Authority
 

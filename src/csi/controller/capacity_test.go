@@ -313,24 +313,28 @@ func TestCreateVolumeRetriesAnyPoolThatCanFitScheduledConsumer(t *testing.T) {
 }
 
 func TestCreateVolumeUsesHealthyPoolWhenAnotherProbeFails(t *testing.T) {
-	volumes := map[string]volumeapi.State{}
-	service := configuredService(&Service{
-		Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
-		Volumes: &capacityTrackingVolumeRegistry{volumes: volumes},
-		CapacityPools: &fakePoolCapacityRegistry{pools: []volumeapi.Pool{
-			{Name: "failed", UID: "failed-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
-			{Name: "healthy", UID: "healthy-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
-		}},
-		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30},
-			poolErrors: map[string]error{"failed-uid": retryableDirectoryError{errors.New("probe failed")}}},
-	})
-	request := validCreateRequest("worker-a")
-	if _, err := service.CreateVolume(context.Background(), request); err != nil {
-		t.Fatal(err)
-	}
-	id, _ := volume.IDFromName(request.Name)
-	if copy := volumes[id].CurrentCopy; copy == nil || copy.PoolUID != "healthy-uid" {
-		t.Fatalf("healthy candidate was not chosen: %#v", copy)
+	for _, probeErr := range []error{retryableDirectoryError{errors.New("probe failed")}, fmt.Errorf("%w: %w", volumeapi.ErrPoolNotReady, syscall.EROFS)} {
+		t.Run(probeErr.Error(), func(t *testing.T) {
+			volumes := map[string]volumeapi.State{}
+			service := configuredService(&Service{
+				Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
+				Volumes: &capacityTrackingVolumeRegistry{volumes: volumes},
+				CapacityPools: &fakePoolCapacityRegistry{pools: []volumeapi.Pool{
+					{Name: "failed", UID: "failed-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
+					{Name: "healthy", UID: "healthy-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
+				}},
+				CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30},
+					poolErrors: map[string]error{"failed-uid": probeErr}},
+			})
+			request := validCreateRequest("worker-a")
+			if _, err := service.CreateVolume(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			id, _ := volume.IDFromName(request.Name)
+			if copy := volumes[id].CurrentCopy; copy == nil || copy.PoolUID != "healthy-uid" {
+				t.Fatalf("healthy candidate was not chosen: %#v", copy)
+			}
+		})
 	}
 }
 

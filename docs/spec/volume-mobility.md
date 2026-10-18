@@ -178,7 +178,8 @@ Destination statfs uses a separate resident RPC/API probe with one four-second
 budget covering discovery, reads and response validation. It has no helper-Pod
 fallback; private lock contention returns immediately. Temporary unavailability
 preserves the current phase, placement and hold for a fresh retry. CSI statfs may
-use a read-only measurement helper fallback. Creation and cleanup never fall back
+use a measurement helper fallback that observes the host mount access mode and
+rejects read-only allocation. Existing-copy usage keeps its read-only bind. Creation and cleanup never fall back
 to helpers. The probe budget fits inside the Volume pass budget.
 
 New preparation candidates must advertise resident capacity probing. Immediately

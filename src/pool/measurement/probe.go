@@ -32,7 +32,7 @@ func (p *Probe) StatFSForPool(ctx context.Context, expected volumeapi.Pool) (cap
 	}
 	read := p.Read
 	if read == nil {
-		read = readFilesystem
+		read = ReadFilesystem
 	}
 	stats, err := read(root)
 	if err != nil {
@@ -62,7 +62,10 @@ func (p *Probe) verify(ctx context.Context, expected volumeapi.Pool, root string
 	return verify(root, pool)
 }
 
-func readFilesystem(root string) (capacity.Filesystem, error) {
+// ReadFilesystem reads allocation headroom from an opened directory. A read-only
+// mount cannot authorize new storage even while its API readiness is still fresh.
+// This observation does not replace the executor's later authority/write checks.
+func ReadFilesystem(root string) (capacity.Filesystem, error) {
 	directory, err := os.Open(root)
 	if err != nil {
 		return capacity.Filesystem{}, err
@@ -78,6 +81,9 @@ func readFilesystem(root string) (capacity.Filesystem, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Fstatfs(int(directory.Fd()), &stat); err != nil {
 		return capacity.Filesystem{}, err
+	}
+	if stat.Flags&readOnlyFilesystemFlag != 0 {
+		return capacity.Filesystem{}, fmt.Errorf("%w: %w: Pool filesystem is read-only", volumeapi.ErrPoolNotReady, syscall.EROFS)
 	}
 	return capacity.ParseStatOutput(fmt.Sprintf("%d %d %d %d", stat.Blocks, stat.Bavail, stat.Bsize, stat.Ffree))
 }

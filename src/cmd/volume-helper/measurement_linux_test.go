@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -93,6 +95,19 @@ func TestLinuxMeasurementIntegrationMeasuresVerifiedCopyThroughReadOnlyBind(t *t
 		func(ctx context.Context) (string, error) { return readMeasurement(ctx, "usage", options) })
 	if err != nil || output == "" {
 		t.Fatalf("read-only serving usage output=%q err=%v", output, err)
+	}
+}
+
+func TestLinuxMeasurementIntegrationRejectsReadOnlyAllocation(t *testing.T) {
+	repo, options := mountedMeasurementFixture(t)
+	options.volumeID, options.copy = "", nil
+	if err := unix.Mount("", options.root, "", unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
+		t.Fatal(err)
+	}
+	output, err := measureWithAuthority(context.Background(), repo, options, readiness.VerifyMountedPath, ownership.VerifyServingPath,
+		func(ctx context.Context) (string, error) { return readMeasurement(ctx, "statfs", options) })
+	if !errors.Is(err, syscall.EROFS) || output != "" {
+		t.Fatalf("read-only allocation accepted: output=%q err=%v", output, err)
 	}
 }
 

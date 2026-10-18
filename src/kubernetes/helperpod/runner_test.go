@@ -59,8 +59,8 @@ func TestStatFSReturnsRegisteredPoolFilesystemCapacity(t *testing.T) {
 	if len(got) < 6 || got[0] != "/shiftpv-volume-helper" || got[1] != "statfs" || !strings.Contains(strings.Join(got, "\x00"), "--pool-evidence=") {
 		t.Fatalf("command = %#v", got)
 	}
-	if created.pod.Spec.AutomountServiceAccountToken == nil || !*created.pod.Spec.AutomountServiceAccountToken || !created.pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
-		t.Fatal("measurement helper must authenticate and bind the Pool read-only")
+	if created.pod.Spec.AutomountServiceAccountToken == nil || !*created.pod.Spec.AutomountServiceAccountToken || created.pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
+		t.Fatal("allocation helper must authenticate and observe the host mount access mode")
 	}
 }
 
@@ -107,6 +107,9 @@ func TestVolumeUsageReturnsQuiescedDirectoryBytes(t *testing.T) {
 	command := created.pod.Spec.Containers[0].Command
 	if len(command) < 7 || command[1] != "usage" || !strings.Contains(strings.Join(command, "\x00"), "--volume-id="+testVolumeID) {
 		t.Fatalf("command = %#v", command)
+	}
+	if !created.pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
+		t.Fatal("existing-copy usage helper lost its read-only bind")
 	}
 }
 

@@ -148,7 +148,7 @@ func (r *Runner) runMeasurement(ctx context.Context, pool volumeapi.Pool, action
 	if label == "" {
 		label = "pool-capacity"
 	}
-	return r.runForResultAtPath(ctx, pool.NodeName, label, pool.MountPath, command)
+	return r.runForResultAtPath(ctx, pool.NodeName, label, pool.MountPath, command, action == "usage")
 }
 
 func (r *Runner) measurementCommand(pool volumeapi.Pool, action, volumeID string, copy *volume.CopyIdentity) ([]string, error) {
@@ -172,7 +172,7 @@ func (r *Runner) measurementCommand(pool volumeapi.Pool, action, volumeID string
 	return command, nil
 }
 
-func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string) (string, error) {
+func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string, readOnly bool) (string, error) {
 	if nodeName == "" {
 		return "", fmt.Errorf("node name is required")
 	}
@@ -188,7 +188,10 @@ func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poo
 
 	desired := r.helperPod(nodeName, volumeID, poolRoot, command)
 	desired.Spec.AutomountServiceAccountToken = boolPtr(true)
-	desired.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
+	// Capacity must see the host's mount access mode. A forced read-only bind
+	// would make every allocation probe appear read-only, including healthy Pools.
+	// Usage of an existing copy keeps its read-only bind.
+	desired.Spec.Containers[0].VolumeMounts[0].ReadOnly = readOnly
 	pods := r.Client.CoreV1().Pods(r.Namespace)
 	pod, err := pods.Create(ctx, desired, metav1.CreateOptions{})
 	if err != nil {

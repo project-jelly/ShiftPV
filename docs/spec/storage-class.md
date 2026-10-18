@@ -106,7 +106,10 @@ destination publication·absence 증거는 현재 generation과 기존 freshness
 
 ### Measurement verification
 
-측정 helper는 Pool을 read-only로 마운트하고 측정 전후에 다음을 확인한다. 실패하면 결과를 폐기한다.
+신규 할당용 statfs는 열린 directory의 filesystem 쓰기 모드를 함께 확인한다.
+readiness 갱신 전이라도 read-only mount에는 initialPool 예약을 기록하지 않는다.
+대체 statfs helper는 원본 mount의 접근 모드를 관찰하며 파일을 쓰지 않는다.
+기존 copy의 usage helper는 read-only bind를 유지한다. 측정 전후에 다음을 확인하고 실패하면 결과를 폐기한다.
 
 - Pool name/UID/node, generation과 등록된 mount/capacity 증명의 digest가 요청과 일치한다.
 - Pool은 Ready이며 inventory는 fresh·complete다. 설정된 capacity/mount 정책에 따라
@@ -119,6 +122,8 @@ destination publication·absence 증거는 현재 generation과 기존 freshness
 status 갱신과 독립적으로 보존된다. 요청 annotation은 generation을 바꾸지 않아 absence fence에
 영향을 주지 않는다. 구버전 Node/CRD나 2초 응답 대기는 기존 live helper로 fallback한다.
 usage는 기존 helper의 `du -sbx`로 측정한다.
+이 측정은 시점 관찰이며 mount 변경을 잠그지 않는다. 예약 뒤 read-only로 바뀌면
+실행 시 재검증과 실제 filesystem 쓰기가 실패하고 기존 intent·예약을 보존한다.
 Helper는 host device 권한을 갖지 않는다. `FixedBlock` Pool은 노드가 publish·identity release 직전과
 inventory 전후에 실제 backing 구간까지 재검증한다. 외부 변경을 원자적으로 차단하지는 않으므로
 [Pool 변경 절차](../../charts/shiftpv/README.md#multiple-pools-on-one-node)를 따른다.

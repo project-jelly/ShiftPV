@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -21,6 +20,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
 	"github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/pool/measurement"
 	"github.com/project-jelly/ShiftPV/src/pool/readiness"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -301,11 +301,11 @@ func measurementCopy(ctx context.Context, registry measurementRegistry, options 
 
 func readMeasurement(ctx context.Context, action string, options measurementOptions) (string, error) {
 	if action == "statfs" {
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs(options.root, &stat); err != nil {
+		stats, err := measurement.ReadFilesystem(options.root)
+		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("%d %d %d %d", stat.Blocks, stat.Bavail, stat.Bsize, stat.Ffree), nil
+		return fmt.Sprintf("%d %d 1 %d", stats.TotalBytes, stats.AvailableBytes, stats.AvailableInodes), nil
 	}
 	path, err := volume.Path(options.root, options.volumeID)
 	if err != nil {
