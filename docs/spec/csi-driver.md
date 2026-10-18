@@ -93,6 +93,8 @@ inode 검증은 유지한다. 전체 inventory 검사는 새 배치 승인에 �
 Controller는 승인 기록 후 해당 Pod에 gRPC `CreateCopy`를 호출하고, 응답 뒤 API receipt를 검증한다.
 Node 내부 RPC `GetCapacity`는 exact Pool UID·measurement evidence·nonce를 확인해 실시간 filesystem 용량을 반환한다.
 요청에는 filesystem 경로를 받지 않는다. Node는 API에서 승인된 경로를 읽고 mount identity를 재검증한다.
+할당용 측정은 열린 directory의 read-only mount를 거부한다. 대체 statfs helper도 같은 검사를
+수행하므로 원본 mount의 접근 모드를 사용한다. 사용량 측정은 read-only bind를 유지한다.
 
 삭제도 Controller가 cleanup journal에 `executor.kind: Node`와 Pod UID를 기록한 뒤 Node가 실행한다.
 Node의 purge receipt 이후 Controller가 fresh absence proof를 확인해야 capacity hold를 반환한다.
@@ -110,7 +112,7 @@ Pod UID·주소·인증서 변경 시 교체한다. 실행과 복구의 권한�
 Node 재시작은 같은 operation과 local marker/receipt로 재개한다. 실행 중인 Pod를 다른 Pod로 바꾸지 않으며,
 종료되거나 사라진 Pod만 receipt 기록 전에 재지정한다. Node에 고정된 작업은 시간 초과 후 helper로 전환하지
 않는다. 새 생성·삭제·Move cleanup은 capability를 갖춘 resident Node로만 실행한다. capability가 없으면
-intent와 hold를 유지하고 재시도한다. Move copy·verify·promote Job과 읽기 전용 측정 helper는 유지한다.
+intent와 hold를 유지하고 재시도한다. Move copy·verify·promote Job과 측정 helper는 유지한다.
 기존 Job 책임은 candidate가 실행·재결합·Node 전환하지 않는다. 호환되는 이전 writer와 helper image에서
 먼저 정산해야 한다. 자세한 경계는 [source cleanup](source-cleanup.md)을 따른다.
 불명확한 capacity, observation 또는 identity에서는 directory를 만들지 않는다.

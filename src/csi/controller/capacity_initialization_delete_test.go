@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"syscall"
 	"testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
@@ -14,6 +16,33 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
 )
+
+func TestReadOnlyAllocationDoesNotPersistInitialReservation(t *testing.T) {
+	ctx := context.Background()
+	_, registry, newService, probe := initializationFixture(t)
+	request := validCreateRequest("worker-a")
+	id, _ := volume.IDFromName(request.Name)
+	probe.poolErrors = map[string]error{"pool-a-uid": fmt.Errorf("%w: %w", volumeapi.ErrPoolNotReady, syscall.EROFS)}
+	service := newService()
+	if _, err := service.CreateVolume(ctx, request); status.Code(err) != codes.Unavailable {
+		t.Fatalf("read-only allocation=%v", err)
+	}
+	if _, err := registry.Get(ctx, id); !apierrors.IsNotFound(err) {
+		t.Fatalf("read-only Pool pinned initial intent: %v", err)
+	}
+	assertInitialReservation(t, registry, "pool-a-uid", 0)
+	if service.Operator.(*fakeDirectoryOperator).createCalls != 0 {
+		t.Fatal("read-only admission reached creation effects")
+	}
+	delete(probe.poolErrors, "pool-a-uid")
+	if _, err := newService().CreateVolume(ctx, request); err != nil {
+		t.Fatalf("same request after RW restore: %v", err)
+	}
+	state, err := registry.Get(ctx, id)
+	if err != nil || state.Phase != volumeapi.PhaseReady || state.InitialPool == nil || state.InitialPool.UID != "pool-a-uid" {
+		t.Fatalf("restored admission=%+v err=%v", state, err)
+	}
+}
 
 func TestDeletingUnstartedCreationRetainsReservationWithoutBlockingOtherPools(t *testing.T) {
 	ctx := context.Background()

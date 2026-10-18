@@ -54,7 +54,7 @@ func TestProbeRejectsAuthorityAndMountLossDuringRead(t *testing.T) {
 
 func TestReadFilesystemPinsDirectoryAndRejectsFile(t *testing.T) {
 	root := t.TempDir()
-	stats, err := readFilesystem(root)
+	stats, err := ReadFilesystem(root)
 	if err != nil || stats.TotalBytes <= 0 || stats.AvailableBytes < 0 || stats.AvailableBytes > stats.TotalBytes {
 		t.Fatalf("stats=%+v err=%v", stats, err)
 	}
@@ -63,7 +63,7 @@ func TestReadFilesystemPinsDirectoryAndRejectsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{file, filepath.Join(root, "missing")} {
-		if _, err := readFilesystem(path); err == nil {
+		if _, err := ReadFilesystem(path); err == nil {
 			t.Fatalf("non-directory %q accepted", path)
 		}
 	}

@@ -6,8 +6,10 @@ Step 1: placement/cancellation [PR #222](https://github.com/project-jelly/ShiftP
 and consumer replacement release [PR #223](https://github.com/project-jelly/ShiftPV/pull/223)
 and read-only Unpublish [PR #224](https://github.com/project-jelly/ShiftPV/pull/224)
 merged; exact-head CI and local two-node Kind passed. Step 3 workload-retirement
-settlement is under verification, with precommit Delete/postcommit Retain failure
-fixtures preserved in the isolated Kind cluster.
+settlement [PR #225](https://github.com/project-jelly/ShiftPV/pull/225) merged after
+31 successful checks and precommit Delete/postcommit Retain Kind qualification.
+Step 4 read-only allocation admission is under verification; unfinished-creation
+settlement and the remaining integrated matrix are outstanding.
 
 ## Goal and invariants
 
@@ -31,8 +33,8 @@ prerequisites. Reaching `Blocked` alone does not establish settlement.
 
 ## Stage and event contracts
 
-The creation entries below remain target contracts. Move retirement is under
-verification; integrated qualification remains outstanding.
+The creation entries below remain target contracts. Move retirement passed the
+diagonal Kind cases; integrated qualification remains outstanding.
 
 | Event | Before execution approval | Approved, before owner CAS | After owner CAS |
 |---|---|---|---|
