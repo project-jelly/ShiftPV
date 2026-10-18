@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -114,7 +115,7 @@ func (p Publisher) Publish(ctx context.Context, req PublishRequest) error {
 // the caller needs to tell an unreached reconcile from a failed one.
 func (p Publisher) Unpublish(ctx context.Context, req UnpublishRequest) (bool, error) {
 	enteredLock := false
-	err := ownership.WithLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, func(*ownership.Store) error {
+	reconcile := func(*ownership.Store) error {
 		enteredLock = true
 		freshPool, freshPoolRoot, poolErr := p.Pools(ctx, req.Copy)
 		if poolErr != nil {
@@ -138,7 +139,15 @@ func (p Publisher) Unpublish(ctx context.Context, req UnpublishRequest) (bool, e
 			return inspectErr
 		}
 		return p.Volumes.ReconcilePublished(ctx, req.VolumeID, p.NodeName, req.Copy, stillPublished)
-	})
+	}
+	// Reconciliation only reads the local Pool. Join the existing lock without
+	// requiring a write-open on a backing filesystem that may now be read-only.
+	err := ownership.WithExistingLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, reconcile)
+	if !enteredLock && errors.Is(err, os.ErrNotExist) {
+		// Preserve missing-lock initialization on writable Pools. Never retry an
+		// entered callback or bypass a busy, unreadable or foreign lock/store.
+		err = ownership.WithLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, reconcile)
+	}
 	return enteredLock, err
 }
 
