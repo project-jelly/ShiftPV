@@ -125,6 +125,15 @@ func parseFlags() config {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "cancel-creation" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		if err := runCancelCreation(ctx, os.Args[2:], os.Stdout, loadCreationCancellation); err != nil && !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(os.Stderr, "ShiftPV creation cancellation failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "upgrade-check" {
 		if err := runUpgradeCheck(context.Background(), os.Args[2:], os.Stdout, loadUpgradeCheckClients); err != nil && !errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintf(os.Stderr, "ShiftPV upgrade check failed: %v\n", err)

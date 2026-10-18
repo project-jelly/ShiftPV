@@ -138,6 +138,31 @@ legacy 작업 정산에는 그 writer와 호환되는 immutable image를 `mobili
 intent·예약을 유지하며 재시도하고 Job을 만들지 않는다. 이전 생성 Pod나 미정산 Job-bound
 cleanup이 발견되면 기존 writer로 정산한 뒤 전환한다. 새 writer는 이전 Job을 실행하거나
 Node로 재바인딩하지 않으며, 완료 journal·absence 증거와 실행 종료를 확인한 이력만 읽는다.
+
+### 미완료 native 생성의 명시적 취소
+
+0.6.13의 native 생성이 완료되지 않았고 원래 요청을 취소해야 한다면 새 이미지의
+`cancel-creation`을 별도 Pod에서 실행할 수 있다. 새 작업 유입을 멈추고 대상 Volume의
+ID·UID·초기 사본과 취소 의도를 확인한다. target CRD·RBAC·Node를 먼저 적용하고 기존
+Controller와 webhook은 정산 중 유지한다. 이전 helper 책임은 이 명령으로 이전하지 않는다.
+
+```sh
+kubectl -n shiftpv-system run shiftpv-cancel-creation --restart=Never \
+  --image="${TARGET_CONTROLLER_IMAGE}" \
+  --overrides='{"spec":{"serviceAccountName":"shiftpv-controller"}}' \
+  --command -- /shiftpv-controller cancel-creation --namespace=shiftpv-system \
+  --volume-id='<exact-volume-id>' --volume-uid='<exact-volume-uid>' --timeout=120s
+kubectl -n shiftpv-system logs -f pod/shiftpv-cancel-creation
+```
+
+승인은 기존 생성 완료 CAS와 경쟁한다. Ready가 먼저 되면 취소를 거부하고 보존한다.
+취소가 먼저 되면 동일한 초기 사본만 정리하고, native 영수증과 최신 부재 증명 뒤에
+보호와 예약을 해제한다. `complete: true`는 해당 Volume이 사라진 것을 확인한 결과다.
+API 오류·이전 helper·외부 finalizer는 완료로 보고하지 않는다.
+
+명령이 중단되면 같은 ID·UID로 재실행할 수 있다. 저장된 취소 의도는 이를 지원하는 새
+Controller도 이어서 정산한다. 이때 출처 정보를 추측해 채우지 않는다. 정산 후 별도의
+읽기 전용 `upgrade-check`가 SAFE인 것을 확인한 뒤 Controller를 교체한다.
 정상 Ready Volume의 생성 재호출은 현재 owner·Pool group·요청 호환성·생성 이력을 검증하고
 효과 없이 응답한다. 최초 Pool이나 생성 Node가 계속 존재할 필요는 없다.
 

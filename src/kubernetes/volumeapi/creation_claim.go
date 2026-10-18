@@ -30,7 +30,9 @@ func (r *Registry) ListCreationIntents(ctx context.Context) ([]CreationReference
 	for _, object := range list.Items {
 		_, known, _ := unstructured.NestedFieldNoCopy(object.Object, "spec", "creationClaim")
 		phase, _, _ := unstructured.NestedString(object.Object, "status", "phase")
-		if known && phase != PhaseReady && object.GetName() != "" && object.GetUID() != "" {
+		operation, _, _ := unstructured.NestedString(object.Object, "status", "deletionOperationID")
+		cancelled := phase == PhaseDeleting && operation == volume.CreationCancellationPrefix+string(object.GetUID())
+		if (known || cancelled) && phase != PhaseReady && object.GetName() != "" && object.GetUID() != "" {
 			result = append(result, CreationReference{Name: object.GetName(), UID: string(object.GetUID())})
 		}
 	}
