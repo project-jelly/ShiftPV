@@ -2,10 +2,14 @@ package volumeapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -18,10 +22,12 @@ type PoolReference struct {
 	UID  string `json:"uid"`
 }
 
+var ErrVolumeFinalizersPending = errors.New("other Volume finalizers are still present")
+
 // Initializing distinguishes an unstarted creation from damaged execution state.
 // Legacy objects may lack InitialPool and must pass capacity admission again.
 func (s State) Initializing() bool {
-	return !s.Deleting && s.unstartedCreation()
+	return !s.Deleting && s.UnstartedCreation()
 }
 
 // HasInitialReservation is an accounting fact, not permission to initialize.
@@ -29,15 +35,74 @@ func (s State) Initializing() bool {
 // until finalization removes the object. No execution evidence may be present.
 func (s State) HasInitialReservation() bool {
 	return s.InitialPool != nil && volume.ValidIdentityToken(s.InitialPool.Name) &&
-		volume.ValidIdentityToken(s.InitialPool.UID) && s.unstartedCreation()
+		volume.ValidIdentityToken(s.InitialPool.UID) && s.UnstartedCreation()
 }
 
-func (s State) unstartedCreation() bool {
+// UnstartedCreation has never authorized a copy or executor. Its protection
+// remains installed until cancellation removes the object and its reservation.
+func (s State) UnstartedCreation() bool {
 	return volume.ValidIdentityToken(s.UID) && s.RequestName != "" && s.InitialNode != "" && s.CapacityBytes > 0 &&
 		slices.Contains(s.Finalizers, VolumeProtectionFinalizer) && !s.HasCleanup &&
 		s.Phase == "" && s.OwnerNode == "" && s.ActiveMove == "" && len(s.PublishedNodes) == 0 &&
 		s.CurrentCopy == nil && s.CreationOperationID == "" && s.DeletionOperationID == "" &&
 		s.CreationExecutor == nil && s.CreationReceipt == nil
+}
+
+// CancelUnstartedCreation fences initialization with an exact UID/RV DELETE.
+// No filesystem effect was approved, so no disk receipt is invented. Once the
+// timestamp is stored, initialization cannot win a later status CAS.
+func (r *Registry) CancelUnstartedCreation(ctx context.Context, id, uid string) error {
+	object, err := r.getVolume(ctx, id)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	state, err := stateFrom(object)
+	if err != nil {
+		return err
+	}
+	if uid == "" || state.UID != uid || !state.UnstartedCreation() {
+		return ErrStateConflict
+	}
+	if !state.Deleting {
+		if object.GetResourceVersion() == "" {
+			return ErrStateConflict
+		}
+		identity, revision := types.UID(uid), object.GetResourceVersion()
+		if err := r.Client.Resource(VolumeResource).Delete(ctx, id, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &identity, ResourceVersion: &revision}}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return r.finalizeUnstartedCreation(ctx, id, uid)
+}
+
+func (r *Registry) finalizeUnstartedCreation(ctx context.Context, id, uid string) error {
+	err := r.mutateObject(ctx, objectMutation{
+		resource: VolumeResource, kind: "ShiftPVVolume", name: id, uid: uid, backoff: retry.DefaultBackoff,
+		readError: "read unstarted creation cancellation", writeError: "release unstarted creation protection",
+		apply: func(object *unstructured.Unstructured) error {
+			current, err := stateFrom(object)
+			if err != nil {
+				return err
+			}
+			if !current.Deleting || !current.UnstartedCreation() {
+				return ErrStateConflict
+			}
+			// Keep a well-formed capacity owner while a foreign controller's
+			// finalizer delays object removal. A concurrent addition loses RV CAS.
+			if len(current.Finalizers) != 1 {
+				return ErrVolumeFinalizersPending
+			}
+			object.SetFinalizers(nil)
+			return nil
+		},
+	})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func initialPoolFrom(object *unstructured.Unstructured) (*PoolReference, error) {

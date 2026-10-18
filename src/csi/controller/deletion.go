@@ -32,6 +32,12 @@ func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest
 	if !exists {
 		return &csi.DeleteVolumeResponse{}, nil
 	}
+	if volumeState.UnstartedCreation() {
+		if err := s.Volumes.CancelUnstartedCreation(ctx, req.GetVolumeId(), volumeState.UID); err != nil {
+			return nil, deletionAdmissionError(err)
+		}
+		return &csi.DeleteVolumeResponse{}, nil
+	}
 	fenced, fenceErr := s.Volumes.BeginDelete(ctx, req.GetVolumeId(), volumeState.UID, *volumeState.CurrentCopy)
 	if fenceErr != nil {
 		return nil, deletionAdmissionError(fenceErr)
@@ -57,6 +63,9 @@ func (s *Service) deletableState(ctx context.Context, volumeID string) (volumeap
 	}
 	if stateErr != nil {
 		return volumeapi.State{}, false, nil
+	}
+	if state.UnstartedCreation() {
+		return state, true, nil
 	}
 	if state.OwnerNode == "" {
 		return volumeapi.State{}, false, status.Error(codes.FailedPrecondition, "volume has no owner node")
@@ -115,6 +124,9 @@ func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenc
 
 // deletionAdmissionError is the CSI retry policy for repository admission.
 func deletionAdmissionError(err error) error {
+	if errors.Is(err, volumeapi.ErrVolumeFinalizersPending) {
+		return status.Errorf(codes.Unavailable, "wait for other Volume protections before cancellation: %v", err)
+	}
 	if errors.Is(err, volumeapi.ErrVolumePublished) {
 		return status.Errorf(codes.Unavailable, "wait for volume unpublish before deletion: %v", err)
 	}

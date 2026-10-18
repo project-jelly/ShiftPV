@@ -162,3 +162,10 @@ func TestInitialReservationDoesNotHideDamagedExecutionState(t *testing.T) {
 		})
 	}
 }
+
+func TestDeletingLegacyUnstartedIntentNeverAcquiredPoolCapacity(t *testing.T) {
+	state := volumeapi.State{UID: "volume-uid", Finalizers: []string{volumeapi.VolumeProtectionFinalizer}, RequestName: "request", InitialNode: "node", CapacityBytes: 64, Deleting: true}
+	if total, err := ReservedBytesForPool(map[string]volumeapi.State{"v": state}, nil, "healthy-pool"); err != nil || total != 0 {
+		t.Fatalf("unadmitted legacy intent blocked another Pool: total=%d err=%v", total, err)
+	}
+}

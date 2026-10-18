@@ -108,6 +108,10 @@ type capacityTrackingVolumeRegistry struct {
 	poolNodes []string
 }
 
+func (*capacityTrackingVolumeRegistry) CancelUnstartedCreation(context.Context, string, string) error {
+	return volumeapi.ErrStateConflict
+}
+
 func (r *capacityTrackingVolumeRegistry) Get(_ context.Context, id string) (volumeapi.State, error) {
 	unlock := readLock(r.mu)
 	defer unlock()

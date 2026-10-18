@@ -6,7 +6,7 @@ cd "${ROOT_DIR}"
 # shellcheck source=test/e2e/kind/lib/cluster.sh
 source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
 
-for command in docker kind kubectl jq; do
+for command in docker kind kubectl jq go; do
   command -v "${command}" >/dev/null || {
     echo "required command not found: ${command}" >&2
     exit 1
@@ -225,6 +225,11 @@ kubectl --kubeconfig "${probe_kubeconfig}" get shiftpvvolume "${terminating_inte
 kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${terminating_intent_id}" --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null
 kubectl --kubeconfig "${probe_kubeconfig}" wait --for=delete "shiftpvvolume/${terminating_intent_id}" --timeout=30s >/dev/null
 echo 'Unstarted Volume DELETE retained its protected initial reservation until finalization'
+
+# Exercise the real CSI/Registry cancellation against the API server. The
+# filesystem dependencies fail the test if this no-effects path invokes them.
+SHIFTPV_API_CANCELLATION_TEST=1 KUBECONFIG="${probe_kubeconfig}" \
+  go test -count=1 -v ./test/integration/creation-cancellation
 
 for protected_volume in "${volume_id}" "${initializing_volume_id}"; do
   kubectl --kubeconfig "${probe_kubeconfig}" patch shiftpvvolume "${protected_volume}" \
