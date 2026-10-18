@@ -125,9 +125,9 @@ EOF
 	test "${complete}" = 1
 	uid=$(jq -er '.metadata.uid' <<<"${object}")
 	copy=$(jq -c '.status.currentCopy' <<<"${object}")
-	jq -e '.spec.creationClaim == null and .status.publishedNodes == null' <<<"${object}" >/dev/null
-	docker exec "${node}" sh -ec 'printf "%s\n" "$2" > "$1/recovery-marker"; sync' sh "${mount}/volumes/${partial}" "${uid}"
 	printf '%s\n' "${object}" >"${RECOVERY_EVIDENCE}/partial-before.json"
+	jq -e '.spec.creationClaim == null and (.status.publishedNodes // [] | length) == 0' <<<"${object}" >/dev/null
+	docker exec "${node}" sh -ec 'printf "%s\n" "$2" > "$1/recovery-marker"; sync' sh "${mount}/volumes/${partial}" "${uid}"
 	kubectl -n "${ns}" delete pod/partial --wait=true --timeout=60s
 	kubectl -n "${ns}" delete pvc/partial --wait=true --timeout=60s
 	kubectl get pv -o json | jq -e --arg id "${partial}" 'all(.items[]; .spec.csi.volumeHandle != $id)' >/dev/null
