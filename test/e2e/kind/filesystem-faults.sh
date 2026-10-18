@@ -10,6 +10,8 @@ source "${TEST_DIR}/node-path.sh"
 FAULT_NODE="${CLUSTER_NAME}-worker2"
 FAULT_POOL_PATH=/srv/shiftpv-b
 MOUNT_STATE=normal
+READONLY_EVIDENCE="$(cd "${TEST_DIR}/../../.." && pwd)/.tmp/readonly-unpublish"
+mkdir -p "${READONLY_EVIDENCE}"
 
 restore_pool_mount() {
   case "${MOUNT_STATE}" in
@@ -146,10 +148,16 @@ test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityByt
 kubectl exec shiftpv-filesystem-fault -- grep -Fx 'ShiftPV filesystem fault recovery' /data/payload
 docker exec "${FAULT_NODE}" test -f "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}/payload"
 
-# Stop the writer, remount the tmpfs filesystem read-only, and request deletion.
-# DeleteVolume must fail retryably without dropping metadata or data, then
-# finish after the filesystem is restored read-write.
-kubectl delete pod shiftpv-filesystem-fault --wait=true
+# Keep this exact published Pod alive while the backing becomes read-only.
+# Deleting it afterwards must settle unpublish before any RW restoration.
+ORIGINAL_POD_UID=$(kubectl get pod/shiftpv-filesystem-fault -o jsonpath='{.metadata.uid}')
+ORIGINAL_VOLUME=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o json)
+jq -e --arg node "${FAULT_NODE}" '.status.phase == "Ready" and (.status.publishedNodes | index($node)) != null' <<<"${ORIGINAL_VOLUME}" >/dev/null
+ORIGINAL_CHECKSUM=$(node_sha256 "${FAULT_NODE}" "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}/payload")
+FAULT_TARGET=$(docker exec "${FAULT_NODE}" cat /proc/self/mountinfo | awk -v uid="${ORIGINAL_POD_UID}" 'index($5, "/pods/" uid "/volumes/kubernetes.io~csi/") && $5 ~ /\/mount$/ { print $5 }')
+test -n "${FAULT_TARGET}"
+docker exec "${FAULT_NODE}" mountpoint -q "${FAULT_TARGET}"
+printf '%s\n' "${ORIGINAL_VOLUME}" >"${READONLY_EVIDENCE}/before.json"
 docker exec "${FAULT_NODE}" mount -o remount,ro "${FAULT_POOL_PATH}"
 MOUNT_STATE=tmpfs_readonly
 if docker exec "${FAULT_NODE}" touch "${FAULT_POOL_PATH}/.shiftpv-readonly-probe" 2>/dev/null; then
@@ -157,7 +165,34 @@ if docker exec "${FAULT_NODE}" touch "${FAULT_POOL_PATH}/.shiftpv-readonly-probe
 	exit 1
 fi
 wait_for_pool_reason False ReadOnly
+test "$(kubectl get pod/shiftpv-filesystem-fault -o jsonpath='{.metadata.uid}')" = "${ORIGINAL_POD_UID}"
+kubectl get pod/shiftpv-filesystem-fault -o json >"${READONLY_EVIDENCE}/published-pod-on-ro.json"
+kubectl delete pod shiftpv-filesystem-fault --wait=true --timeout=120s
+UNPUBLISHED=0
+for _ in {1..60}; do
+  READONLY_VOLUME=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o json)
+  if jq -e '(.status.publishedNodes // [] | length) == 0' <<<"${READONLY_VOLUME}" >/dev/null; then UNPUBLISHED=1; break; fi
+  sleep 1
+done
+test "${UNPUBLISHED}" = 1
+if docker exec "${FAULT_NODE}" mountpoint -q "${FAULT_TARGET}"; then
+  echo 'original Pod mount remains after read-only unpublish' >&2
+  exit 1
+fi
+if docker exec "${FAULT_NODE}" touch "${FAULT_POOL_PATH}/.shiftpv-readonly-probe" 2>/dev/null; then
+  echo 'unpublish was not qualified on a still-read-only filesystem' >&2
+  exit 1
+fi
+jq -e --argjson before "${ORIGINAL_VOLUME}" '
+ .metadata.uid == $before.metadata.uid and .metadata.finalizers == $before.metadata.finalizers and .spec == $before.spec and
+ .status.currentCopy == $before.status.currentCopy and .status.phase == "Ready" and
+ .status.cleanup == null and (.status.deletionOperationID // "") == ""' <<<"${READONLY_VOLUME}" >/dev/null
+test "$(node_sha256 "${FAULT_NODE}" "${FAULT_POOL_PATH}/volumes/${VOLUME_ID}/payload")" = "${ORIGINAL_CHECKSUM}"
+printf '%s\n' "${READONLY_VOLUME}" >"${READONLY_EVIDENCE}/unpublished-before-rw.json"
+jq -n --arg pod "${ORIGINAL_POD_UID}" --arg volume "$(jq -er '.metadata.uid' <<<"${ORIGINAL_VOLUME}")" --arg checksum "${ORIGINAL_CHECKSUM}"  '{result:"PASS",originalPodUID:$pod,volumeUID:$volume,checksum:$checksum,podDeletionWhileReadOnly:true,actualMountAbsent:true,ownerCopyRetained:true}' >"${READONLY_EVIDENCE}/result.json"
+cat "${READONLY_EVIDENCE}/result.json"
 
+# Delete cleanup still waits for writable backing and retains its reservation.
 kubectl delete pvc shiftpv-filesystem-fault --wait=false
 kubectl wait --for=delete pvc/shiftpv-filesystem-fault --timeout=2m
 wait_for_unavailable_event PersistentVolume "${FAULT_PV}"

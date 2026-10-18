@@ -166,6 +166,43 @@ Controller도 이어서 정산한다. 이때 출처 정보를 추측해 채우�
 정상 Ready Volume의 생성 재호출은 현재 owner·Pool group·요청 호환성·생성 이력을 검증하고
 효과 없이 응답한다. 최초 Pool이나 생성 Node가 계속 존재할 필요는 없다.
 
+### 원본 PVC가 끝난 native Move의 전환 정산
+
+0.6.13의 `prepared-v1` Move가 원본 PVC 소멸 뒤 멈췄다면 `settle-retired-move`로
+정확한 Move name·UID 한 건을 정산한다. legacy 실행, 살아 있는 원본 PVC, 불완전한 승인
+plan은 대상이 아니다. 일반 Controller를 미정산 상태에서 교체하는 절차로 사용하지 않는다.
+
+1. GitOps/HPA와 새 작업 유입을 멈추고 target CRD·RBAC·Node를 먼저 적용한다.
+   기존 Controller Deployment를 0으로 내려 해당 Pod가 모두 사라진 것을 확인한다.
+2. target 이미지의 별도 Pod에서 기존 설치와 같은 namespace·webhook·StorageClass 설정으로
+   `/shiftpv-controller --admission-only`를 실행한다. CSI sidecar는 넣지 않는다.
+   webhook 포트 이름은 `webhook`(9443), readiness는 HTTPS `/healthz`로 둔다.
+   이 Pod에는 일반 Controller Deployment와 다른 label을 주고 기존 webhook Service selector를
+   임시로 이 Pod에 연결한다. 기존 selector는 복구용으로 보관한다. 검증 정책은 계속 적용된다.
+3. controller ServiceAccount를 쓰는 별도 one-shot Pod에서 다음 명령을 실행한다.
+
+```sh
+/shiftpv-controller settle-retired-move --namespace=shiftpv-system \
+  --controller-deployment-name=shiftpv-controller --node-daemonset-name=shiftpv-node \
+  --move-name='<exact-move-name>' --move-uid='<exact-move-uid>' \
+  --helper-image='<approved-controller-image@sha256:...>' \
+  --helper-service-account=shiftpv-controller --timeout=5m
+```
+
+4. `complete: true`와 정확한 Move UID를 확인한다. 명령은 매 단계 일반 writer 부재를
+   확인하고 기존 정산 FSM을 사용한다. owner CAS 전이면 destination, 후이면 source만
+   정리한다. 원본 owner 사본과 Volume 용량은 보존하며, 영수증·새 부재 관측·실행 종료·
+   hold/finalizer 및 Volume 참조 해제까지 확인한다. 타임아웃은 완료가 아니다.
+   같은 name·UID로 새 명령 Pod를 실행해 이어갈 수 있다.
+5. 모든 대상 정산 후 별도 `upgrade-check`가 SAFE일 때 정상 chart/Controller로 전환한다.
+   정상 Controller가 준비되면 Service selector를 원래대로 복구하고 admission 전용 Pod를
+   종료한다. 기존 데이터·UID와 Delete/Retain 처리를 확인한 뒤 새 작업을 재개한다.
+
+Deployment/Pod 관측은 분산 잠금이 아니다. 전환 내내 다른 writer의 재시작을 막아야 한다.
+admission 전용 모드는 검증 서버와 인증서 관리만 실행하며 CSI·이동·생성·Pool 정산을 시작하지 않는다.
+실행 예와 네 가지 전환 회귀 시험은
+[`move-recovery.sh`](../../test/e2e/kind/upgrade/move-recovery.sh)에 있다.
+
 legacy Move는 독립적인 완료 증거·정확한 parent/UID·실행 종료·Volume 참조 해제를 검증한 뒤
 retention과 finalizer 조건에 따라 metadata GC만 수행한다. 미정산·불완전한 이력은 실행하거나
 보정하지 않는다. 승인된 전체 copy/operation plan이 없으면 recovery는 `CleanupNeedsReview`로

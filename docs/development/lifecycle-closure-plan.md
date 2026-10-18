@@ -1,32 +1,10 @@
 # Lifecycle closure stabilization
 
-Status: in progress, based on chart 0.6.13 (`9b4b768`).
-
-Step 1: placement/cancellation [PR #222](https://github.com/project-jelly/ShiftPV/pull/222)
-and consumer replacement release [PR #223](https://github.com/project-jelly/ShiftPV/pull/223)
-and read-only Unpublish [PR #224](https://github.com/project-jelly/ShiftPV/pull/224)
-merged; exact-head CI and local two-node Kind passed. Step 3 workload-retirement
-settlement [PR #225](https://github.com/project-jelly/ShiftPV/pull/225) merged after
-31 successful checks and precommit Delete/postcommit Retain Kind qualification.
-Step 4 read-only allocation admission [PR #226](https://github.com/project-jelly/ShiftPV/pull/226)
-merged after 30 successful checks and real Linux/Kind RO-to-RW qualification.
-Unstarted creation cancellation [PR #227](https://github.com/project-jelly/ShiftPV/pull/227)
-merged after required CI and real API deletion-fence qualification. Native partial
-creation cancellation [PR #228](https://github.com/project-jelly/ShiftPV/pull/228)
-merged after 31 successful checks, Linux boundary tests and Kind receipt/absence,
-full source-quota reuse and normal cleanup proof. Original claim provenance
-[PR #229](https://github.com/project-jelly/ShiftPV/pull/229) merged after exact-head
-CI and live API error/provenance qualification. Automatic retirement
-[PR #230](https://github.com/project-jelly/ShiftPV/pull/230) merged after 30
-successful checks and real API/native Kind partial-creation settlement tests.
-Step 5 admission budget isolation [PR #231](https://github.com/project-jelly/ShiftPV/pull/231)
-merged after 30 successful checks. Bounded deferred discovery
-[PR #232](https://github.com/project-jelly/ShiftPV/pull/232) merged after 30
-successful checks. Independent retirement model and Registry trace mapping
-[PR #233](https://github.com/project-jelly/ShiftPV/pull/233) merged after 30
-successful checks. Native retirement matrix [PR #234](https://github.com/project-jelly/ShiftPV/pull/234)
-merged after 31 successful checks and four before/after-commit × Delete/Retain
-cases. Integrated qualification is outstanding.
+Baseline: chart0.6.13 (`9b4b768`). Fixes and staged qualification are recorded in
+[PR #237](https://github.com/project-jelly/ShiftPV/pull/237) and its preceding stages.
+Use each PR's reviewed commit and required CI artifacts for execution evidence.
+The final candidate must pass the integrated gates below before release readiness.
+Publishing images/charts and Home rollout are separate operations.
 
 ## Goal and invariants
 
@@ -50,8 +28,7 @@ prerequisites. Reaching `Blocked` alone does not establish settlement.
 
 ## Stage and event contracts
 
-Move retirement passed the diagonal Kind cases; integrated qualification remains
-outstanding. Explicit creation cancellation has the following boundaries:
+Explicit creation cancellation has the following boundaries:
 
 - Spec-only intent uses exact UID/resourceVersion deletion and finalizer CAS.
 - Pending/NodeCreating cancellation races completion on the same Volume CAS.
@@ -82,11 +59,9 @@ outstanding. Explicit creation cancellation has the following boundaries:
 | Effect succeeded, response lost | Reobserve durable state and exact object identities | Reobserve receipts and owner; do not duplicate authority | Reobserve commit/receipts; do not revert owner |
 | Controller/executor restart | Reload persisted intent and reservations | Resume only the recorded operation | Continue settlement under destination authority |
 
-For PVC deletion, distinguish an explicit Delete request from Retain. Determine
-whether existing durable records can represent that intent before adding fields.
-Never fabricate publication or cleanup evidence to bypass a service-recovery
-prerequisite. Unfinished creation needs the same intent/effect/settlement analysis
-with its own executor and exact partial-copy evidence.
+Move settlement preserves the authoritative copy and its Volume reservation for
+both Delete and Retain. Ordinary CSI reclaim acts afterwards according to PV
+policy. It never fabricates publication to replace a retired workload.
 
 ## Delivery
 
@@ -144,10 +119,37 @@ does not introduce a permanent local fence.
 | Only a later complete scan closes cleanup | `requestAbsenceScan`, `observeFreshAbsence` | Registry trace withholds the target Pool scan for three retries |
 | Release temporary hold, remove verifier, unlock, retire metadata | Final four settlement transitions | Registry trace checks per-Pool reservations, jobs, activeMove and finalizer |
 
-The Registry trace covers both owners, absent/replaced PVC, Delete/Retain policy
-and each accepted-write loss, with a fresh reconciler each pass. Its effect and
+The automatic and exact-UID entry each replay 24 Registry traces: both owners,
+absent/replaced PVC, Delete/Retain and each accepted-write loss, with a fresh
+reconciler each pass. Its effect and
 scanner are injected; it proves API settlement, not native filesystem cleanup or
 subsequent CSI Delete. The required Kind `retirement` group supplies that layer:
 both owners × Delete/Retain, actual copy/purge, receipt loss and Controller restart,
 later generation-fenced absence, retained payload or normal CSI deletion. The
-active 0.6.13 upgrade transition remains a separate qualification requirement.
+required upgrade `move-recovery` scenario starts all four cases on pinned
+published0.6.13, reproduces its blocked state, then uses exact-UID retirement while
+normal writers are stopped. Admission-only serving preserves Pool scan validation.
+A missing API receipt survives command restart; strict `upgrade-check` must become
+SAFE before normal Controller cutover. Unrelated Ready data and all original
+identities remain asserted. See [maintenance](versioning.md#원본-pvc가-끝난-native-move의-전환-정산).
+
+### Final candidate gates
+
+| Contract | Persisted execution evidence |
+|---|---|
+| D3 placement/replacement recreation | Required mobility `g3`, plus Registry/UID and cancellation boundary tests |
+| D7 read-only unpublish | Linux real remount/bind-mount test; Kind `g2` makes the same published Pod's backing RO before deleting it and checks real mount absence before RW restore |
+| 035 retirement | Independent model (328 reachable states), automatic/explicit Registry traces, native four-case `retirement` and pinned old-release `move-recovery` |
+| Creation | Required `node-rpc` partial-copy retirement and real deferred original-PV handoff; pinned `creation-recovery` upgrade |
+| Admission/progress | HTTP budget/deadline tests; bounded background retirement and deferred-discovery tests |
+| Delivery | Every required exact-head check passes; merged main tree equals reviewed tree; original data/identity proof retained |
+
+The deferred-discovery fixture changes 900 to140 typed/dynamic fake-client API
+actions (84.4% fewer) across20 scan/work cycles for four unchanged volumes in one
+30s retry interval, with zero writes. This measures request amplification through
+the actual Registry/reconciler, not production network traffic or Move latency.
+
+An independent model or fake executor cannot establish native cleanup. Kind is
+not physical reboot, permanent disk-loss recovery, Home load or real KubeVirt
+qualification. An inaccessible original VM fixture remains unverified until it
+can be inspected without destroying its RAM-backed data.

@@ -11,7 +11,7 @@ source "${ROOT_DIR}/test/e2e/kind/lib/cluster.sh"
 UPGRADE_SCENARIO=${UPGRADE_SCENARIO:-ready}
 case "${UPGRADE_SCENARIO}" in
 ready) DEFAULT_LOCK="${TEST_DIR}/versions.env" ;;
-creation-recovery) DEFAULT_LOCK="${TEST_DIR}/native-versions.env" ;;
+creation-recovery | move-recovery) DEFAULT_LOCK="${TEST_DIR}/native-versions.env" ;;
 *) echo "unsupported upgrade scenario: ${UPGRADE_SCENARIO}" >&2; exit 1 ;;
 esac
 LOCK_FILE=${ARTIFACT_LOCK_FILE:-${DEFAULT_LOCK}}
@@ -26,7 +26,7 @@ RELEASE=shiftpv
 # minute, so every wait here would sit one tick from its own timeout.
 READINESS_ARGS=(--set poolReadiness.interval=2s --set poolReadiness.staleAfter=10s)
 
-require_commands awk docker helm kind kubectl sed
+require_commands awk docker helm kind kubectl sed jq
 load_artifact_lock "${LOCK_FILE}"
 require_kind_version
 
@@ -157,6 +157,45 @@ delete_workload() {
 	kubectl wait --for=delete "shiftpvvolume/${volume_id}" --timeout=5m
 }
 
+recovery_command() {
+	local name=$1 expected=$2 command=$3
+	shift 3
+	local args pod
+	args=$(jq -cn --args '$ARGS.positional' -- "$@")
+	pod=$(jq -n --arg name "${name}" --arg ns "${NAMESPACE}" --arg image "${CANDIDATE_IMAGE}" --arg command "${command}" --argjson args "${args}" '{
+	 apiVersion:"v1",kind:"Pod",metadata:{name:$name,namespace:$ns},
+	 spec:{serviceAccountName:"shiftpv-controller",restartPolicy:"Never",containers:[{
+	 name:"command",image:$image,imagePullPolicy:"IfNotPresent",command:["/shiftpv-controller",$command],args:$args}]}}')
+	test -z "$(kubectl -n "${NAMESPACE}" get "pod/${name}" --ignore-not-found -o name)"
+	kubectl apply -f - <<<"${pod}"
+	kubectl -n "${NAMESPACE}" wait "pod/${name}" --for="jsonpath={.status.phase}=${expected}" --timeout=300s
+	kubectl -n "${NAMESPACE}" logs "pod/${name}" >"${RECOVERY_EVIDENCE}/${name}.log" 2>&1
+	if [[ "${command}" == upgrade-check ]]; then
+		# Kubernetes merges stdout/stderr without preserving their relative order.
+		jq -Rsc 'split("\n") | map(fromjson? | select(type == "object" and has("complete") and has("blockers"))) |
+		 if length == 1 then .[0] else error("missing unique upgrade report") end' \
+		 "${RECOVERY_EVIDENCE}/${name}.log" >"${RECOVERY_EVIDENCE}/${name}-report.json"
+	elif [[ "${command}" == settle-retired-move && "${expected}" == Succeeded ]]; then
+		jq -Rsc 'split("\n") | map(fromjson? | select(type == "object" and has("complete") and has("moveUID"))) |
+		 if length == 1 then .[0] else error("missing unique retirement report") end' \
+		 "${RECOVERY_EVIDENCE}/${name}.log" >"${RECOVERY_EVIDENCE}/${name}-report.json"
+	fi
+	kubectl -n "${NAMESPACE}" get "pod/${name}" -o json >"${RECOVERY_EVIDENCE}/${name}.json"
+	kubectl -n "${NAMESPACE}" delete "pod/${name}" --wait=true --timeout=60s
+}
+
+stage_candidate_node() {
+	kubectl apply --field-manager=shiftpv-crd-upgrade -f "${ROOT_DIR}/charts/shiftpv/crds/"
+	helm template "${RELEASE}" "${ROOT_DIR}/charts/shiftpv" --namespace "${NAMESPACE}" \
+		--kube-version "$(kubectl version -o json | jq -er '.serverVersion.gitVersion')" \
+		--set storageClass.defaultClass=true \
+		--set-string node.image.repository="${CANDIDATE_IMAGE%%:*}" --set-string node.image.tag="${CANDIDATE_IMAGE#*:}" \
+		--set node.image.pullPolicy=IfNotPresent "${READINESS_ARGS[@]}" >"${RECOVERY_EVIDENCE}/node-stage.yaml"
+	awk 'BEGIN {RS="---"; ORS="---\n"} /\nkind: (ClusterRole|ClusterRoleBinding|Role|RoleBinding|DaemonSet|PriorityClass)\n/ {print}' \
+		"${RECOVERY_EVIDENCE}/node-stage.yaml" | kubectl apply -f -
+	kubectl -n "${NAMESPACE}" rollout status daemonset/shiftpv-node --timeout=240s
+}
+
 # The candidate upgrade changes exactly two things against the published
 # install: the chart (including CRD schemas) and images built from it.
 upgrade_candidate() {
@@ -274,6 +313,15 @@ if [[ "${UPGRADE_SCENARIO}" == creation-recovery ]]; then
 	# shellcheck source=test/e2e/kind/upgrade/creation-recovery.sh
 	source "${TEST_DIR}/creation-recovery.sh"
 	test_creation_recovery_transition
+	exit 0
+fi
+
+if [[ "${UPGRADE_SCENARIO}" == move-recovery ]]; then
+	set -o errtrace
+	trap 'printf "move recovery failed at line %s: %s\n" "${LINENO}" "${BASH_COMMAND}" >&2' ERR
+	# shellcheck source=test/e2e/kind/upgrade/move-recovery.sh
+	source "${TEST_DIR}/move-recovery.sh"
+	test_move_recovery_transition
 	exit 0
 fi
 

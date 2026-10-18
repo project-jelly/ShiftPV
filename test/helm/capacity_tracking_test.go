@@ -135,3 +135,29 @@ func TestCapacityTrackingRejectsInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestMaintenanceWriterObservationIsScopedToInstalledDeployment(t *testing.T) {
+	for _, name := range []string{fullname, "custom-storage"} {
+		output, err := render(t, "--namespace", "storage", "--set", "fullnameOverride="+name)
+		if err != nil {
+			t.Fatal(err, output)
+		}
+		found := 0
+		for _, object := range parseChart(t, output).objects {
+			for _, rule := range object.Rules {
+				if !slices.Contains(rule.Resources, "deployments") {
+					continue
+				}
+				found++
+				if object.Kind != "Role" || object.Metadata.Namespace != "storage" || object.Metadata.Name != name+"-controller" ||
+					!slices.Equal(rule.APIGroups, []string{"apps"}) || !slices.Equal(rule.Resources, []string{"deployments"}) ||
+					!slices.Equal(rule.Verbs, []string{"get"}) || !slices.Equal(rule.ResourceNames, []string{name + "-controller"}) {
+					t.Fatalf("maintenance can observe unrelated Deployments: %+v %+v", object.Metadata, rule)
+				}
+			}
+		}
+		if found != 1 {
+			t.Fatalf("expected one namespaced exact-Deployment observation rule, got %d", found)
+		}
+	}
+}

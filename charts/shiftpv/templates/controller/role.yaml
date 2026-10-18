@@ -6,6 +6,10 @@ metadata:
   labels:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ printf "%s-controller" (include "shiftpv.fullname" .) | quote }}]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods", "services"]
     verbs: ["create", "get", "list", "watch", "delete"]

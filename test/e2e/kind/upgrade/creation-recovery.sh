@@ -5,29 +5,6 @@
 # shellcheck source=test/e2e/kind/node-path.sh
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 
-recovery_command() {
-	local name=$1 expected=$2 command=$3
-	shift 3
-	local args pod
-	args=$(jq -cn --args '$ARGS.positional' -- "$@")
-	pod=$(jq -n --arg name "${name}" --arg ns "${NAMESPACE}" --arg image "${CANDIDATE_IMAGE}" --arg command "${command}" --argjson args "${args}" '{
-	 apiVersion:"v1",kind:"Pod",metadata:{name:$name,namespace:$ns},
-	 spec:{serviceAccountName:"shiftpv-controller",restartPolicy:"Never",containers:[{
-	 name:"command",image:$image,imagePullPolicy:"IfNotPresent",command:["/shiftpv-controller",$command],args:$args}]}}')
-	test -z "$(kubectl -n "${NAMESPACE}" get "pod/${name}" --ignore-not-found -o name)"
-	kubectl apply -f - <<<"${pod}"
-	kubectl -n "${NAMESPACE}" wait "pod/${name}" --for="jsonpath={.status.phase}=${expected}" --timeout=180s
-	kubectl -n "${NAMESPACE}" logs "pod/${name}" >"${RECOVERY_EVIDENCE}/${name}.log" 2>&1
-	if [[ "${command}" == upgrade-check ]]; then
-		# Kubernetes merges stdout/stderr without preserving their relative order.
-		jq -Rsc 'split("\n") | map(fromjson? | select(type == "object" and has("complete") and has("blockers"))) |
-		 if length == 1 then .[0] else error("missing unique upgrade report") end' \
-		 "${RECOVERY_EVIDENCE}/${name}.log" >"${RECOVERY_EVIDENCE}/${name}-report.json"
-	fi
-	kubectl -n "${NAMESPACE}" get "pod/${name}" -o json >"${RECOVERY_EVIDENCE}/${name}.json"
-	kubectl -n "${NAMESPACE}" delete "pod/${name}" --wait=true --timeout=60s
-}
-
 test_creation_recovery_transition() {
 	test "${CHART_VERSION}" = 0.6.13
 	test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
@@ -140,15 +117,7 @@ EOF
 
 	# Stage only schema, permissions and Node execution. Keep the old Controller
 	# and its webhook available; no second background Controller is started.
-	kubectl apply --field-manager=shiftpv-crd-upgrade -f "${ROOT_DIR}/charts/shiftpv/crds/"
-	helm template "${RELEASE}" "${ROOT_DIR}/charts/shiftpv" --namespace "${NAMESPACE}" \
-		--kube-version "$(kubectl version -o json | jq -er '.serverVersion.gitVersion')" \
-		--set storageClass.defaultClass=true \
-		--set-string node.image.repository="${CANDIDATE_IMAGE%%:*}" --set-string node.image.tag="${CANDIDATE_IMAGE#*:}" \
-		--set node.image.pullPolicy=IfNotPresent "${READINESS_ARGS[@]}" >"${RECOVERY_EVIDENCE}/node-stage.yaml"
-	awk 'BEGIN {RS="---"; ORS="---\n"} /\nkind: (ClusterRole|ClusterRoleBinding|Role|RoleBinding|DaemonSet|PriorityClass)\n/ {print}' \
-		"${RECOVERY_EVIDENCE}/node-stage.yaml" | kubectl apply -f -
-	kubectl -n "${NAMESPACE}" rollout status daemonset/shiftpv-node --timeout=240s
+	stage_candidate_node
 	assert_equal "old Controller remains" "${CONTROLLER_IMAGE}" \
 		"$(kubectl -n "${NAMESPACE}" get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.containers[?(@.name=="shiftpv-controller")].image}')"
 	assert_marker shiftpv-upgrade-existing "${MARKER}"

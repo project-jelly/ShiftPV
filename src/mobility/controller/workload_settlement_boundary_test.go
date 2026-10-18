@@ -9,11 +9,84 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
+
+func TestExplicitRetirementRejectsUnrelatedAuthorityWithoutEffects(t *testing.T) {
+	for _, scenario := range []string{"foreign UID", "legacy", "live claim", "terminating claim", "unknown claim", "foreign Move", "deleting Volume", "changed owner"} {
+		t.Run(scenario, func(t *testing.T) {
+			f, _, _ := retirementRegistryFixture(t, "source", "Retain", false)
+			move := f.move(t, 0)
+			uid := move.UID
+			switch scenario {
+			case "foreign UID":
+				uid = "different-uid"
+			case "legacy":
+				object, err := f.dynamic.Resource(volumeapi.MoveResource).Get(f.ctx, move.Name, metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				object.Object["spec"].(map[string]any)["protocolVersion"] = ""
+				if _, err := f.dynamic.Resource(volumeapi.MoveResource).Update(f.ctx, object, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			case "live claim", "terminating claim":
+				claim := f.workloads[0].Claim.DeepCopy()
+				if scenario == "terminating claim" {
+					now := metav1.Now()
+					claim.DeletionTimestamp = &now
+				}
+				if _, err := f.client.CoreV1().PersistentVolumeClaims(claim.Namespace).Create(f.ctx, claim, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			case "unknown claim":
+				f.client.PrependReactor("get", "persistentvolumeclaims", func(ktesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewTimeoutError("unknown", 1)
+				})
+			case "changed owner":
+				// Inject inconsistent stored evidence; the production CAS correctly
+				// refuses to create this state through a source-only transition.
+				object, err := f.dynamic.Resource(volumeapi.VolumeResource).Get(f.ctx, move.Spec.VolumeID, metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := unstructured.SetNestedField(object.Object, "different-copy", "status", "currentCopy", "copyID"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.dynamic.Resource(volumeapi.VolumeResource).Update(f.ctx, object, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				state := f.state(t, 0)
+				next := state
+				switch scenario {
+				case "foreign Move":
+					next.ActiveMove = "different-move"
+				case "deleting Volume":
+					next.Phase, next.Deleting, next.DeletionOperationID = volumeapi.PhaseDeleting, true, "delete-"+state.UID
+				}
+				if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, state, next); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.client.ClearActions()
+			f.dynamic.ClearActions()
+			complete, err := f.reconciler.AdvanceRetiredMove(f.ctx, move.Name, uid)
+			if err == nil || complete {
+				t.Fatal("unrelated or uncertain authority accepted", complete, err)
+			}
+			for _, action := range append(f.client.Actions(), f.dynamic.Actions()...) {
+				if action.GetVerb() != "get" && action.GetVerb() != "list" {
+					t.Fatal("rejected retirement granted an effect", action)
+				}
+			}
+		})
+	}
+}
 
 func TestWorkloadRetirementRequiresAbsenceRatherThanAPIFailure(t *testing.T) {
 	for _, scenario := range []string{"timeout", "forbidden", "unknown", "in-use deletion"} {
