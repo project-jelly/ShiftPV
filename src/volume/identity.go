@@ -10,6 +10,15 @@ import (
 // admission boundary and the uninstall guard cannot drift apart.
 const DriverName = "csi.shiftpv.io"
 
+const CreationCancellationPrefix = "cancel-create-"
+
+// IsCreationCancellation identifies the original initial serving copy and its
+// cancellation operation. Callers must separately verify live authority.
+func IsCreationCancellation(copy CopyIdentity, operationID string) bool {
+	return copy.Validate() == nil && copy.Role == RoleServing && copy.CopyID == "initial-"+copy.VolumeUID &&
+		ValidIdentityToken(operationID) && operationID == CreationCancellationPrefix+copy.VolumeUID
+}
+
 const (
 	RoleServing  = "Serving"
 	RoleIncoming = "Incoming"

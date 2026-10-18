@@ -197,7 +197,11 @@ func (n *Node) reclaim(ctx context.Context, approved cleanupapi.Cleanup) error {
 		}
 		return n.localAuthority(ctx, approved.Spec.Target, root)
 	}
-	receipt, digest, err := ownership.ReclaimWithResume(ctx, root, approved.Spec.Target, approved.Spec.OperationID, authority)
+	reclaim := ownership.ReclaimWithResume
+	if approved.Spec.Reason == "CreationCancelled" {
+		reclaim = ownership.CancelCreation
+	}
+	receipt, digest, err := reclaim(ctx, root, approved.Spec.Target, approved.Spec.OperationID, authority)
 	if err != nil {
 		if errors.Is(err, ownership.ErrNeedsReview) || errors.Is(err, ownership.ErrIdentity) {
 			next := approved.Status

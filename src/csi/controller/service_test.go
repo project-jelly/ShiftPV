@@ -56,6 +56,14 @@ func (*fakeVolumeRegistry) CancelUnstartedCreation(context.Context, string, stri
 	return volumeapi.ErrStateConflict
 }
 
+func (*fakeVolumeRegistry) BeginCreationCancellation(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error) {
+	return volumeapi.State{}, volumeapi.ErrStateConflict
+}
+
+func (*retryDeleteVolumeRegistry) BeginCreationCancellation(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error) {
+	return volumeapi.State{}, volumeapi.ErrStateConflict
+}
+
 func (r *retryDeleteVolumeRegistry) BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error) {
 	return r.state, nil
 }

@@ -141,9 +141,15 @@ func (s Spec) Validate() error {
 		return err
 	}
 	switch s.Reason {
-	case "VolumeDelete":
+	case "VolumeDelete", "CreationCancelled":
 		if s.Authority.Kind != "ShiftPVVolume" || s.Authority.Name != s.Target.VolumeID || s.Authority.UID != s.Target.VolumeUID {
 			return fmt.Errorf("volume cleanup authority does not match the target")
+		}
+		if s.Reason == "CreationCancelled" && !volume.IsCreationCancellation(s.Target, s.OperationID) {
+			return fmt.Errorf("creation cancellation must identify the original initial copy")
+		}
+		if s.Reason == "VolumeDelete" && s.OperationID == volume.CreationCancellationPrefix+s.Target.VolumeUID {
+			return fmt.Errorf("creation cancellation requires its own cleanup reason")
 		}
 	case "MoveSource", "MoveRollback":
 		if s.Authority.Kind != "ShiftPVMove" {

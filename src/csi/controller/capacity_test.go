@@ -112,6 +112,10 @@ func (*capacityTrackingVolumeRegistry) CancelUnstartedCreation(context.Context, 
 	return volumeapi.ErrStateConflict
 }
 
+func (*capacityTrackingVolumeRegistry) BeginCreationCancellation(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error) {
+	return volumeapi.State{}, volumeapi.ErrStateConflict
+}
+
 func (r *capacityTrackingVolumeRegistry) Get(_ context.Context, id string) (volumeapi.State, error) {
 	unlock := readLock(r.mu)
 	defer unlock()

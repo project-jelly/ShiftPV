@@ -10,8 +10,10 @@ settlement [PR #225](https://github.com/project-jelly/ShiftPV/pull/225) merged a
 31 successful checks and precommit Delete/postcommit Retain Kind qualification.
 Step 4 read-only allocation admission [PR #226](https://github.com/project-jelly/ShiftPV/pull/226)
 merged after 30 successful checks and real Linux/Kind RO-to-RW qualification.
-Unstarted creation cancellation is under verification. Partial native creation,
-original-claim retirement and the remaining integrated matrix are outstanding.
+Unstarted creation cancellation [PR #227](https://github.com/project-jelly/ShiftPV/pull/227)
+merged after required CI and real API deletion-fence qualification. Partial native
+creation cancellation is under verification. Original-claim retirement and the
+remaining integrated matrix are outstanding.
 
 ## Goal and invariants
 
@@ -35,8 +37,22 @@ prerequisites. Reaching `Blocked` alone does not establish settlement.
 
 ## Stage and event contracts
 
-The creation entries below remain target contracts. Move retirement passed the
-diagonal Kind cases; integrated qualification remains outstanding.
+Move retirement passed the diagonal Kind cases; integrated qualification remains
+outstanding. Explicit creation cancellation has the following boundaries:
+
+- Spec-only intent uses exact UID/resourceVersion deletion and finalizer CAS.
+- Pending/NodeCreating cancellation races completion on the same Volume CAS.
+  Only the original initial copy is eligible; legacy helper responsibility or an
+  unknown observation preserves the reservation.
+- `Deleting` with `cancel-create-<VolumeUID>` and cleanup reason
+  `CreationCancelled` fences creation. Older journal readers reject this reason.
+  Cancellation never invents Ready or a successful creation receipt.
+- The Node uses the creator's filesystem lock and checks copy/placement/inode
+  evidence across serving, create-stage and retired paths. An unplaced stage
+  must be empty. Ambiguous data is retained for review.
+- A cleanup receipt and fresh generation-fenced complete absence precede Volume
+  finalization and reservation release. This does not yet detect a missing
+  original PVC automatically.
 
 | Event | Before execution approval | Approved, before owner CAS | After owner CAS |
 |---|---|---|---|

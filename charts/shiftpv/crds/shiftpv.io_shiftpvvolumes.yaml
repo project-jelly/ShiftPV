@@ -152,7 +152,7 @@ spec:
                         target: *copyIdentity
                         reason:
                           type: string
-                          enum: [VolumeDelete]
+                          enum: [VolumeDelete, CreationCancelled]
                         authority:
                           type: object
                           required: [kind, name, uid]
