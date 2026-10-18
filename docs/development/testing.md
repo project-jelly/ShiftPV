@@ -308,6 +308,14 @@ for API counts, or `-run '^$' -bench '^BenchmarkNodeUnpublishBurst$' -benchtime=
 to compare the former 5/10 budget with the current configuration. Separately
 stall GC and Pool observation and verify that foreground calls still progress.
 
+The required Linux mount gate runs `TestLinuxPublicationUnpublishReadOnlyPool`
+in a private mount namespace: publish two real bind targets, remount the Pool
+read-only, unmount each target and reconcile publication. It must retain the
+first remaining reference and clear only the last, preserving copy identity
+and data. Unit tests cover exclusion by a writer, writable missing-lock
+initialization, and no retry after a callback reports NotFound. The Linux
+failure baseline reaches actual unmount, then fails opening the lock with EROFS.
+
 Node API observation tests gate token waits and HTTP responses independently,
 preserve cancellation and retryable budget errors, and verify typed/dynamic
 clients share one observed limiter. The creation budget regression uses two

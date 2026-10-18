@@ -162,6 +162,9 @@ cleanup 권한을 추론하거나 추론한 계획으로 scan하지 않는다.
 확인하여 publication 상태를 기록한다. 다른 볼륨의 삭제가 `scanEpoch`를 올려 용량 관측이 잠시
 오래되어도 이 해제는 진행한다. 새 publish의 최신 용량 관측과 삭제 완료의 fresh absence proof는
 계속 필요하다. 디스크·Pool·copy identity나 mount 관측이 불명확하면 publication 상태를 해제하지 않는다.
+이 정산은 기존 volume lock을 읽기 모드로 열어 동일한 flock에 참여하므로 backing이 read-only여도
+진행한다. 잠금 파일이 없는 writable Pool에서는 기존처럼 초기화하며, 잠금 경합이나 관측 오류를
+성공으로 처리하지 않는다. 이 경로는 새 publish나 디스크 cleanup에 쓰기 권한을 부여하지 않는다.
 
 정확한 Ready copy가 아직 게시 중이면 `DeleteVolume`은 `Unavailable`로 unpublish를 기다린다. 이때 삭제 fence·cleanup·예약 반환을 시작하지 않는다. copy/UID/owner 불일치, active Move, 잘못된 phase는 계속 `FailedPrecondition`으로 거부한다.
 

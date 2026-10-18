@@ -29,6 +29,16 @@ sudo unshare --mount --propagation private \
   -test.v \
   -test.run '^TestLinuxMountIntegration'
 
+publication_binary="${temp_dir}/publication.test"
+go test -c -o "${publication_binary}" ./src/node/publication
+sudo unshare --mount --propagation private \
+  env \
+  SHIFTPV_LINUX_MOUNT_INTEGRATION=1 \
+  SHIFTPV_PARENT_MOUNT_NAMESPACE="${parent_mount_namespace}" \
+  "${publication_binary}" \
+  -test.v \
+  -test.run '^TestLinuxPublication'
+
 measurement_binary="${temp_dir}/measurement.test"
 go test -c -o "${measurement_binary}" ./src/cmd/volume-helper
 sudo unshare --mount --propagation private \
