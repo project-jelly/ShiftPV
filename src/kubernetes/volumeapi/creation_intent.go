@@ -71,7 +71,7 @@ func (r *Registry) CancelUnstartedCreation(ctx context.Context, id, uid string) 
 			return ErrStateConflict
 		}
 		identity, revision := types.UID(uid), object.GetResourceVersion()
-		if err := r.Client.Resource(VolumeResource).Delete(ctx, id, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &identity, ResourceVersion: &revision}}); err != nil {
+		if err := r.Client.Resource(VolumeResource).Delete(ctx, id, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &identity, ResourceVersion: &revision}}); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}

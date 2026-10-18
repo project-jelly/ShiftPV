@@ -150,6 +150,19 @@ func TestUnstartedCancellationCanCloseLegacyIntentWithoutReservation(t *testing.
 	}
 }
 
+func TestUnstartedCancellationReplaysDeletionBetweenReadAndDelete(t *testing.T) {
+	r, api, object := cancellationFixture(t, "none")
+	api.PrependReactor("delete", "shiftpvvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if err := api.Tracker().Delete(VolumeResource, "", object.GetName()); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil, apierrors.NewNotFound(VolumeResource.GroupResource(), object.GetName())
+	})
+	if err := r.CancelUnstartedCreation(context.Background(), object.GetName(), string(object.GetUID())); err != nil {
+		t.Fatalf("already removed exact object did not settle: %v", err)
+	}
+}
+
 func TestUnstartedCancellationPreservesUnknownAndForeignState(t *testing.T) {
 	for _, change := range []string{"UID", "phase", "owner", "executor", "receipt", "cleanup", "publication", "protection", "missing RV"} {
 		t.Run(change, func(t *testing.T) {
