@@ -24,6 +24,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -64,12 +65,8 @@ func (*retryDeleteVolumeRegistry) BeginCreationCancellation(context.Context, str
 	return volumeapi.State{}, volumeapi.ErrStateConflict
 }
 
-func (r *retryDeleteVolumeRegistry) BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error) {
+func (r *retryDeleteVolumeRegistry) BeginCreate(context.Context, volumeapi.CreationRequest) (volumeapi.State, error) {
 	return r.state, nil
-}
-
-func (r *retryDeleteVolumeRegistry) BeginCreateInPool(ctx context.Context, id, request, node string, capacity int64, _, _ string) (volumeapi.State, error) {
-	return r.BeginCreate(ctx, id, request, node, capacity)
 }
 
 func (r *retryDeleteVolumeRegistry) CompleteCreate(context.Context, string, string, volume.CopyIdentity) error {
@@ -174,7 +171,8 @@ func (f *fakeVolumeRegistry) PoolForIdentity(_ context.Context, name, uid, node 
 	return volumeapi.Pool{Name: name, UID: uid, NodeName: node, PoolGroup: volumeapi.DefaultPoolGroup}, nil
 }
 
-func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, requestName, nodeName string, capacityBytes int64) (volumeapi.State, error) {
+func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, request volumeapi.CreationRequest) (volumeapi.State, error) {
+	volumeID, requestName, nodeName, capacityBytes := request.VolumeID, request.RequestName, request.NodeName, request.CapacityBytes
 	if f.state.CurrentCopy == nil {
 		copy := volume.CopyIdentity{
 			InstallationID: "installation", PoolName: "pool", PoolUID: "pool-uid",
@@ -189,10 +187,6 @@ func (f *fakeVolumeRegistry) BeginCreate(_ context.Context, volumeID, requestNam
 		return volumeapi.State{}, err
 	}
 	return f.state, nil
-}
-
-func (f *fakeVolumeRegistry) BeginCreateInPool(ctx context.Context, id, request, node string, capacity int64, _, _ string) (volumeapi.State, error) {
-	return f.BeginCreate(ctx, id, request, node, capacity)
 }
 
 func (f *fakeVolumeRegistry) CompleteCreate(_ context.Context, _ string, _ string, copy volume.CopyIdentity) error {
@@ -232,14 +226,10 @@ type durableCreateRegistry struct {
 	completeCalls int
 }
 
-func (r *durableCreateRegistry) BeginCreate(_ context.Context, _, name, node string, capacity int64) (volumeapi.State, error) {
+func (r *durableCreateRegistry) BeginCreate(_ context.Context, request volumeapi.CreationRequest) (volumeapi.State, error) {
 	*r.events = append(*r.events, "intent")
-	r.state.RequestName, r.state.InitialNode, r.state.CapacityBytes = name, node, capacity
+	r.state.RequestName, r.state.InitialNode, r.state.CapacityBytes = request.RequestName, request.NodeName, request.CapacityBytes
 	return r.state, r.beginErr
-}
-
-func (r *durableCreateRegistry) BeginCreateInPool(ctx context.Context, id, request, node string, capacity int64, _, _ string) (volumeapi.State, error) {
-	return r.BeginCreate(ctx, id, request, node, capacity)
 }
 
 func (r *durableCreateRegistry) CompleteCreate(context.Context, string, string, volume.CopyIdentity) error {
@@ -290,6 +280,9 @@ func (o *blockingCleanupOperator) Reclaim(ctx context.Context, cleanup cleanupap
 }
 
 func configuredService(service *Service) *Service {
+	if service.CreationClaims == nil {
+		service.CreationClaims = creation.ClaimInspector{Reader: consumer.KubernetesReader{Client: service.Client}}
+	}
 	if service.ConsumerPlacement == nil {
 		service.ConsumerPlacement = consumer.Inspector{Reader: consumer.KubernetesReader{Client: service.Client}}
 	}
@@ -853,11 +846,11 @@ func TestCreateVolumeTopologyFollowsMobilityOptIn(t *testing.T) {
 			namespace := test.namespace
 			wantNodes := test.wantNodes
 			registry := &fakeVolumeRegistry{state: volumeapi.State{OwnerNode: "worker-a"}, poolNodes: []string{"worker-a", "worker-b"}}
-			service := configuredService(&Service{Client: fake.NewClientset(namespace), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
+			service := configuredService(&Service{Client: fake.NewClientset(namespace, recordedCreationPVC(namespace.Name, "worker-a")), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
 			req := validCreateRequest("worker-a")
 			req.Parameters[PVCNameKey] = "claim"
 			req.Parameters[PVCNamespaceKey] = namespace.Name
-			req.Parameters[PVNameKey] = "pv-test"
+			req.Parameters[PVNameKey] = req.Name
 			response, err := service.CreateVolume(context.Background(), req)
 			if err != nil {
 				t.Fatal(err)
@@ -901,11 +894,11 @@ func TestCreateVolumeKeepsUnreadyRegisteredNodeInMobilityTopology(t *testing.T) 
 		pools:              &volumeapi.Registry{Client: client},
 	}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mobile", Labels: map[string]string{MobilityAdmissionLabel: mobilityEnabledValue}}}
-	service := configuredService(&Service{Client: fake.NewClientset(namespace), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
+	service := configuredService(&Service{Client: fake.NewClientset(namespace, recordedCreationPVC(namespace.Name, "worker-a")), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{}, Volumes: registry})
 	req := validCreateRequest("worker-a")
 	req.Parameters[PVCNameKey] = "claim"
 	req.Parameters[PVCNamespaceKey] = namespace.Name
-	req.Parameters[PVNameKey] = "pv-test"
+	req.Parameters[PVNameKey] = req.Name
 	response, err := service.CreateVolume(ctx, req)
 	if err != nil {
 		t.Fatal(err)

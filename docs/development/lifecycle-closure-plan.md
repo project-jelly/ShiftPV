@@ -11,9 +11,11 @@ settlement [PR #225](https://github.com/project-jelly/ShiftPV/pull/225) merged a
 Step 4 read-only allocation admission [PR #226](https://github.com/project-jelly/ShiftPV/pull/226)
 merged after 30 successful checks and real Linux/Kind RO-to-RW qualification.
 Unstarted creation cancellation [PR #227](https://github.com/project-jelly/ShiftPV/pull/227)
-merged after required CI and real API deletion-fence qualification. Partial native
-creation cancellation is under verification. Original-claim retirement and the
-remaining integrated matrix are outstanding.
+merged after required CI and real API deletion-fence qualification. Native partial
+creation cancellation [PR #228](https://github.com/project-jelly/ShiftPV/pull/228)
+merged after 31 successful checks, Linux boundary tests and Kind receipt/absence,
+full source-quota reuse and normal cleanup proof. Original claim provenance is
+under verification; automatic retirement and the remaining matrix are outstanding.
 
 ## Goal and invariants
 

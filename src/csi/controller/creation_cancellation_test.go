@@ -91,7 +91,7 @@ func TestPendingCreationCanFenceCleanupWithoutBecomingReady(t *testing.T) {
 		return false, nil, nil
 	})
 	id := "shiftpv-0123456789abcdef0123456789abcdef"
-	before, err := registry.BeginCreateInPool(ctx, id, "pvc-cancel", "worker-a", 64<<20, "pool-a", "pool-a-uid")
+	before, err := registry.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: id, RequestName: "pvc-cancel", NodeName: "worker-a", CapacityBytes: 64 << 20, Pool: &volumeapi.PoolReference{Name: "pool-a", UID: "pool-a-uid"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestCreationCancellationPreservesLegacyOrUnknownResponsibility(t *testing.T
 			_, registry, newService, _ := initializationFixture(t)
 			ctx := context.Background()
 			id := "shiftpv-0123456789abcdef0123456789abcdef"
-			initial, err := registry.BeginCreateInPool(ctx, id, "pvc-cancel", "worker-a", 64<<20, "pool-a", "pool-a-uid")
+			initial, err := registry.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: id, RequestName: "pvc-cancel", NodeName: "worker-a", CapacityBytes: 64 << 20, Pool: &volumeapi.PoolReference{Name: "pool-a", UID: "pool-a-uid"}})
 			if err != nil {
 				t.Fatal(err)
 			}

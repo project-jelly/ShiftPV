@@ -18,6 +18,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/provisioning/nodeexecutor"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -128,12 +129,15 @@ func TestCSILifecycleDependenciesUseIndependentBoundedBudget(t *testing.T) {
 	if err != nil || placement.Placement != consumer.Unknown {
 		t.Fatalf("CSI consumer read did not reach the API: %v %v", placement, err)
 	}
+	if claim, err := service.CreationClaims.Inspect(ctx, creation.ClaimRequest{Namespace: "test", Name: "claim", RequestName: "pvc-uid", NodeName: "node"}); claim != nil || !errors.Is(err, creation.ErrClaimIdentity) {
+		t.Fatalf("CSI original claim read did not reach the API: %+v %v", claim, err)
+	}
 	if budget.waits.Load() != 1 || original.QPS != 0 || original.Burst != 0 || original.RateLimiter != budget || original.UserAgent != "observer" || original.Timeout != time.Minute {
 		t.Fatal("CSI requests consumed or changed the observer budget")
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(requests) != 4 {
+	if len(requests) != 5 {
 		t.Fatalf("requests=%v", requests)
 	}
 	other, _ := newCSILifecycle(cfg, original, fail)

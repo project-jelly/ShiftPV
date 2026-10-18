@@ -20,6 +20,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -50,8 +51,7 @@ type VolumeRegistry interface {
 	PoolNodes(context.Context) ([]string, error)
 	PoolNodesForGroup(context.Context, string) ([]string, error)
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
-	BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error)
-	BeginCreateInPool(context.Context, string, string, string, int64, string, string) (volumeapi.State, error)
+	BeginCreate(context.Context, volumeapi.CreationRequest) (volumeapi.State, error)
 	CompleteCreate(context.Context, string, string, volume.CopyIdentity) error
 	BeginDelete(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error)
 }
@@ -73,6 +73,7 @@ type Service struct {
 	CreationInspector interface {
 		CreationExists(context.Context, volume.CopyIdentity) (bool, error)
 	}
+	CreationClaims          creation.ClaimInspection
 	ConsumerPlacement       consumer.Inspection
 	CapacityPools           PoolCapacityRegistry
 	CapacityProbe           PoolCapacityProbe
@@ -251,16 +252,23 @@ func (s *Service) beginCreate(ctx context.Context, request createRequest, parame
 		if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
 			return volumeapi.State{}, err
 		}
-		return s.Volumes.BeginCreate(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes)
+		return s.Volumes.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: request.id, RequestName: existing.RequestName, NodeName: existing.InitialNode, CapacityBytes: existing.CapacityBytes, Claim: existing.CreationClaim})
 	}
 	if !apierrors.IsNotFound(err) {
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
-	return s.Volumes.BeginCreate(ctx, request.id, request.name, request.nodeName, request.capacity)
+	intent, err := s.newCreationRequest(ctx, request, parameters)
+	if err != nil {
+		return volumeapi.State{}, err
+	}
+	return s.Volumes.BeginCreate(ctx, intent)
 }
 
 func (s *Service) validateExistingCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) error {
 	if err := compatibleCreateRequest(existing, request); err != nil {
+		return err
+	}
+	if err := s.validateCreationClaim(ctx, existing); err != nil {
 		return err
 	}
 	if request.nodeName == existing.InitialNode || (parameters[PVCNamespaceKey] == "" && parameters[PVCNameKey] == "") {

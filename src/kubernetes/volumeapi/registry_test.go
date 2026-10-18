@@ -345,7 +345,7 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
 	volumeID := "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	state, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
+	state, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestBeginCreatePersistsIdentityBeforeReady(t *testing.T) {
 	if state.CurrentCopy.InstallationID != "installation-uid" || state.CurrentCopy.PoolUID != "pool-uid" || state.CurrentCopy.VolumeUID != "volume-uid" || state.CurrentCopy.Role != volume.RoleServing {
 		t.Fatalf("copy identity=%#v", state.CurrentCopy)
 	}
-	second, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
+	second, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64})
 	if err != nil || !reflect.DeepEqual(second, state) {
 		t.Fatalf("idempotent begin=%#v err=%v", second, err)
 	}
@@ -391,14 +391,14 @@ func TestBeginCreateInPoolAnchorsSelectedPoolAcrossRetries(t *testing.T) {
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
 	id := "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	state, err := registry.BeginCreateInPool(ctx, id, "pvc", "node-a", 64, "pool-b", "pool-b-uid")
+	state, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: id, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64, Pool: &PoolReference{Name: "pool-b", UID: "pool-b-uid"}})
 	if err != nil || state.CurrentCopy == nil || state.CurrentCopy.PoolUID != "pool-b-uid" {
 		t.Fatalf("selected Pool was not anchored: state=%#v err=%v", state, err)
 	}
-	if _, err := registry.BeginCreateInPool(ctx, id, "pvc", "node-a", 64, "pool-a", "pool-a-uid"); !errors.Is(err, ErrStateConflict) {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: id, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64, Pool: &PoolReference{Name: "pool-a", UID: "pool-a-uid"}}); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("retry changed Pool identity: %v", err)
 	}
-	if _, err := registry.BeginCreateInPool(ctx, id, "pvc", "node-a", 64, "pool-b", "pool-b-uid"); err != nil {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: id, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64, Pool: &PoolReference{Name: "pool-b", UID: "pool-b-uid"}}); err != nil {
 		t.Fatalf("retry in anchored Pool failed: %v", err)
 	}
 }
@@ -504,7 +504,7 @@ func TestBeginCreateRejectsExistingServingCopyBeforeIntent(t *testing.T) {
 	}, clusterIdentity, registeredPool)
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 1, 0, time.UTC) }}
 
-	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrPoolCopyConflict) {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64}); !errors.Is(err, ErrPoolCopyConflict) {
 		t.Fatalf("existing serving copy error = %v", err)
 	}
 	if _, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
@@ -519,7 +519,7 @@ func TestBeginCreateRejectsExistingServingCopyBeforeIntent(t *testing.T) {
 	if _, err := client.Resource(VolumeResource).Create(ctx, placeholder, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrPoolCopyConflict) {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64}); !errors.Is(err, ErrPoolCopyConflict) {
 		t.Fatalf("uninitialized intent bypassed serving copy conflict: %v", err)
 	}
 	current, err := client.Resource(VolumeResource).Get(ctx, volumeID, metav1.GetOptions{})
@@ -561,7 +561,7 @@ func TestBeginCreateRejectsReplacementVolumeBeforeStatusWrite(t *testing.T) {
 		return false, nil, nil
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
-	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrStateConflict) {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64}); !errors.Is(err, ErrStateConflict) {
 		t.Fatalf("replacement Volume creation error = %v", err)
 	}
 	current, err := registry.Get(ctx, volumeID)
@@ -589,7 +589,7 @@ func TestBeginCreateResumesExactPendingIdentityWithInvalidInventory(t *testing.T
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
 	volumeID := "shiftpv-cccccccccccccccccccccccccccccccc"
-	pending, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
+	pending, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,11 +608,11 @@ func TestBeginCreateResumesExactPendingIdentityWithInvalidInventory(t *testing.T
 		t.Fatalf("invalid inventory remained eligible: %v", err)
 	}
 
-	resumed, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64)
+	resumed, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64})
 	if err != nil || !reflect.DeepEqual(resumed, pending) {
 		t.Fatalf("exact pending creation did not resume: state=%#v err=%v", resumed, err)
 	}
-	if _, err := registry.BeginCreate(ctx, "shiftpv-dddddddddddddddddddddddddddddddd", "pvc-new", "node-a", 64); !errors.Is(err, ErrPoolNotReady) {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: "shiftpv-dddddddddddddddddddddddddddddddd", RequestName: "pvc-new", NodeName: "node-a", CapacityBytes: 64}); !errors.Is(err, ErrPoolNotReady) {
 		t.Fatalf("new creation bypassed invalid inventory: %v", err)
 	}
 }
@@ -636,7 +636,7 @@ func TestBeginCreateDoesNotResumeAfterPoolProtectionIsLost(t *testing.T) {
 	})
 	registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
 	volumeID := "shiftpv-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); err != nil {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64}); err != nil {
 		t.Fatal(err)
 	}
 	currentPool, err := client.Resource(PoolResource).Get(ctx, registeredPool.GetName(), metav1.GetOptions{})
@@ -647,7 +647,7 @@ func TestBeginCreateDoesNotResumeAfterPoolProtectionIsLost(t *testing.T) {
 	if _, err := client.Resource(PoolResource).Update(ctx, currentPool, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.BeginCreate(ctx, volumeID, "pvc", "node-a", 64); !errors.Is(err, ErrPoolNotReady) {
+	if _, err := registry.BeginCreate(ctx, CreationRequest{VolumeID: volumeID, RequestName: "pvc", NodeName: "node-a", CapacityBytes: 64}); !errors.Is(err, ErrPoolNotReady) {
 		t.Fatalf("pending creation resumed without Pool protection: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/volume"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,6 +39,7 @@ func newPlacementProgressFixture(t *testing.T) *placementProgressFixture {
 	client := fake.NewClientset(pvc, scratchConsumerPod(""), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: pvc.Namespace}})
 	service := newService()
 	service.Client = client
+	service.CreationClaims = creation.ClaimInspector{Reader: consumer.KubernetesReader{Client: client}}
 	service.ConsumerPlacement = consumer.Inspector{Reader: consumer.KubernetesReader{Client: client}}
 	retries := &retryRecorder{}
 	service.RetryRequests = retries

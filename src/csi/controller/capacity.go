@@ -30,7 +30,7 @@ type PoolCapacityProbe interface {
 }
 
 func (s *Service) beginCreateWithinPool(ctx context.Context, request createRequest, parameters map[string]string) (volumeapi.State, error) {
-	id, requestName, nodeName, requestedBytes := request.id, request.name, request.nodeName, request.capacity
+	id := request.id
 	defer s.observeStep("capacity_admission", id)()
 	existing, err := s.readCreationIntent(ctx, id)
 	if err == nil {
@@ -40,7 +40,8 @@ func (s *Service) beginCreateWithinPool(ctx context.Context, request createReque
 		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
 	}
 
-	return s.placeNewCreate(ctx, id, requestName, nodeName, requestedBytes, parameters, "")
+	intent := volumeapi.CreationRequest{VolumeID: request.id, RequestName: request.name, NodeName: request.nodeName, CapacityBytes: request.capacity}
+	return s.placeNewCreate(ctx, intent, parameters, "")
 }
 
 func (s *Service) readCreationIntent(ctx context.Context, id string) (volumeapi.State, error) {
@@ -82,7 +83,7 @@ func (s *Service) resumeExistingCreate(ctx context.Context, existing volumeapi.S
 		return volumeapi.State{}, status.Errorf(codes.AlreadyExists, "volume %q belongs to Pool group %q", request.name, poolGroup(pool))
 	}
 	// Keep the registry's exact identity checks and the original capacity hold.
-	return s.Volumes.BeginCreateInPool(ctx, request.id, existing.RequestName, existing.InitialNode, existing.CapacityBytes, pool.Name, pool.UID)
+	return s.Volumes.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: request.id, RequestName: existing.RequestName, NodeName: existing.InitialNode, CapacityBytes: existing.CapacityBytes, Pool: &volumeapi.PoolReference{Name: pool.Name, UID: pool.UID}, Claim: existing.CreationClaim})
 }
 
 // resumeReadyCreate reads completed creation history and the current serving
@@ -122,7 +123,8 @@ func poolSelectionError(err error) error {
 	return kubernetesAPIError("read selected Pool", err)
 }
 
-func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName string, requestedBytes int64, parameters map[string]string, initializingUID string) (volumeapi.State, error) {
+func (s *Service) placeNewCreate(ctx context.Context, request volumeapi.CreationRequest, parameters map[string]string, initializingUID string) (volumeapi.State, error) {
+	id, requestName, nodeName := request.VolumeID, request.RequestName, request.NodeName
 	poolsDone := s.observeStep("create_pool_list", id)
 	snapshot, err := s.CapacityPools.ObservePools(ctx)
 	poolsDone()
@@ -146,7 +148,7 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 			continue
 		}
 		found = true
-		created, fit, err := s.attemptCreateInPool(ctx, pool, id, requestName, requestedBytes, parameters, initializingUID)
+		created, fit, err := s.attemptCreateInPool(ctx, pool, request, parameters, initializingUID)
 		if err != nil {
 			if errors.Is(err, volumeapi.ErrPoolNotReady) {
 				s.waitForPoolObservation(parameters, requestName, nodeName, pool)
@@ -168,7 +170,8 @@ func (s *Service) placeNewCreate(ctx context.Context, id, requestName, nodeName 
 
 // Admission and its durable intent share the Pool UID lock used by mobility
 // holds and deregistration. Registration already rejects overlapping Pools.
-func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, id, requestName string, requestedBytes int64, parameters map[string]string, initializingUID string) (volumeapi.State, poolFit, error) {
+func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, request volumeapi.CreationRequest, parameters map[string]string, initializingUID string) (volumeapi.State, poolFit, error) {
+	id, requestName, requestedBytes := request.VolumeID, request.RequestName, request.CapacityBytes
 	locks := s.PoolLocks
 	if locks == nil {
 		locks = &s.poolLifecycles
@@ -188,8 +191,15 @@ func (s *Service) attemptCreateInPool(ctx context.Context, pool volumeapi.Pool, 
 	if err != nil || !fit.allowed {
 		return volumeapi.State{}, fit, err
 	}
+	if initializingUID == "" {
+		request, err = s.newCreationRequest(ctx, createRequest{id: id, name: requestName, nodeName: pool.NodeName, capacity: requestedBytes}, parameters)
+		if err != nil {
+			return volumeapi.State{}, fit, err
+		}
+	}
 	intentDone := s.observeStep("create_intent_record", id)
-	created, err := s.Volumes.BeginCreateInPool(ctx, id, requestName, pool.NodeName, requestedBytes, pool.Name, pool.UID)
+	request.NodeName, request.Pool = pool.NodeName, &volumeapi.PoolReference{Name: pool.Name, UID: pool.UID}
+	created, err := s.Volumes.BeginCreate(ctx, request)
 	intentDone()
 	return created, fit, err
 }

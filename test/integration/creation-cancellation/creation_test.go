@@ -170,7 +170,7 @@ func TestAPIServerUnstartedCancellation(t *testing.T) {
 				if readErr != nil || held.UID != string(created.GetUID()) || !held.Deleting || !held.HasInitialReservation() || len(held.Finalizers) != 2 {
 					t.Fatalf("terminating reservation=%+v err=%v", held, readErr)
 				}
-				if _, err := registry.BeginCreateInPool(ctx, id, "api-cancellation-fixture", "unassigned-test-node", 64, "unassigned-test-pool", "unassigned-test-pool-uid"); err == nil {
+				if _, err := registry.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: id, RequestName: "api-cancellation-fixture", NodeName: "unassigned-test-node", CapacityBytes: 64, Pool: &volumeapi.PoolReference{Name: "unassigned-test-pool", UID: "unassigned-test-pool-uid"}}); err == nil {
 					t.Fatal("deletion timestamp allowed late initialization")
 				}
 				current, readErr := api.Resource(volumeapi.VolumeResource).Get(ctx, id, metav1.GetOptions{})
@@ -196,4 +196,6 @@ func TestAPIServerUnstartedCancellation(t *testing.T) {
 			}
 		})
 	}
+	t.Run("claim provenance", func(t *testing.T) { testClaimProvenance(t, cfg, api, client) })
+	t.Run("pending source uncertainty", func(t *testing.T) { testPendingSourceUncertainty(t, cfg, api) })
 }
