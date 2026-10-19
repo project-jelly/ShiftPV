@@ -38,8 +38,8 @@ denied_patch() {
 }
 
 node_request patch "pod/${name}" --type=merge --dry-run=server \
- -p '{"metadata":{"annotations":{"shiftpv.io/node-effects":"v1"}}}' >/dev/null
-denied_patch "${peer}" '{"metadata":{"annotations":{"shiftpv.io/node-effects":"v1"}}}' \
+ -p '{"metadata":{"annotations":{"shiftpv.io/node-effects":"dry-run-probe"}}}' >/dev/null
+denied_patch "${peer}" '{"metadata":{"annotations":{"shiftpv.io/node-effects":"dry-run-probe"}}}' \
  'ShiftPV Node may update only its token-bound Pod'
 denied_patch "${name}" '{"metadata":{"annotations":{"example.test/unrelated":"changed"}}}' \
  'ShiftPV Node may change only capability and RPC annotations'
