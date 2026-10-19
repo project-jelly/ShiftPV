@@ -359,6 +359,16 @@ Node restarts too. Separate accumulated token waits from HTTP response-header
 time; neither metric includes response decoding. Compare one and two Pools
 with the same total requests, then vary one bounded API budget at a time.
 
+Compare end-to-end results on the same nodes, disks, payload and immutable
+images; record the source SHA, chart values and concurrency with each result.
+For provisioning, report request-to-Bound p50/p95 for one and two Pools at the
+same total PVC count. For mobility, compare one and ten simultaneous volumes;
+measure disruption-to-destination-readiness separately from source-cleanup
+completion. Recheck payload/identity preservation, holds, cleanup and failure
+counts in both runs. Adopt an optimization only when repeated full-path results
+improve beyond measurement variation with those checks preserved; API-call
+counts and local microbenchmarks alone do not establish a latency improvement.
+
 For Node gRPC, record `live_capacity_probe` and `ShiftPV Node RPC` logs for
 CAPACITY/CREATE/RECLAIM. Verify Pod replacement reconnects, concurrent RPC and
 Watch recovery write one immutable receipt, and lost replies retain holds.
