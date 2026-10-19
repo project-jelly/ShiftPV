@@ -264,6 +264,62 @@ func TestReconcileKeepsInventoryFreshWhilePoolDeregisters(t *testing.T) {
 	}
 }
 
+func TestDeletingApprovedPoolWaitsForRestoredMountThenExactRelease(t *testing.T) {
+	deleted := metav1.NewTime(testTime.Add(-time.Minute))
+	identity := &volumeapi.PoolMountIdentity{Device: "8:1", Source: "/dev/original", Root: "/", Filesystem: "ext4"}
+	repo := &fakeRepository{pool: testRegistration(volumeapi.Pool{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node", Generation: 1, DeletionTimestamp: &deleted,
+		MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
+		Status:      volumeapi.PoolStatus{RegistrationApproved: true, MountIdentity: identity},
+	})}
+	ok := Check{Known: true, OK: true, Reason: "OK"}
+	result := Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem,
+		Mounted: Check{Known: true, Reason: "MountMissing"}}
+	inspector := fakeInspector{result: result}
+	scans, releases := 0, 0
+	r := &Reconciler{NodeName: "node", Pools: repo, Inspector: inspector, Interval: time.Minute, Now: func() time.Time { return testTime },
+		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+			scans++
+			return volumeapi.PoolInventory{Valid: true, ObservedAt: metav1.NewTime(testTime)}
+		},
+		Release: func(_ context.Context, pool volumeapi.Pool) error {
+			if pool.UID != "pool-uid" || pool.Status.MountIdentity == nil || *pool.Status.MountIdentity != *identity {
+				t.Fatal("release lost the original Pool or mount identity")
+			}
+			releases++
+			return nil
+		},
+	}
+	for _, approval := range []string{"", "pool-uid"} {
+		repo.pool.IdentityReleaseApproval = approval
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		condition := meta.FindStatusCondition(repo.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+		if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "PoolStorageRestorationRequired" || scans != 0 || releases != 0 {
+			t.Fatalf("lost mount was released or lacked restoration diagnosis: condition=%+v scans=%d releases=%d", condition, scans, releases)
+		}
+	}
+	result.Mounted, result.MountIdentity = ok, identity
+	r.Inspector = fakeInspector{result: result}
+	repo.pool.IdentityReleaseApproval = ""
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(repo.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	if condition == nil || condition.Reason != "PoolIdentityReleasePending" || releases != 0 || scans == 0 {
+		t.Fatalf("restored mount bypassed controller approval: condition=%+v scans=%d releases=%d", condition, scans, releases)
+	}
+	repo.pool.IdentityReleaseApproval = "pool-uid"
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	condition = meta.FindStatusCondition(repo.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	if condition == nil || condition.Status != metav1.ConditionTrue || releases != 1 {
+		t.Fatalf("exact release did not resume after restoration and approval: condition=%+v releases=%d", condition, releases)
+	}
+}
+
 func TestReconcilePreservesPoolIdentityUntilInventoryIsEmpty(t *testing.T) {
 	deletedAt := metav1.NewTime(testTime.Add(-time.Minute))
 	repository := &fakeRepository{pool: volumeapi.Pool{
