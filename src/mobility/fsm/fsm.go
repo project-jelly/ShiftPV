@@ -157,9 +157,6 @@ func decideExecution(current Phase, observation Observation) (Decision, error) {
 	if decision, guarded, err := authorityGuard(current, observation); guarded {
 		return decision, err
 	}
-	if observation.ConsumersAmbiguous {
-		return transition(current, current, ActionWait, "MultipleConsumers")
-	}
 
 	switch current {
 	case PhaseWaitingForUnpublish:
@@ -251,6 +248,16 @@ func destinationGuard(current Phase, observation Observation) (Decision, bool, e
 func placementGuard(current Phase, observation Observation) (Decision, bool, error) {
 	if !observation.PlacementExists || !observation.DestinationScheduled {
 		decision, err := transition(current, current, ActionEnsurePlacement, "")
+		return decision, true, err
+	}
+	return Decision{}, false, nil
+}
+
+// consumerGuard protects actions that still choose a workload before owner
+// commit. Destination publication and approved cleanup have their own evidence.
+func consumerGuard(current Phase, observation Observation) (Decision, bool, error) {
+	if observation.ConsumersAmbiguous {
+		decision, err := transition(current, current, ActionWait, "MultipleConsumers")
 		return decision, true, err
 	}
 	return Decision{}, false, nil
