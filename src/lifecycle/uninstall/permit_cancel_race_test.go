@@ -26,7 +26,17 @@ import (
 )
 
 func TestReportStaleCancelPreservesNewerQuiesceAttempt(t *testing.T) {
-	ctx := context.Background()
+	testCancelRace(t, true)
+}
+
+func TestCancelRetriesConcurrentAcknowledgement(t *testing.T) {
+	testCancelRace(t, false)
+}
+
+func testCancelRace(t *testing.T, newAttempt bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	store, client := permitFixture()
 	first, err := store.BeginQuiesce(ctx)
 	if err != nil {
@@ -48,7 +58,12 @@ func TestReportStaleCancelPreservesNewerQuiesceAttempt(t *testing.T) {
 		if !injected {
 			injected = true
 			next := state.DeepCopy()
-			next.ResourceVersion, next.Data[attemptKey] = "2", "next-attempt"
+			next.ResourceVersion = "2"
+			if newAttempt {
+				next.Data[attemptKey] = "next-attempt"
+			} else {
+				next.Data[controllerAckKey] = controllerAckDone
+			}
 			if err := client.Tracker().Update(resource, next, store.Namespace); err != nil {
 				return true, nil, err
 			}
@@ -75,6 +90,12 @@ func TestReportStaleCancelPreservesNewerQuiesceAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	live, err := client.CoreV1().ConfigMaps(store.Namespace).Get(ctx, store.Name, metav1.GetOptions{})
+	if !newAttempt {
+		if !apierrors.IsNotFound(err) {
+			t.Fatalf("same attempt acknowledgement prevented cancellation: %v", err)
+		}
+		return
+	}
 	if err != nil || live.Data[attemptKey] != "next-attempt" {
 		t.Fatalf("LC-05 retry boundary: stale cancellation deleted the newer attempt: state=%v error=%v", live, err)
 	}

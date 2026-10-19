@@ -71,7 +71,7 @@ apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:
   name: victim-low
-value: 100
+value: -100
 preemptionPolicy: Never
 ---
 apiVersion: scheduling.k8s.io/v1
@@ -110,8 +110,8 @@ kubectl -n system wait pod/victim --for=condition=Ready --timeout=120s
 kubectl -n system get pod/victim -o json >"${EVIDENCE}/victim-before.json"
 kubectl create -f "${EVIDENCE}/placement.json"
 placement=$(jq -er '.metadata.name' "${EVIDENCE}/placement.json")
-# A full node must keep the reservation Pending without evicting the original
-# workload. Once the fixture frees space, the same reservation must run.
+# Even above the victim's priority, Never must keep the reservation Pending.
+# Once the fixture frees space, the same reservation must run.
 kubectl -n system wait "pod/${placement}" --for=jsonpath='{.status.conditions[?(@.type=="PodScheduled")].reason}'=Unschedulable --timeout=60s
 kubectl -n system get "pod/${placement}" -o json >"${EVIDENCE}/placement-pending.json"
 jq -e '.spec.priorityClassName == "dedicated-placement" and .spec.priority == 0 and .spec.preemptionPolicy == "Never" and (.spec.nodeName // "") == ""' "${EVIDENCE}/placement-pending.json"
