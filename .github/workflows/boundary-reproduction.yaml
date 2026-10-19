@@ -1,0 +1,39 @@
+# Diagnostic experiments only. reproduced=true records an unfixed behavior.
+name: Boundary reproduction diagnostics
+
+on:
+  push:
+    branches:
+      - codex/reproduce-remaining-boundaries-20261019
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-boundary-reproduction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: ./.github/actions/install-k8s-tools
+        with:
+          helm: "false"
+      - name: Reproduce against isolated API and scheduler
+        env:
+          CLUSTER_NAME: shiftpv-boundary-${{ github.run_id }}
+        run: bash test/reproduction/run-native.sh
+      - name: Upload diagnostic results only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: remaining-boundary-reproduction
+          path: .tmp/boundary-reproduction/native
+          if-no-files-found: error
+          retention-days: 14
