@@ -31,7 +31,7 @@ rules:
     verbs: ["update"]
   - apiGroups: ["shiftpv.io"]
     resources: ["shiftpvvolumes/status"]
-    verbs: ["get", "update", "patch"]
+    verbs: ["update"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csidrivers"]
     verbs: ["get"]

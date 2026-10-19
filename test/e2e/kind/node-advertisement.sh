@@ -28,42 +28,40 @@ jq --rawfile token "${work_dir}/bound-token" '.users=[{name:"probe",user:{token:
 node_request() {
  kubectl --kubeconfig="${work_dir}/bound.json" -n "${namespace}" --request-timeout=10s "$@"
 }
-denied_patch() {
- local target=$1 patch=$2 message=$3 output
- if output=$(node_request patch "pod/${target}" --type=merge --dry-run=server -p "${patch}" 2>&1); then
+node_update() {
+ local target=$1 filter=$2
+ node_request get "pod/${target}" -o json | jq "${filter}" | node_request replace --dry-run=server -f -
+}
+denied_update() {
+ local target=$1 filter=$2 message=$3 output
+ if output=$(node_update "${target}" "${filter}" 2>&1); then
   echo 'Node token unexpectedly changed a protected Pod field' >&2
   return 1
  fi
  grep -Fq "${message}" <<<"${output}"
 }
 
-node_request patch "pod/${name}" --type=merge --dry-run=server \
- -p '{"metadata":{"annotations":{"shiftpv.io/node-effects":"dry-run-probe"}}}' >/dev/null
-denied_patch "${peer}" '{"metadata":{"annotations":{"shiftpv.io/node-effects":"dry-run-probe"}}}' \
+node_update "${name}" '.metadata.annotations["shiftpv.io/node-effects"]="dry-run-probe"' >/dev/null
+denied_update "${peer}" '.metadata.annotations["shiftpv.io/node-effects"]="dry-run-probe"' \
  'ShiftPV Node may update only its token-bound Pod'
-denied_patch "${name}" '{"metadata":{"annotations":{"example.test/unrelated":"changed"}}}' \
+denied_update "${name}" '.metadata.annotations["example.test/unrelated"]="changed"' \
  'ShiftPV Node may change only capability and RPC annotations'
-denied_patch "${name}" '{"metadata":{"labels":{"example.test/unrelated":"changed"}}}' \
+denied_update "${name}" '.metadata.labels["example.test/unrelated"]="changed"' \
  'ShiftPV Node may change only capability and RPC annotations'
-denied_patch "${name}" '{"metadata":{"finalizers":["example.test/unrelated"]}}' \
+denied_update "${name}" '.metadata.finalizers=["example.test/unrelated"]' \
  'ShiftPV Node may change only capability and RPC annotations'
 
 # Container images are otherwise mutable on Pods. Rejection must come from
 # this policy, rather than Kubernetes' unrelated immutable-field validation.
-image_index=$(jq -er '.spec.containers | to_entries[] | select(.value.name == "shiftpv-node") | .key' <<<"${pod}")
-image_patch=$(jq -nc --arg path "/spec/containers/${image_index}/image" \
- '[{op:"replace",path:$path,value:"registry.k8s.io/pause:3.10.1"}]')
-if output=$(node_request patch "pod/${name}" --type=json --dry-run=server -p "${image_patch}" 2>&1); then
- echo 'Node token unexpectedly changed its container image' >&2
- exit 1
-fi
-grep -Fq 'ShiftPV Node may not change Pod execution settings' <<<"${output}"
+denied_update "${name}" '.spec.containers |= map(if .name=="shiftpv-node" then .image="registry.k8s.io/pause:3.10.1" else . end)' \
+ 'ShiftPV Node may not change Pod execution settings'
 
 kubectl -n "${namespace}" create token "${account}" --duration=10m >"${work_dir}/unbound-token"
 jq --rawfile token "${work_dir}/unbound-token" '.users=[{name:"probe",user:{token:($token|rtrimstr("\n"))}}]' \
  "${work_dir}/base.json" >"${work_dir}/unbound.json"
+node_request get "pod/${name}" -o json | jq '.metadata.annotations["shiftpv.io/node-effects"]="dry-run-probe"' >"${work_dir}/update.json"
 if output=$(kubectl --kubeconfig="${work_dir}/unbound.json" -n "${namespace}" --request-timeout=10s \
- patch "pod/${name}" --type=merge --dry-run=server -p '{"metadata":{"annotations":{"shiftpv.io/node-effects":"v1"}}}' 2>&1); then
+ replace --dry-run=server -f "${work_dir}/update.json" 2>&1); then
  echo 'Unbound Node token unexpectedly advertised a Pod capability' >&2
  exit 1
 fi

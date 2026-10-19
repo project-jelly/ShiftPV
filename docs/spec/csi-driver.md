@@ -206,7 +206,8 @@ Node의 Pod update는 capability·RPC 공개 인증서 광고에 사용한다. C
 Node ServiceAccount를 Controller·helper와 공유하면 chart가 배포를 거부한다. 정책은 RPC 비활성화 때도 적용한다.
 
 Node의 cluster-wide Volume/Move status 권한은 생성 영수증, native cleanup 영수증과 publication 기록에
-필요하다. 이 권한이나 privileged host 접근이 불필요해졌다는 의미는 아니다. Node는 신뢰된 저장소 실행자이며,
+필요하며 `update`만 부여한다. 본문 조회는 기본 resource의 `get/list/watch`를 사용한다.
+Node는 신뢰된 저장소 실행자이며 privileged host 접근을 유지한다.
 이번 Pod 정책은 status 전체를 필드별로 격리하거나 침해된 host를 격리하는 경계가 아니다.
 
 Pod token의 name·UID는 [Kubernetes authentication metadata](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#additional-metadata-in-pod-bound-tokens)를 사용한다.

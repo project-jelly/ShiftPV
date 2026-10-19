@@ -68,6 +68,30 @@ func TestNodeAdvertisementPolicy(t *testing.T) {
 	}
 }
 
+func TestNodeStatusPermissionsRequireOnlyUpdate(t *testing.T) {
+	output, err := render(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := parseChart(t, output).wantObject(t, "native execution status writes", "ClusterRole", fullname+"-node")
+	seen := map[string]bool{}
+	for _, rule := range role.Rules {
+		for _, resource := range rule.Resources {
+			if strings.HasSuffix(resource, "/status") {
+				if !slices.Equal(rule.Verbs, []string{"update"}) {
+					t.Errorf("Node %s grants unnecessary status verbs: %v", resource, rule.Verbs)
+				}
+				seen[resource] = true
+			}
+		}
+	}
+	for _, resource := range []string{"shiftpvpools/status", "shiftpvvolumes/status", "shiftpvmoves/status"} {
+		if !seen[resource] {
+			t.Errorf("Node lost the required receipt/observation update for %s", resource)
+		}
+	}
+}
+
 func workloadSpec(t *testing.T, raw, kind string) corev1.PodSpec {
 	t.Helper()
 	for _, doc := range strings.Split(raw, "\n---\n") {
