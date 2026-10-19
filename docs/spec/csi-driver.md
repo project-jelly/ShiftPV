@@ -106,7 +106,7 @@ gRPC `ReclaimCopy`도 같은 journal을 사용한다. RPC와 Watch 복구는 동
 filesystem primitive를 공유한다. 응답 유실은 같은 operation ID의 저장된 receipt로 해결한다.
 용량 RPC는 최대 2초, effect RPC는 최대 2분이며 Controller의 더 짧은 timeout이 우선한다.
 
-통신은 TLS 1.3과 Controller 전용 projected ServiceAccount 토큰으로 인증한다. Controller는 Kubernetes에서
+Node RPC 통신은 TLS 1.3과 Controller 전용 projected ServiceAccount 토큰으로 인증한다. Controller는 Kubernetes에서
 확인한 정확한 Pod UID의 공개 인증서를 신뢰하고, Node는 TokenReview로 audience·namespace·account를
 확인한다. 인증서는 Node 프로세스마다 새로 생성하며 비밀키는 메모리에만 둔다. 연결은 노드별로 재사용하고
 Pod UID·주소·인증서 변경 시 교체한다. 실행과 복구의 권한은 API intent와 local proof에 남는다.
@@ -198,6 +198,19 @@ Effect가 끝나고 receipt 게시 전에 process가 실패하면 같은 exact o
 우연한 absence, receipt만 있고 fresh absence proof가 없는 상태, wall-clock timeout은 cleanup 완료나 capacity
 release의 근거가 아니다. time-based GC나 capacity release는 금지한다. 두 증거가 모여야 Volume 또는 Move
 journal을 종결하고 해당 hold를 해제한다.
+
+## Node API permissions
+
+Node의 Pod update는 capability·RPC 공개 인증서 광고에 사용한다. Chart는 Pod-bound token의 Pod name·UID가
+수정 대상과 같은지, 실행 사양과 그 외 metadata가 그대로인지 Kubernetes ValidatingAdmissionPolicy로 검사한다.
+Node ServiceAccount를 Controller·helper와 공유하면 chart가 배포를 거부한다. 정책은 RPC 비활성화 때도 적용한다.
+
+Node의 cluster-wide Volume/Move status 권한은 생성 영수증, native cleanup 영수증과 publication 기록에
+필요하며 `update`만 부여한다. 본문 조회는 기본 resource의 `get/list/watch`를 사용한다.
+Node는 신뢰된 저장소 실행자이며 privileged host 접근을 유지한다.
+이번 Pod 정책은 status 전체를 필드별로 격리하거나 침해된 host를 격리하는 경계가 아니다.
+
+Pod token의 name·UID는 [Kubernetes authentication metadata](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#additional-metadata-in-pod-bound-tokens)를 사용한다.
 
 ## Failure boundary
 

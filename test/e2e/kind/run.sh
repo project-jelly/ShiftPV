@@ -94,7 +94,7 @@ assert_shiftpv_release_removed() {
 			-l app.kubernetes.io/instance=shiftpv \
 			-o name)
 		cluster_scoped=$(kubectl get \
-			clusterroles,clusterrolebindings,storageclasses,csidrivers \
+			clusterroles,clusterrolebindings,storageclasses,csidrivers,validatingadmissionpolicies,validatingadmissionpolicybindings \
 			-l app.kubernetes.io/instance=shiftpv \
 			-o name)
 		capacities=$(kubectl -n shiftpv-system get csistoragecapacities \

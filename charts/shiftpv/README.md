@@ -68,6 +68,10 @@ kubectl -n shiftpv-system get csistoragecapacities \
 
 ## Resident volume effects
 
+Node ServiceAccount는 Controller·helper와 분리한다. Node는 Kubernetes가 검증한 Pod-bound token으로
+자기 Pod의 capability·RPC annotation만 변경할 수 있다. 다른 Pod, 실행 사양, label과 finalizer 변경은
+ValidatingAdmissionPolicy가 거부한다. 외부 관리 ServiceAccount에도 같은 정책을 적용한다.
+
 새 Volume 생성과 삭제는 상주 Node가 실행한다. Controller가 Pod UID를 durable intent에 기록하고,
 Node receipt를 확인한 뒤 Ready 전환 또는 absence 검증을 진행한다. 기존 helper 작업과 Move는 기존 경로를 따른다.
 기본값 `nodeRPC.enabled: true`는 용량 조회·생성·삭제를 해당 Node Pod에 직접 전달한다. TLS 공개 인증서는

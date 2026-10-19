@@ -42,6 +42,8 @@ for node_pod in $(kubectl -n shiftpv-system get pods -l app.kubernetes.io/compon
  kubectl -n shiftpv-system wait --for=jsonpath='{.metadata.annotations.shiftpv\.io/node-effects}'=v1 "${node_pod}" --timeout=1m
 done
 
+bash "$(dirname "${BASH_SOURCE[0]}")/node-advertisement.sh"
+
 apply_effect_workload() {
  local workload=$1
 kubectl apply -f - <<YAML
