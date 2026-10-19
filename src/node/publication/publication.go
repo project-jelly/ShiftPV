@@ -87,8 +87,11 @@ func (p Publisher) Publish(ctx context.Context, req PublishRequest) error {
 			return fmt.Errorf("registered node pool changed before publish: %w", volumeapi.ErrStateConflict)
 		}
 		fresh, getErr := p.Volumes.Get(ctx, req.VolumeID)
-		if getErr != nil || fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.Phase != volumeapi.PhaseReady || fresh.OwnerNode != p.NodeName {
-			return fmt.Errorf("volume publish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
+		if getErr != nil {
+			return fmt.Errorf("read volume publish authority: %w", errors.Join(getErr, ErrObservationRetry))
+		}
+		if fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.Phase != volumeapi.PhaseReady || fresh.OwnerNode != p.NodeName {
+			return fmt.Errorf("volume publish authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		if verifyErr := store.VerifyServing(req.Copy); verifyErr != nil {
 			return verifyErr
@@ -128,11 +131,14 @@ func (p Publisher) Unpublish(ctx context.Context, req UnpublishRequest) (bool, e
 			return ErrIdentityUnavailable
 		}
 		fresh, getErr := p.Volumes.Get(ctx, req.VolumeID)
-		if getErr == nil && fresh.CurrentCopy != nil && fresh.CurrentCopy.Role == volume.RoleServing && fresh.CurrentCopy.NodeName != p.NodeName {
+		if getErr != nil {
+			return fmt.Errorf("read volume unpublish authority: %w", errors.Join(getErr, ErrObservationRetry))
+		}
+		if fresh.CurrentCopy != nil && fresh.CurrentCopy.Role == volume.RoleServing && fresh.CurrentCopy.NodeName != p.NodeName {
 			return nil
 		}
-		if getErr != nil || fresh.UID != req.StateUID || fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.OwnerNode != p.NodeName {
-			return fmt.Errorf("volume unpublish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
+		if fresh.UID != req.StateUID || fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.OwnerNode != p.NodeName {
+			return fmt.Errorf("volume unpublish authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		stillPublished, inspectErr := p.Binder.HasPublishedTarget(req.Source, p.TargetRoot)
 		if inspectErr != nil {
@@ -159,7 +165,7 @@ func CopyMatchesPool(copy volume.CopyIdentity, pool volumeapi.Pool) bool {
 // PoolIdentityUnavailable reports whether the Pool read failed in a way that
 // leaves the node without a verifiable Pool identity.
 func PoolIdentityUnavailable(err error) bool {
-	return apierrors.IsNotFound(err) || errors.Is(err, volumeapi.ErrPoolNotFound) || errors.Is(err, volumeapi.ErrPoolConfiguration)
+	return apierrors.IsNotFound(err) || errors.Is(err, volumeapi.ErrPoolNotFound) || errors.Is(err, volumeapi.ErrPoolIdentityChanged) || errors.Is(err, volumeapi.ErrPoolConfiguration)
 }
 
 func poolIdentity(copy volume.CopyIdentity) ownership.PoolIdentity {

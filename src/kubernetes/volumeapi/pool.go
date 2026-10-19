@@ -294,7 +294,7 @@ func (r *Registry) PoolForIdentity(ctx context.Context, name, uid, nodeName stri
 		return Pool{}, err
 	}
 	if pool.UID != uid || pool.NodeName != nodeName {
-		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q identity changed", ErrStateConflict, name)
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q", ErrPoolIdentityChanged, name)
 	}
 	if !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" {
 		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q has invalid mountPath", ErrPoolConfiguration, name)
@@ -360,7 +360,7 @@ func (r *Registry) ReadyPoolForIdentity(ctx context.Context, name, uid, nodeName
 			continue
 		}
 		if pool.UID != uid || pool.NodeName != nodeName {
-			return Pool{}, fmt.Errorf("%w: ShiftPVPool %q identity changed", ErrStateConflict, name)
+			return Pool{}, fmt.Errorf("%w: ShiftPVPool %q", ErrPoolIdentityChanged, name)
 		}
 		now, staleAfter := r.readiness()
 		if ready, reason := poolReady(pool, now, staleAfter); !ready {
