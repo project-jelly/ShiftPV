@@ -109,6 +109,11 @@ func decideCopying(current Phase, observation Observation) (Decision, error) {
 }
 
 func decidePromoting(current Phase, observation Observation) (Decision, error) {
+	if observation.OwnerCommitted {
+		// Owner CAS can succeed before its phase write is observed. Advance
+		// through its idempotent action without requiring the old Job or Pod.
+		return transition(current, PhaseCommitting, ActionCommitOwner, "")
+	}
 	if decision, guarded, err := destinationGuard(current, observation); guarded {
 		return decision, err
 	}

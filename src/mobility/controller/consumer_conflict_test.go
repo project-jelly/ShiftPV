@@ -138,3 +138,27 @@ func TestCommittedMultipleConsumersRequirePublicationProofForCleanup(t *testing.
 		}
 	}
 }
+
+func TestCommittedOwnerWithLaggingPhaseDoesNotNeedReplacementOrJob(t *testing.T) {
+	r, repo, client, first := replacementReleaseFixture(t, true)
+	ctx := context.Background()
+	move := repo.moves[0]
+	move.Status.Phase = string(fsm.PhasePromoting)
+	repo.moves[0] = move
+	state := repo.volumes[move.Spec.VolumeID]
+	second := first.DeepCopy()
+	second.Name, second.UID, second.ResourceVersion = "second-held-consumer", "", ""
+	if _, err := client.CoreV1().Pods(second.Namespace).Create(ctx, second, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reconcilePersistedMove(ctx, move); err != nil {
+		t.Fatal(err)
+	}
+	if repo.moves[0].Status.Phase != string(fsm.PhaseCommitting) || !reflect.DeepEqual(state, repo.volumes[move.Spec.VolumeID]) {
+		t.Fatal("lagging Move phase did not follow the exact committed owner without changing authority")
+	}
+	jobs, err := client.BatchV1().Jobs("system").List(ctx, metav1.ListOptions{})
+	if err != nil || len(jobs.Items) != 0 {
+		t.Fatalf("committed owner restarted a promotion Job: jobs=%+v error=%v", jobs, err)
+	}
+}

@@ -256,7 +256,7 @@ func placementGuard(current Phase, observation Observation) (Decision, bool, err
 // consumerGuard protects actions that still choose a workload before owner
 // commit. Destination publication and approved cleanup have their own evidence.
 func consumerGuard(current Phase, observation Observation) (Decision, bool, error) {
-	if observation.ConsumersAmbiguous {
+	if observation.ConsumersAmbiguous && !observation.OwnerCommitted {
 		decision, err := transition(current, current, ActionWait, "MultipleConsumers")
 		return decision, true, err
 	}

@@ -25,6 +25,7 @@ func TestConsumerAmbiguityDoesNotHideExecutionOutcomeOrCommittedCleanup(t *testi
 	}{
 		{"copy failed", PhaseCopying, PhaseBlocked, Observation{CopyFailed: true}, ActionMarkBlocked, "CopyFailed"},
 		{"promotion failed", PhasePromoting, PhaseBlocked, Observation{PromotionFailed: true}, ActionMarkBlocked, "PromotionFailed"},
+		{"owner CAS accepted before phase write", PhasePromoting, PhaseCommitting, Observation{OwnerCommitted: true}, ActionCommitOwner, ""},
 		{"owner committed", PhaseCommitting, PhaseReleasingDestination, Observation{OwnerCommitted: true}, ActionDeletePlacement, ""},
 		{"reservation removal", PhaseReleasingDestination, PhaseReleasingDestination, Observation{OwnerCommitted: true, PlacementExists: true}, ActionDeletePlacement, ""},
 		{"publication missing", PhaseWaitingForDestinationPublish, PhaseWaitingForDestinationPublish, Observation{OwnerCommitted: true}, ActionWait, "MultipleConsumers"},
