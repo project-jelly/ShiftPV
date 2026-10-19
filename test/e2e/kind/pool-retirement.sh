@@ -20,6 +20,52 @@ jq '{apiVersion,kind,metadata:{name:.metadata.name},spec}' <<<"${pool}" >"${work
 test -z "$(kubectl get namespace "${namespace}" --ignore-not-found -o name)"
 test -z "$(kubectl get storageclass "${class}" --ignore-not-found -o name)"
 test -z "$(kubectl get shiftpvpool "${peer}" --ignore-not-found -o name)"
+
+# Ready is a read-only registration observation. Initialize the ownership marker
+# through CSI, then settle that exact Volume before retiring the registration.
+kubectl create namespace "${namespace}"
+kubectl apply -f - <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: warmup
+  namespace: ${namespace}
+spec:
+  storageClassName: shiftpv
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: warmup
+  namespace: ${namespace}
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: ${source_node}
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: writer
+      image: busybox:1.37
+      command: [sh, -ec, "echo warmup > /data/payload; sleep 3600"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: warmup
+YAML
+kubectl -n "${namespace}" wait pod/warmup --for=condition=Ready --timeout=180s
+warmup_pv=$(kubectl -n "${namespace}" get pvc/warmup -o jsonpath='{.spec.volumeName}')
+warmup_volume=$(kubectl get "pv/${warmup_pv}" -o jsonpath='{.spec.csi.volumeHandle}')
+test "$(kubectl get "shiftpvvolume/${warmup_volume}" -o jsonpath='{.status.currentCopy.poolName}')" = "${name}"
+kubectl -n "${namespace}" delete pod/warmup --wait=true --timeout=180s
+kubectl -n "${namespace}" delete pvc/warmup --wait=true --timeout=180s
+kubectl wait "pv/${warmup_pv}" --for=delete --timeout=180s
+kubectl wait "shiftpvvolume/${warmup_volume}" --for=delete --timeout=180s
 docker exec "${source_node}" sh -ec 'test ! -e "$1/.retirement-test"; printf "%s\n" "$2" >"$1/.retirement-test"; mkdir -p "$3"' sh "${root}" "${uid}" "${peer_root}"
 marker=$(docker exec "${source_node}" sha256sum "${root}/.shiftpv/pool.json")
 
