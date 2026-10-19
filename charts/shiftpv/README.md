@@ -474,11 +474,13 @@ metrics:
 ```
 
 기본 Alert는 metrics snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory,
-cleanup `NeedsReview`, orphan/missing/unsafe copy observation, 그리고 회수 판단을 기다리는 `Released`
-PersistentVolume을 알린다. Dashboard는 이 신호와 Pool
+cleanup `NeedsReview`, orphan/missing/unsafe copy observation, 회수 판단을 기다리는 `Released` PV,
+active Move `Blocked`, Pool NotReady와 지속적인 CSI 서버 오류를 알린다. Dashboard는 이 신호와 Pool
 capacity, Volume/Move phase, mobility deferral, CSI 오류·latency를 함께 보여 준다. 복구/삭제 판단은
 반드시 CR journal과 현재 node evidence로 다시 확인한다.
 [Metrics contract](../../docs/spec/metrics.md)에 bounded-cardinality 규칙이 있다.
+
+Move·Pool·CSI 경보의 조건과 대응은 [Metrics runbooks](../../docs/spec/metrics.md#shiftpvmoveblocked)를 따른다.
 
 ## 알림 대응
 

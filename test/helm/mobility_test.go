@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestHelperPermissionsReadOnly(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		var args []string
+		if external {
+			args = []string{"--set", "serviceAccount.helper.create=false,serviceAccount.helper.name=existing-helper"}
+		}
+		output, err := render(t, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chart := parseChart(t, output)
+		for _, kind := range []string{"Role", "ClusterRole"} {
+			role := chart.wantObject(t, "helper authority is read-only", kind, fullname+"-helper")
+			for _, rule := range role.Rules {
+				for _, verb := range rule.Verbs {
+					if verb != "get" && verb != "list" {
+						t.Errorf("helper %s grants write or watch permission: %+v", kind, rule)
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestMobilityOperationTimeout(t *testing.T) {
 	for _, test := range []struct {
 		name, value, want string
