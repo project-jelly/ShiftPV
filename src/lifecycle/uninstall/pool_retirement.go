@@ -126,6 +126,11 @@ func retirementVolumeBlockers(volumes map[string]volumeapi.State, pool volumeapi
 		if state.InitialPool == nil && state.UnstartedCreation() {
 			continue
 		}
+		if _, known := currentCopyUsesPool(id, state, pool); !known && !volume.ValidObjectName(state.OwnerNode) &&
+			(state.Phase != "" || !volume.ValidObjectName(state.InitialNode)) {
+			blockers = append(blockers, Blocker{Kind: "ShiftPVVolume", Name: id, Reason: "Pool ownership cannot be located"})
+			continue
+		}
 		references[id] = state
 	}
 	return append(blockers, poolVolumeBlockers(references, pool)...)

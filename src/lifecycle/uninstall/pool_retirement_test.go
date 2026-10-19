@@ -79,6 +79,9 @@ func TestPoolRetirementReferenceClosure(t *testing.T) {
 		{"unproven creation state remains blocked", func(f *retirementFixture) {
 			f.repo.volumes[retirementVolume] = volumeapi.State{UID: "volume-uid", InitialNode: "node"}
 		}, true},
+		{"damaged owner cannot be excluded using its historical initial node", func(f *retirementFixture) {
+			f.repo.volumes[retirementVolume] = volumeapi.State{UID: "volume-uid", Phase: volumeapi.PhaseReady, InitialNode: "other-node"}
+		}, true},
 		{"unapproved destination hints on an independent peer owner", func(f *retirementFixture) {
 			copy := retirementCopy("peer-uid")
 			copy.PoolName = "peer"
