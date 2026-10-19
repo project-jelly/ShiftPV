@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestMobilityOperationTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name, value, want string
+		fail              bool
+	}{
+		{"default", "", "--mobility-operation-timeout=5m", false},
+		{"large copy", "30m", "--mobility-operation-timeout=30m", false},
+		{"zero", "0s", "schema", true},
+		{"negative", "-1m", "schema", true},
+		{"invalid", "unbounded", "schema", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var args []string
+			if test.value != "" {
+				args = []string{"--set", "mobility.operationTimeout=" + test.value}
+			}
+			output, err := render(t, args...)
+			if (err != nil) != test.fail || !strings.Contains(output, test.want) {
+				t.Fatalf("operation timeout render: error=%v output=%s", err, output)
+			}
+		})
+	}
+}
+
 func TestMoveJournalRetention(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

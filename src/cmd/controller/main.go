@@ -69,6 +69,7 @@ type config struct {
 	mobilityEnabled                           bool
 	admissionOnly                             bool
 	mobilityInterval, moveJournalRetention    time.Duration
+	mobilityOperationTimeout                  time.Duration
 	mobilityImage                             string
 	mobilityPlacementPriorityClass            string
 	webhookAddress, webhookService            string
@@ -99,6 +100,7 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.mobilityEnabled, "mobility-enabled", true, "run the automatic cordon mobility reconciler and admission webhook")
 	flag.BoolVar(&cfg.admissionOnly, "admission-only", false, "serve existing admission policies for maintenance without starting CSI or lifecycle writers")
 	flag.DurationVar(&cfg.mobilityInterval, "mobility-interval", 30*time.Second, "mobility reconciliation safety interval")
+	flag.DurationVar(&cfg.mobilityOperationTimeout, "mobility-operation-timeout", mobilitycontroller.DefaultOperationTimeout, "timeout for newly created copy and promote Jobs")
 	flag.DurationVar(&cfg.moveJournalRetention, "move-journal-retention", mobilitycontroller.DefaultMoveJournalRetention, "minimum retention for settled terminal ShiftPVMove journals")
 	flag.StringVar(&cfg.mobilityImage, "mobility-helper-image", "shiftpv-rsync-helper:dev", "rsync mobility helper image")
 	flag.StringVar(&cfg.mobilityPlacementPriorityClass, "mobility-placement-priority-class", mobilitycontroller.DefaultPlacementPriorityClassName, "existing value-0 PriorityClass with preemptionPolicy Never for preparation reservations")
@@ -122,6 +124,9 @@ func parseFlags() config {
 	}
 	if cfg.moveJournalRetention < time.Hour {
 		klog.Fatalf("move journal retention must be at least one hour")
+	}
+	if cfg.mobilityOperationTimeout <= 0 {
+		klog.Fatalf("mobility operation timeout must be positive")
 	}
 	return cfg
 }
@@ -375,7 +380,7 @@ func startMobility(ctx context.Context, cfg config, components mobilityComponent
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: components.client.CoreV1().Events("")})
 	eventRecorder := eventBroadcaster.NewRecorder(eventScheme, corev1.EventSource{Component: "shiftpv-mobility-controller"})
 	wake := mobilitycontroller.WatchEvents(ctx, components.client, components.dynamicClient, cfg.namespace)
-	reconciler := &mobilitycontroller.Reconciler{HistoryInspector: &helperpod.Inspector{Client: components.client, Namespace: cfg.namespace}, Client: components.client, Repository: components.volumes, CapacityProbe: components.capacityProbe, SourceUsage: components.operator, PoolLocks: components.poolLocks, Namespace: cfg.namespace, HelperImage: cfg.mobilityImage, PlacementPriorityClassName: cfg.mobilityPlacementPriorityClass, ServiceAccountName: cfg.helperServiceAccount, Cleanups: components.cleanups, CleanupOperator: components.cleanupOperator, Interval: cfg.mobilityInterval, MoveJournalRetention: cfg.moveJournalRetention, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
+	reconciler := &mobilitycontroller.Reconciler{HistoryInspector: &helperpod.Inspector{Client: components.client, Namespace: cfg.namespace}, Client: components.client, Repository: components.volumes, CapacityProbe: components.capacityProbe, SourceUsage: components.operator, PoolLocks: components.poolLocks, Namespace: cfg.namespace, HelperImage: cfg.mobilityImage, PlacementPriorityClassName: cfg.mobilityPlacementPriorityClass, ServiceAccountName: cfg.helperServiceAccount, Cleanups: components.cleanups, CleanupOperator: components.cleanupOperator, Interval: cfg.mobilityInterval, OperationTimeout: cfg.mobilityOperationTimeout, MoveJournalRetention: cfg.moveJournalRetention, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter, Recorder: eventRecorder, Wake: wake}
 	if components.exporter != nil {
 		components.exporter.ObserveDiscovery(nil, errors.New("discovery not observed yet"))
 		reconciler.ObserveDiscovery = components.exporter.ObserveDiscovery

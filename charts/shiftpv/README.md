@@ -392,6 +392,10 @@ resourceVersion을 `test`하는 JSON Patch로 만들고 `kubectl patch --dry-run
 
 ### Move preflight
 
+`mobility.operationTimeout`은 copy/promote Job별 제한 시간이며 기본값은 `5m`이다.
+대용량·저속 디스크는 예를 들어 `--set mobility.operationTimeout=30m`으로 늘린다.
+Pod 시작·재시도 시간도 포함하며 새 Job에만 적용한다. 진행 중인 Job의 기한은 유지된다.
+
 계획 이동 전 다음을 확인한다.
 
 - 두 node가 Ready이고 source의 자기 backing·inventory가 정상이며 destination은 신규 할당 가능하다.

@@ -14,10 +14,10 @@ POLICY=shiftpv-legacy-upgrade-test
 LEGACY_CONTROLLER=ghcr.io/project-jelly/shiftpv-controller:0.4.22@sha256:933d06dca8a0b1a04e70ead704489af629b3ff3f70e2ee728d0ada882fd1ed83
 CANDIDATE_CONTROLLER=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.containers[?(@.name=="shiftpv-controller")].image}')
 CANDIDATE_ARGS=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o json | jq -c '.spec.template.spec.containers[] | select(.name == "shiftpv-controller") | .args')
-# The older binary predates this flag; preserve and restore the exact candidate
+# The older binary predates these flags; preserve and restore the exact candidate
 # arguments while changing the image and supported arguments in one update.
 LEGACY_ARGS=$(jq -c --arg image "${LEGACY_CONTROLLER}" '
- map(select(startswith("--mobility-placement-priority-class=") | not) |
+ map(select((startswith("--mobility-placement-priority-class=") or startswith("--mobility-operation-timeout=")) | not) |
  if startswith("--helper-image=") then "--helper-image="+$image
  elif startswith("--mobility-helper-image=") then "--mobility-helper-image="+$image
  else . end)' <<<"${CANDIDATE_ARGS}")

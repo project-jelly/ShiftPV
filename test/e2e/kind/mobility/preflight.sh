@@ -152,7 +152,7 @@ EOF
 
 test_preflight() {
 	local scenario pod uid pv pv_uid pvc_uid volume volume_uid checksum patch controller_pod move move_uid
-	local deadline destination_uid authority
+	local deadline destination_uid authority operation_field operation_job
 	command -v jq >/dev/null
 	for scenario in selector affinity taint pdb; do
 		move=""
@@ -212,6 +212,11 @@ test_preflight() {
 			kubectl wait "shiftpvmove/${move}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=480s
 			test "$(kubectl get "shiftpvmove/${move}" -o jsonpath='{.metadata.uid}{"|"}{.status.phase}')" = "${move_uid}|Succeeded"
 			assert_move_diagnostics "${move}" Succeeded '' MobilitySucceeded
+			for operation_field in copyJobName promotionJobName; do
+				operation_job=$(kubectl get "shiftpvmove/${move}" -o "jsonpath={.status.${operation_field}}")
+				test -n "${operation_job}"
+				test "$(kubectl -n shiftpv-system get "job/${operation_job}" -o jsonpath='{.spec.activeDeadlineSeconds}')" = 600
+			done
 			# Confirm the success contract independently before draining:
 			# settled cleanup, released ActiveMove, and a serving destination.
 			kubectl wait "shiftpvmove/${move}" --for=jsonpath='{.status.cleanup.status.phase}'=Completed --timeout=180s

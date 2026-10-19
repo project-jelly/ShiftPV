@@ -117,10 +117,11 @@
     "mobility": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "interval", "journalRetention", "webhookPort", "helperImage"],
+      "required": ["enabled", "interval", "operationTimeout", "journalRetention", "webhookPort", "helperImage"],
       "properties": {
         "enabled": {"type": "boolean"},
         "interval": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
+        "operationTimeout": {"type": "string", "pattern": "^[1-9][0-9]*(s|m|h)$"},
         "journalRetention": {"type": "string", "pattern": "^[1-9][0-9]*h$"},
         "webhookPort": {"type": "integer", "minimum": 1024, "maximum": 65535},
         "helperImage": {"type": "string"}

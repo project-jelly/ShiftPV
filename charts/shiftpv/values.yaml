@@ -36,6 +36,8 @@ controller:
 mobility:
   enabled: true
   interval: 30s
+  # Deadline for each new copy/promote Job, including Pod startup and retries.
+  operationTimeout: 5m
   # Settled terminal Move journals are metadata-only audit records. They are
   # deleted after this retention; copy data and unresolved journals are never
   # deleted by this policy.
