@@ -23,6 +23,14 @@ restart. Replay, fresh absence, hold/gate/artifact release and normal CSI deleti
 must finish without a `ResumeOwner` request or invented publication. Retain also
 requires the original owner identity, payload and capacity to survive settlement.
 
+`KIND_MOBILITY_GROUP=copy-deadline` lets the real helper finish and verify its
+incoming copy, then delays process completion until Kubernetes expires the
+unchanged 300-second Job deadline. It requires `Blocked/CopyFailed` with source
+authority and both holds preserved, followed by explicit source recovery,
+native rollback receipt/fresh absence, exact original identities and checksum,
+artifact/hold/finalizer settlement and ordinary CSI reclaim. This qualifies the
+timeout boundary; larger or slower transfers still have the fixed deadline.
+
 `g1` also exercises an early targeted drain with no eligible destination: admission
 holds the replacement, and uncordon must recover that same Pod UID without a Move.
 The ordinary case waits for Move success, cleanup settlement, empty ActiveMove and

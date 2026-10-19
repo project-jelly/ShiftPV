@@ -354,7 +354,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [g1, g2, g3, preparation, node-cleanup, retirement]
+        group: [g1, g2, g3, preparation, node-cleanup, retirement, copy-deadline]
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
@@ -381,6 +381,15 @@ jobs:
           name: workload-retirement
           path: .tmp/workload-retirement
           retention-days: 14
+
+      - name: Upload copy deadline evidence
+        if: always() && matrix.group == 'copy-deadline'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: copy-deadline
+          path: .tmp/copy-deadline
+          retention-days: 14
+          if-no-files-found: error
 
       - name: Export failure diagnostics
         if: failure()

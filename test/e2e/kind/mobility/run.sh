@@ -156,7 +156,7 @@ BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
 # test_preflight runs it after every scenario.
 KIND_MOBILITY_GROUP=${KIND_MOBILITY_GROUP:-all}
 case "${KIND_MOBILITY_GROUP}" in
-all | g1 | g2 | g3 | preparation | node-cleanup | retirement) ;;
+all | g1 | g2 | g3 | preparation | node-cleanup | retirement | copy-deadline) ;;
 *)
 	echo "unsupported KIND_MOBILITY_GROUP: ${KIND_MOBILITY_GROUP}" >&2
 	exit 1
@@ -178,6 +178,10 @@ fi
 
 if group_selected retirement; then
 	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/workload-retirement.sh"
+fi
+
+if group_selected copy-deadline; then
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/copy-deadline.sh"
 fi
 
 if group_selected g1; then
