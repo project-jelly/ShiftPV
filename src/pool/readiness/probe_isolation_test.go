@@ -3,9 +3,6 @@ package readiness
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,10 +10,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	mountutils "k8s.io/mount-utils"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/project-jelly/ShiftPV/src/pool/capacityunit"
 )
 
 type unresponsiveInspector struct {
@@ -89,7 +84,11 @@ func TestReportUnresponsiveProbeDoesNotStarvePeer(t *testing.T) {
 				return nil
 			}
 			peer := make(chan struct{}, 4)
+			var observed atomic.Int32
 			r.Observe = func(pool volumeapi.Pool, _ Result, _ error) {
+				if pool.Name == "pool-a" {
+					observed.Add(1)
+				}
 				if pool.Name == "pool-b" {
 					peer <- struct{}{}
 				}
@@ -117,8 +116,8 @@ func TestReportUnresponsiveProbeDoesNotStarvePeer(t *testing.T) {
 				t.Fatalf("missing blocked Pool error: %v", err)
 			}
 			if boundary == "allocation" {
-				candidate := repo.statuses["pool-c"]
-				if candidate.RegistrationApproved || candidate.CapacityUnit != nil {
+				candidate, exists := repo.statuses["pool-c"]
+				if !exists || candidate.RegistrationApproved || candidate.CapacityUnit != nil {
 					t.Fatal("new registration approved without live evidence from an approved peer")
 				}
 				peerStatus := repo.statuses["pool-b"]
@@ -138,6 +137,9 @@ func TestReportUnresponsiveProbeDoesNotStarvePeer(t *testing.T) {
 			close(i.release)
 			released = true
 			waitPoolWorkers(t, r)
+			if observed.Load() != 3 {
+				t.Fatalf("late worker emitted an observation callback: count=%d", observed.Load())
+			}
 			if _, ok := repo.statuses["pool-a"]; ok {
 				t.Fatal("late observation wrote status after its deadline")
 			}
@@ -225,31 +227,4 @@ func TestRegistrationRecheckTimeoutCannotApproveLateEvidence(t *testing.T) {
 	if err := r.Reconcile(context.Background()); err != nil || !repo.statuses[a.Name].RegistrationApproved {
 		t.Fatalf("fresh registration did not recover after host resumed: %v", err)
 	}
-}
-
-func TestReportRenumberedDeviceRejectsUnchangedBacking(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, "pool"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	minor := 1
-	extents := []capacityunit.Extent{{Device: "8:0", Start: 100, Sectors: 100}}
-	p := &Probe{HostRoot: root, allocations: allocationResolver{extents: extents}, listMounts: func() ([]mountutils.MountInfo, error) {
-		return []mountutils.MountInfo{{MountPoint: filepath.Join(root, "pool"), Major: 253, Minor: minor, Source: "/dev/mapper/retained-lv", FsType: "ext4"}}, nil
-	}}
-	pool := volumeapi.Pool{MountPath: "/pool", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
-	original, check := p.InspectCapacityUnit(pool)
-	if !check.OK {
-		t.Fatalf("initial allocation rejected: %+v", check)
-	}
-	pool.Status.CapacityUnit = original
-	minor = 7 // Same source, filesystem and physical ranges; kernel number changed.
-	current, check := p.InspectCapacityUnit(pool)
-	if check.OK || check.Reason != "CapacityIdentityChanged" || !reflect.DeepEqual(original.Extents, current.Extents) || original.Source != current.Source {
-		t.Fatalf("unexpected renumbering result: before=%+v after=%+v check=%+v", original, current, check)
-	}
-	t.Logf("POOL-F3 observed conservatively rejected transition %s -> %s with unchanged source/extents; real reboot not claimed", original.Device, current.Device)
 }

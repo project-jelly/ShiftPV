@@ -71,7 +71,7 @@ func testCancelRace(t *testing.T, newAttempt bool) {
 		return false, nil, nil
 	})
 	// The stock fake ignores DELETE preconditions. Honor both UID and RV here
-	// so this desired regression remains valid if Cancel adds the missing CAS.
+	// so the test exercises API compare-and-delete semantics.
 	client.PrependReactor("delete", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		deletion := action.(clienttesting.DeleteAction)
 		object, err := client.Tracker().Get(resource, store.Namespace, deletion.GetName())

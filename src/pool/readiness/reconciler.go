@@ -32,7 +32,7 @@ type Reconciler struct {
 	Interval         time.Duration
 	Clock            clock.WithTicker
 	// PoolTimeout bounds each Pool observation's wait. A blocked host call keeps
-	// one worker until it returns, without delaying other Pools or starting duplicates.
+	// one worker until it returns; peer observations continue after timeout.
 	PoolTimeout time.Duration
 	Wake        <-chan struct{}
 	Now         func() time.Time
