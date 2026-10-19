@@ -117,7 +117,7 @@
     "mobility": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "interval", "operationTimeout", "journalRetention", "webhookPort", "helperImage"],
+      "required": ["enabled", "interval", "journalRetention", "webhookPort", "helperImage"],
       "properties": {
         "enabled": {"type": "boolean"},
         "interval": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
