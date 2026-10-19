@@ -76,6 +76,9 @@ func decideWaitingForCapacity(current Phase, observation Observation) (Decision,
 	if decision, guarded, err := destinationGuard(current, observation); guarded {
 		return decision, err
 	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
+	}
 	if observation.CapacityBlocked {
 		return blockedWith(observation, "DestinationCapacityInsufficient"), nil
 	}
@@ -90,7 +93,11 @@ func decideCopying(current Phase, observation Observation) (Decision, error) {
 		return decision, err
 	}
 	if observation.CopyFailed {
+		observation.UnsafeReason = ""
 		return blockedWith(observation, "CopyFailed"), nil
+	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
 	}
 	if decision, guarded, err := placementGuard(current, observation); guarded {
 		return decision, err
@@ -102,11 +109,20 @@ func decideCopying(current Phase, observation Observation) (Decision, error) {
 }
 
 func decidePromoting(current Phase, observation Observation) (Decision, error) {
+	if observation.OwnerCommitted {
+		// Owner CAS can succeed before its phase write is observed. Advance
+		// through its idempotent action without requiring the old Job or Pod.
+		return transition(current, PhaseCommitting, ActionCommitOwner, "")
+	}
 	if decision, guarded, err := destinationGuard(current, observation); guarded {
 		return decision, err
 	}
 	if observation.PromotionFailed {
+		observation.UnsafeReason = ""
 		return blockedWith(observation, "PromotionFailed"), nil
+	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
 	}
 	if decision, guarded, err := placementGuard(current, observation); guarded {
 		return decision, err
@@ -129,6 +145,9 @@ func decideCommitting(current Phase, observation Observation) (Decision, error) 
 	if decision, guarded, err := destinationGuard(current, observation); guarded {
 		return decision, err
 	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
+	}
 	if decision, guarded, err := placementGuard(current, observation); guarded {
 		return decision, err
 	}
@@ -145,11 +164,16 @@ func decideReleasingDestination(current Phase, observation Observation) (Decisio
 	if observation.ReplacementExists && observation.ReplacementHeld {
 		return transition(current, PhaseWaitingForDestinationPublish, ActionReleasePlacement, "")
 	}
-	return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
+	reason := ""
+	if observation.ConsumersAmbiguous && !observation.PublishedOnDestination {
+		reason = "MultipleConsumers"
+	}
+	return transition(current, PhaseWaitingForDestinationPublish, ActionWait, reason)
 }
 
 func decideWaitingForDestinationPublish(current Phase, observation Observation) (Decision, error) {
 	if observation.CleanupFailed {
+		observation.UnsafeReason = ""
 		return blockedWith(observation, "CleanupFailed"), nil
 	}
 	if observation.DestinationUnavailable {
@@ -159,7 +183,11 @@ func decideWaitingForDestinationPublish(current Phase, observation Observation) 
 		return transition(current, current, ActionReleasePlacement, "")
 	}
 	if !observation.PublishedOnDestination {
-		return transition(current, current, ActionWait, "")
+		reason := ""
+		if observation.ConsumersAmbiguous {
+			reason = "MultipleConsumers"
+		}
+		return transition(current, current, ActionWait, reason)
 	}
 	return transition(current, PhaseCleaningSource, ActionEnsureCleanup, "")
 }
@@ -169,6 +197,7 @@ func decideCleaningSource(current Phase, observation Observation) (Decision, err
 		return transition(current, current, ActionWait, "DestinationUnavailable")
 	}
 	if observation.CleanupFailed {
+		observation.UnsafeReason = ""
 		return blockedWith(observation, "CleanupFailed"), nil
 	}
 	if observation.ReplacementExists && observation.ReplacementHeld {

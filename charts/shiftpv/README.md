@@ -631,6 +631,13 @@ Pool 삭제는 신규 allocation과 destination selection을 먼저 막는다. F
 Node 또는 API가 unavailable이면 기다린다. Unknown orphan이 있으면 자동 삭제하지 않으므로 운영자가
 데이터와 identity를 해결하기 전까지 Pool 삭제도 완료되지 않는다.
 
+승인된 Pool의 mount가 유실되면 `IdentityReleased=False/PoolStorageRestorationRequired`로 기다린다.
+같은 경로에 빈 directory나 다른 디스크를 준비하는 것은 복구가 아니다. 원래 filesystem·mount·backing
+identity를 복원한 뒤, 삭제 요청 이후의 empty inventory와 controller 승인이 확인되면 등록 해제가 재개된다.
+`kubectl get shiftpvpool <name> -o yaml`에서 UID, 조건, inventory를 확인한다.
+원래 디스크를 복원할 수 없다면 데이터 부재를 추측해 finalizer나 `.shiftpv` marker를 제거하지 않는다.
+영구 소실된 Pool의 등록 포기는 현재 지원하지 않는다.
+
 ## Uninstall
 
 정상 uninstall은 먼저 provisioning을 quiesce하고 fresh inventory를 요청한 뒤 dependency를 검사한다.

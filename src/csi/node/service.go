@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -92,6 +93,9 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	}
 	pool, poolRoot, err := s.poolRoot(ctx, copy)
 	if err != nil {
+		if errors.Is(err, volumeapi.ErrPoolIdentityChanged) {
+			return nil, status.Errorf(codes.FailedPrecondition, "resolve node pool: %v", err)
+		}
 		return nil, status.Errorf(codes.Unavailable, "resolve node pool: %v", err)
 	}
 	if !publication.CopyMatchesPool(copy, pool) {
@@ -210,11 +214,11 @@ func publicationError(op string, err error, enteredLock bool) error {
 	if !enteredLock {
 		return status.Errorf(codes.Unavailable, "reconcile publication after %s: %v", op, err)
 	}
-	if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) {
-		return status.Errorf(codes.FailedPrecondition, "%s identified volume: %v", op, err)
-	}
-	if errors.Is(err, publication.ErrObservationRetry) || errors.Is(err, ownership.ErrBusy) || apierrors.IsConflict(err) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+	if errors.Is(err, publication.ErrObservationRetry) || errors.Is(err, ownership.ErrBusy) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || apierrors.IsConflict(err) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 		return status.Errorf(codes.Unavailable, "%s identified volume: %v", op, err)
+	}
+	if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) || errors.Is(err, syscall.EROFS) {
+		return status.Errorf(codes.FailedPrecondition, "%s identified volume: %v", op, err)
 	}
 	return status.Errorf(codes.Internal, "%s identified volume: %v", op, err)
 }

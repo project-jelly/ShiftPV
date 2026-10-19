@@ -278,7 +278,10 @@ func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.P
 	}
 	release := Check{Known: true, Reason: "PoolIdentityRetained", Message: "Pool identity remains until inventory is empty and complete"}
 	var releaseErr error
-	if pool.IdentityReleaseApproval != pool.UID {
+	if pool.RegistrationApproved() && !cleanupReady {
+		release.Reason = "PoolStorageRestorationRequired"
+		release.Message = "restore the original Pool backing and filesystem headroom; missing storage evidence cannot release its identity"
+	} else if pool.IdentityReleaseApproval != pool.UID {
 		release.Reason = "PoolIdentityReleasePending"
 		release.Message = "Pool identity remains until the controller approves exact release"
 	} else if (cleanupReady || pool.DeletingUnapprovedFixedBlock()) && emptyInventory(status.Inventory) {

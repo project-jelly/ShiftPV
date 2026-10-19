@@ -126,9 +126,10 @@ Publish는 다음 조건을 모두 만족할 때만 같은 per-volume lock 안�
 - Pool identity와 local marker/device/inode가 모순되지 않는다.
 - 다른 owner 또는 concurrent mount effect가 실제 mount evidence에 없다.
 
-Unpublish도 같은 lock 안에서 kubelet target과 actual mount를 확인해 해제한다. API 오류, node-local 오류 또는
-모순이 있으면 성공을 추측하지 않고 재시도한다. Move 관련 모순은 `Blocked`, cleanup 모순은 cleanup
-subjournal `NeedsReview`로 수렴한다.
+Unpublish는 검증된 kubelet target을 먼저 해제하고, 같은 per-volume lock에서 남은 mount와 API 게시 상태를
+정산한다. Pool이 사라지거나 교체되어 identity를 확인할 수 없으면 target 해제는 성공하되 이전 사본의
+게시 기록을 보존한다. 게시 정산의 관측 실패는 `Unavailable`, 확인된 권한 모순과 읽기 전용 Publish는
+`FailedPrecondition`이다. Move 관련 모순은 `Blocked`, cleanup 모순은 subjournal `NeedsReview`로 수렴한다.
 
 ## Planned cold move
 

@@ -93,7 +93,7 @@ func (c *Controller) Refresh(ctx context.Context) (refreshErr error) {
 		return err
 	}
 	values = append(values, cleanupValues...)
-	values = append(values, copyObservationSamples(pools, volumes, moves, cleanupContracts)...)
+	values = append(values, copyObservationSamples(pools, volumes, moves, cleanupContracts, time.Now(), staleAfter)...)
 	var persistentVolumes []corev1.PersistentVolume
 	if c.PersistentVolumes != nil {
 		if persistentVolumes, err = c.PersistentVolumes.List(ctx); err != nil {
@@ -263,17 +263,31 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 	return values
 }
 
-func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, cleanups []cleanupapi.Cleanup) []sample {
+func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi.State, moves []volumeapi.Move, cleanups []cleanupapi.Cleanup, now time.Time, staleAfter time.Duration) []sample {
 	authority := copyAuthority(volumes, moves, cleanups)
 	var values []sample
 	// One series per Pool: the operator needs to know which Pool holds the
 	// reviewed copies. Volume and copy IDs stay out of the label set.
 	for _, pool := range pools {
 		counts := map[string]int{}
+		seen := map[volume.CopyIdentity]bool{}
 		// Inventory validity has its own signal; it cannot invent a copy.
 		if pool.Status.Inventory != nil {
 			for _, observed := range pool.Status.Inventory.Copies {
 				counts[observationState(observed, authority)]++
+				if observed.Identity != nil {
+					seen[*observed.Identity] = true
+				}
+			}
+		}
+		if completeCopyInventory(pool, now, staleAfter) {
+			for identity, class := range authority {
+				if class != "Current" || identity.PoolName != pool.Name || identity.PoolUID != pool.UID || identity.NodeName != pool.NodeName || seen[identity] {
+					continue
+				}
+				if currentCopyPrecedesScan(volumes[identity.VolumeID], pool.Status.Inventory.ObservedAt.Time) {
+					counts["Missing"]++
+				}
 			}
 		}
 		for _, state := range copyObservationStates {
@@ -281,6 +295,25 @@ func copyObservationSamples(pools []volumeapi.Pool, volumes map[string]volumeapi
 		}
 	}
 	return values
+}
+
+func completeCopyInventory(pool volumeapi.Pool, now time.Time, staleAfter time.Duration) bool {
+	inventory := pool.Status.Inventory
+	return inventory != nil && inventory.Valid && !inventory.Truncated && inventory.Message == "" &&
+		pool.Generation > 0 && pool.Status.ObservedGeneration == pool.Generation &&
+		!inventory.ObservedAt.IsZero() && !now.Before(inventory.ObservedAt.Time) && now.Sub(inventory.ObservedAt.Time) <= staleAfter
+}
+
+func currentCopyPrecedesScan(state volumeapi.State, scan time.Time) bool {
+	if state.Deleting || state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseBlocked {
+		return false
+	}
+	if state.CreationReceipt == nil {
+		// Settled legacy owners have no native creation receipt.
+		return true
+	}
+	created, err := time.Parse(time.RFC3339Nano, state.CreationReceipt.ObservedAt)
+	return err == nil && !scan.Before(created)
 }
 
 var copyObservationStates = []string{"Current", "InFlight", "CleanupTarget", "OrphanPreserved", "Missing", "NeedsReview"}
@@ -292,7 +325,17 @@ func copyAuthority(volumes map[string]volumeapi.State, moves []volumeapi.Move, c
 	authority := map[volume.CopyIdentity]string{}
 	for _, state := range volumes {
 		if state.CurrentCopy != nil {
-			authority[*state.CurrentCopy] = "Current"
+			class := "Current"
+			switch state.Phase {
+			case volumeapi.PhasePending, volumeapi.PhaseNodeCreating:
+				class = "InFlight"
+			case volumeapi.PhaseDeleting:
+				class = "CleanupTarget"
+			}
+			if state.Deleting {
+				class = "CleanupTarget"
+			}
+			authority[*state.CurrentCopy] = class
 		}
 	}
 	for _, move := range moves {
@@ -318,6 +361,9 @@ func copyAuthority(volumes map[string]volumeapi.State, moves []volumeapi.Move, c
 func observationState(observed volumeapi.CopyObservation, authority map[volume.CopyIdentity]string) string {
 	if observed.Identity == nil || observed.Problem != "" {
 		return "NeedsReview"
+	}
+	if class := authority[*observed.Identity]; class == "InFlight" || class == "CleanupTarget" {
+		return class
 	}
 	if !observed.Present {
 		return "Missing"
