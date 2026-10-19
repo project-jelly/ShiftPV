@@ -2,16 +2,15 @@ package uninstall
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/project-jelly/ShiftPV/internal/testutil/kubeapi"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -112,34 +111,10 @@ func TestReportNativeStaleCancelPreservesNewerAttempt(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	path := os.Getenv("KUBECONFIG")
-	if !filepath.IsAbs(path) {
-		t.Fatal("explicit absolute fixture KUBECONFIG is required")
-	}
-	data, err := exec.Command("kubectl", "--kubeconfig", path, "config", "view", "--raw", "--minify", "--flatten", "-o", "json").Output()
+	cfg, err := kubeapi.Config(ctx, os.Getenv("KUBECONFIG"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var credentials struct {
-		Clusters []struct {
-			Cluster struct {
-				Server string `json:"server"`
-				CA     []byte `json:"certificate-authority-data"`
-			} `json:"cluster"`
-		} `json:"clusters"`
-		Users []struct {
-			User struct {
-				Certificate []byte `json:"client-certificate-data"`
-				Key         []byte `json:"client-key-data"`
-			} `json:"user"`
-		} `json:"users"`
-	}
-	if json.Unmarshal(data, &credentials) != nil || len(credentials.Clusters) != 1 || len(credentials.Users) != 1 || len(credentials.Users[0].User.Key) == 0 {
-		t.Fatal("fixture requires one selected Kind certificate identity")
-	}
-	cfg := &rest.Config{Host: credentials.Clusters[0].Cluster.Server, TLSClientConfig: rest.TLSClientConfig{
-		CAData: credentials.Clusters[0].Cluster.CA, CertData: credentials.Users[0].User.Certificate, KeyData: credentials.Users[0].User.Key,
-	}}
 	cfg.Timeout = 10 * time.Second
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {

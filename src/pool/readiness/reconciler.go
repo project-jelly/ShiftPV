@@ -31,8 +31,8 @@ type Reconciler struct {
 	Inspector        Inspector
 	Interval         time.Duration
 	Clock            clock.WithTicker
-	// PoolTimeout bounds each Pool observation's wait. A blocked host call keeps
-	// one worker until it returns; peer observations continue after timeout.
+	// PoolTimeout bounds each parallel observation and the registration batch.
+	// A blocked host call keeps one worker until it returns, without a retry fanout.
 	PoolTimeout time.Duration
 	Wake        <-chan struct{}
 	Now         func() time.Time
@@ -87,24 +87,16 @@ func (r *Reconciler) reconcile(ctx context.Context, only map[string]bool) (retry
 	}
 	retry = make(map[string]bool)
 	isolation := r.capacityIsolation(ctx, pools, "")
-	observed := false
-	for _, pool := range pools {
-		if ctx.Err() != nil {
-			return retry, errors.Join(reconcileErr, ctx.Err())
-		}
-		if pool.NodeName != r.NodeName || (only != nil && !only[pool.UID]) {
-			continue
-		}
-		observed = true
-		result, err := r.observePool(ctx, pool, isolation[pool.UID])
+	observations = r.observeSelectedPools(ctx, pools, isolation, only)
+	for _, observation := range observations {
 		if r.Observe != nil {
-			r.Observe(pool, result, err)
+			r.Observe(observation.Pool, observation.Result, observation.Err)
 		}
-		observations = append(observations, Observation{Pool: pool, Result: result, Err: err})
-		retry[pool.UID] = result.RetryInventory
-		reconcileErr = errors.Join(reconcileErr, err)
+		retry[observation.Pool.UID] = observation.Result.RetryInventory
+		reconcileErr = errors.Join(reconcileErr, observation.Err)
 	}
-	if !observed && r.Observe != nil {
+	reconcileErr = errors.Join(reconcileErr, ctx.Err())
+	if len(observations) == 0 && r.Observe != nil {
 		r.Observe(volumeapi.Pool{}, Result{}, nil)
 	}
 	if r.ObserveAll != nil {

@@ -87,8 +87,10 @@ stale, invalid 또는 incomplete observation은 allocation을 승인할 수 없�
 가용 bytes 또는 inode가 0이면 작은 쓰기 probe가 성공해도 신규 할당용 `Ready`는
 `False / NoSpace`다. `Writable`은 해당 probe의 결과이며 다음 metadata 쓰기의 성공을 보장하지 않는다.
 
-Pool 관측의 대기는 기본 5초로 제한한다. host 호출이 멈추면 해당 UID의 작업 하나를 유지하며
-다른 Pool의 관측을 계속한다. 만료 후 결과는 승인에 쓰지 않고 복구 뒤 새로 관측한다.
+read-only backing 수집과 기존 Pool 관측은 각각 병렬로 진행하며 작업 대기는 기본 5초로 제한한다.
+신규 등록은 fresh peer 증거를 재검증하며 직렬 승인하되, 한 패스의 공통 5초 예산을 쓴다.
+host 호출이 멈추면 해당 UID의 작업 하나를 유지한다. Pool별 대기를 순서대로 합산하지 않으며,
+만료 후 결과는 승인에 쓰지 않고 복구 뒤 새로 관측한다.
 승인된 peer의 backing이 불명확하면 신규 할당은 계속 차단하며 기존 copy의 inventory는 갱신한다.
 기존 copy의 게시·승인된 정리는 자기 backing과 실행 권한을 별도로 확인한다. 정리에 필요한 durable
 intent를 저장하지 못하면 삭제를 시작하지 않으며, 공간을 반환한 뒤 같은 기록으로 재시도한다.

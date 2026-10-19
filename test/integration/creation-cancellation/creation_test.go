@@ -4,16 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/project-jelly/ShiftPV/internal/testutil/kubeapi"
 	controllercsi "github.com/project-jelly/ShiftPV/src/csi/controller"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
@@ -53,40 +51,12 @@ func TestAPIServerUnstartedCancellation(t *testing.T) {
 	if os.Getenv("SHIFTPV_API_CANCELLATION_TEST") != "1" {
 		t.Skip("requires an isolated API-server fixture")
 	}
-	path := os.Getenv("KUBECONFIG")
-	if !filepath.IsAbs(path) {
-		t.Fatal("explicit absolute KUBECONFIG is required")
-	}
-	// The fixture already requires kubectl. Use its selected, flattened Kind
-	// credentials without importing clientcmd's additional production dependencies.
-	// Credential bytes are parsed in memory and never written to test output.
-	data, err := exec.Command("kubectl", "--kubeconfig", path, "config", "view", "--raw", "--minify", "--flatten", "-o", "json").Output()
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer setupCancel()
+	cfg, err := kubeapi.Config(setupCtx, os.Getenv("KUBECONFIG"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var credentials struct {
-		Clusters []struct {
-			Cluster struct {
-				Server string `json:"server"`
-				CA     []byte `json:"certificate-authority-data"`
-			} `json:"cluster"`
-		} `json:"clusters"`
-		Users []struct {
-			User struct {
-				Certificate []byte `json:"client-certificate-data"`
-				Key         []byte `json:"client-key-data"`
-			} `json:"user"`
-		} `json:"users"`
-	}
-	if err := json.Unmarshal(data, &credentials); err != nil {
-		t.Fatal("decode fixture credentials")
-	}
-	if len(credentials.Clusters) != 1 || len(credentials.Users) != 1 || len(credentials.Users[0].User.Key) == 0 {
-		t.Fatal("fixture requires one selected Kind certificate identity")
-	}
-	cfg := &rest.Config{Host: credentials.Clusters[0].Cluster.Server, TLSClientConfig: rest.TLSClientConfig{
-		CAData: credentials.Clusters[0].Cluster.CA, CertData: credentials.Users[0].User.Certificate, KeyData: credentials.Users[0].User.Key,
-	}}
 	if namespace := os.Getenv("SHIFTPV_TEST_AS_CONTROLLER_NAMESPACE"); namespace != "" {
 		cfg.Impersonate.UserName = "system:serviceaccount:" + namespace + ":shiftpv-controller"
 	}

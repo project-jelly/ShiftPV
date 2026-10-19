@@ -3,6 +3,7 @@ package readiness
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,12 +41,15 @@ func TestRejectedCandidateDoesNotStopApprovedPool(t *testing.T) {
 			}
 			repo := &fakeRepository{pools: []volumeapi.Pool{b, a}}
 			scanned := map[string]int{}
+			var scansMu sync.Mutex
 			r, err := NewReconciler("node", repo, checks, time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}
 			r.Inventory = func(_ context.Context, p volumeapi.Pool, _ time.Time) volumeapi.PoolInventory {
+				scansMu.Lock()
 				scanned[p.Name]++
+				scansMu.Unlock()
 				return volumeapi.PoolInventory{Valid: true}
 			}
 			if err := r.Reconcile(context.Background()); err != nil {
@@ -111,8 +115,11 @@ func TestApprovedPoolLimitErrorPreservesLivePeerEvidence(t *testing.T) {
 			r, _ := NewReconciler("node", repo, inspector, time.Minute)
 			r.Now = func() time.Time { return testTime }
 			scanned := map[string]int{}
+			var scansMu sync.Mutex
 			r.Inventory = func(_ context.Context, p volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
+				scansMu.Lock()
 				scanned[p.Name]++
+				scansMu.Unlock()
 				return volumeapi.PoolInventory{Valid: true, ObservedAt: metav1.NewTime(now)}
 			}
 			if err := r.Reconcile(context.Background()); err != nil {
