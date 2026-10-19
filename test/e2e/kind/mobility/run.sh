@@ -103,6 +103,7 @@ helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--set helperPod.image=shiftpv-mobility-fault:dev \
 	--set mobility.helperImage=shiftpv-mobility-fault:dev \
 	--set mobility.interval=10s \
+	--set mobility.operationTimeout=10m \
 	--wait \
 	--timeout 5m
 WEBHOOK_SECRET=shiftpv-webhook-tls

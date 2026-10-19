@@ -70,6 +70,9 @@ spec:
             - --webhook-listen-address=:{{ .Values.mobility.webhookPort }}
             {{- if .Values.mobility.enabled }}
             - --mobility-interval={{ .Values.mobility.interval }}
+            {{- if .Values.mobility.operationTimeout }}
+            - --mobility-operation-timeout={{ .Values.mobility.operationTimeout }}
+            {{- end }}
             - --move-journal-retention={{ .Values.mobility.journalRetention }}
             - --mobility-helper-image={{ include "shiftpv.mobilityHelperImage" . }}
             - --mobility-placement-priority-class={{ include "shiftpv.placementPriorityClassName" . }}

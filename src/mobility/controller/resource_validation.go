@@ -25,12 +25,23 @@ func sameOperationJob(current, expected *batchv1.Job) bool {
 }
 
 func sameOperationJobIdentity(current, expected *batchv1.Job) bool {
-	return current != nil && expected != nil && current.DeletionTimestamp == nil &&
+	if current == nil || expected == nil {
+		return false
+	}
+	// A running Job retains the bound it was created with, even if controller
+	// configuration changes. Verification Jobs deliberately remain unbounded.
+	if expected.Spec.ActiveDeadlineSeconds == nil {
+		if current.Spec.ActiveDeadlineSeconds != nil {
+			return false
+		}
+	} else if current.Spec.ActiveDeadlineSeconds == nil || *current.Spec.ActiveDeadlineSeconds <= 0 {
+		return false
+	}
+	return current.DeletionTimestamp == nil &&
 		current.Name == expected.Name && current.Namespace == expected.Namespace &&
 		reflect.DeepEqual(current.OwnerReferences, expected.OwnerReferences) &&
 		current.Labels["shiftpv.io/move-uid"] == expected.Labels["shiftpv.io/move-uid"] &&
-		reflect.DeepEqual(current.Spec.BackoffLimit, expected.Spec.BackoffLimit) &&
-		reflect.DeepEqual(current.Spec.ActiveDeadlineSeconds, expected.Spec.ActiveDeadlineSeconds)
+		reflect.DeepEqual(current.Spec.BackoffLimit, expected.Spec.BackoffLimit)
 }
 
 func sameOperationPodSpec(actual, wanted corev1.PodSpec) bool {

@@ -25,6 +25,7 @@ const (
 	DefaultMoveJournalRetention       = 7 * 24 * time.Hour
 	DefaultPlacementPriorityClassName = "shiftpv-placement"
 	DefaultReconcileTimeout           = 30 * time.Second
+	DefaultOperationTimeout           = 5 * time.Minute
 )
 
 type Repository interface {
@@ -80,7 +81,9 @@ type Reconciler struct {
 	}
 	Interval time.Duration
 	// ReconcileTimeout bounds one Volume pass; non-positive values use DefaultReconcileTimeout.
-	ReconcileTimeout        time.Duration
+	ReconcileTimeout time.Duration
+	// OperationTimeout bounds newly created copy/promote Jobs; zero uses the default.
+	OperationTimeout        time.Duration
 	MoveJournalRetention    time.Duration
 	PoolReadinessStaleAfter time.Duration
 	Now                     func() time.Time

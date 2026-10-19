@@ -4,6 +4,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -73,7 +74,17 @@ func (r *Reconciler) ensureJob(ctx context.Context, move volumeapi.Move, name, n
 func (r *Reconciler) operationJob(ctx context.Context, name string, copy *volume.CopyIdentity, names resourceNames, env []corev1.EnvVar, extraMounts []corev1.VolumeMount, extraVolumes []corev1.Volume) (*batchv1.Job, error) {
 	backoff := int32(2)
 	ttl := int32(600)
-	deadline := int64(300)
+	timeout := r.OperationTimeout
+	if timeout == 0 {
+		timeout = DefaultOperationTimeout
+	}
+	if timeout < 0 {
+		return nil, fmt.Errorf("mobility operation timeout must be positive")
+	}
+	deadline := int64(timeout / time.Second)
+	if timeout%time.Second != 0 {
+		deadline++
+	}
 	poolRoot, err := r.poolMountPath(ctx, copy)
 	if err != nil {
 		return nil, err

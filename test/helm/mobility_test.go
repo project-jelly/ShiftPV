@@ -5,6 +5,38 @@ import (
 	"testing"
 )
 
+func TestMobilityOperationTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name, value, want string
+		fail              bool
+		omitted           bool
+	}{
+		{"default", "", "--mobility-operation-timeout=5m", false, false},
+		{"large copy", "30m", "--mobility-operation-timeout=30m", false, false},
+		{"legacy values without new key", "null", "", false, true},
+		{"zero", "0s", "schema", true, false},
+		{"negative", "-1m", "schema", true, false},
+		{"invalid", "unbounded", "schema", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var args []string
+			if test.value != "" {
+				args = []string{"--set", "mobility.operationTimeout=" + test.value}
+			}
+			output, err := render(t, args...)
+			if test.omitted {
+				if err != nil || strings.Contains(output, "--mobility-operation-timeout=") {
+					t.Fatalf("legacy values did not retain the controller's default: error=%v output=%s", err, output)
+				}
+				return
+			}
+			if (err != nil) != test.fail || !strings.Contains(output, test.want) {
+				t.Fatalf("operation timeout render: error=%v output=%s", err, output)
+			}
+		})
+	}
+}
+
 func TestMoveJournalRetention(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
