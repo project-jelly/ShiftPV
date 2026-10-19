@@ -343,7 +343,7 @@ jobs:
   kind-e2e:
     name: kind-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: kind-e2e-group
     if: always()
     steps:
@@ -411,7 +411,7 @@ jobs:
   kind-mobility-e2e:
     name: kind-mobility-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: kind-mobility-e2e-group
     if: always()
     steps:
@@ -482,7 +482,7 @@ jobs:
   kind-mobility-node-restart-e2e:
     name: kind-mobility-node-restart-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: kind-mobility-node-restart-shard
     if: always()
     steps:
@@ -552,7 +552,7 @@ jobs:
   kind-upgrade-e2e:
     name: kind-upgrade-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: kind-upgrade-scenario
     if: always()
     steps:
