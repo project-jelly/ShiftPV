@@ -1,0 +1,162 @@
+rule_files:
+  - /etc/shiftpv-alerts/shiftpv-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: lifecycle alerts fire after sustained failure and clear on recovery
+    interval: 1m
+    input_series:
+      - series: 'shiftpv_moves{shiftpv="true",namespace="storage",phase="Blocked"}'
+        values: '1+0x6 0+0x5'
+      - series: 'shiftpv_pool_ready{shiftpv="true",namespace="storage",pool="pool-a",node="worker-a"}'
+        values: '0+0x6 1+0x5'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="storage",source="metadata"}'
+        values: '1+0x11'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="storage",source="metadata"}'
+        values: '1+60x11'
+      - series: 'shiftpv_csi_requests_total{shiftpv="true",namespace="storage",component="controller",method="CreateVolume",code="Unavailable"}'
+        values: '0+10x6 60+0x5'
+      - series: 'shiftpv_csi_requests_total{shiftpv="true",namespace="storage",component="controller",method="CreateVolume",code="OK"}'
+        values: '0+100x11'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ShiftPVMoveBlocked
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ShiftPVPoolNotReady
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: ShiftPVCSIErrorRate
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ShiftPVMoveBlocked
+        exp_alerts:
+          - exp_labels: {namespace: storage, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: ShiftPV moves are blocked
+              description: '1 active Move(s) are Blocked. Inspect the Move status, current owner and cleanup evidence before choosing recovery.'
+              runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvmoveblocked
+      - eval_time: 6m
+        alertname: ShiftPVPoolNotReady
+        exp_alerts:
+          - exp_labels: {namespace: storage, node: worker-a, pool: pool-a, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: ShiftPV Pool is not ready
+              description: 'Pool pool-a on node worker-a is not ready for allocation. Inspect Pool conditions and the original mounted filesystem.'
+              runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnotready
+      - eval_time: 6m
+        alertname: ShiftPVCSIErrorRate
+        exp_alerts:
+          - exp_labels: {component: controller, method: CreateVolume, namespace: storage, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: ShiftPV CSI server errors are sustained
+              description: 'CSI CreateVolume reports a sustained server-side error ratio of 0.09 (threshold 0.05). Inspect API availability, credentials and the corresponding gRPC codes.'
+              runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvcsierrorrate
+      - eval_time: 8m
+        alertname: ShiftPVMoveBlocked
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ShiftPVPoolNotReady
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: ShiftPVCSIErrorRate
+        exp_alerts: []
+
+  - name: failed stale or missing metadata does not assert a lifecycle failure
+    interval: 1m
+    input_series:
+      - series: 'shiftpv_moves{shiftpv="true",namespace="failed",phase="Blocked"}'
+        values: '1+0x6'
+      - series: 'shiftpv_pool_ready{shiftpv="true",namespace="failed",pool="pool-a",node="worker-a"}'
+        values: '0+0x6'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="failed",source="metadata"}'
+        values: '0+0x6'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="failed",source="metadata"}'
+        values: '1+60x6'
+      - series: 'shiftpv_moves{shiftpv="true",namespace="stale",phase="Blocked"}'
+        values: '1+0x6'
+      - series: 'shiftpv_pool_ready{shiftpv="true",namespace="stale",pool="pool-a",node="worker-a"}'
+        values: '0+0x6'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="stale",source="metadata"}'
+        values: '1+0x6'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="stale",source="metadata"}'
+        values: '-600+0x6'
+      - series: 'shiftpv_moves{shiftpv="true",namespace="missing",phase="Blocked"}'
+        values: '1+0x6'
+      - series: 'shiftpv_pool_ready{shiftpv="true",namespace="missing",pool="pool-a",node="worker-a"}'
+        values: '0+0x6'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShiftPVMoveBlocked
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: ShiftPVPoolNotReady
+        exp_alerts: []
+
+  - name: CSI capacity waits and isolated server errors do not alert
+    interval: 1m
+    input_series:
+      - series: 'shiftpv_csi_requests_total{shiftpv="true",namespace="capacity",method="CreateVolume",code="ResourceExhausted"}'
+        values: '0+100x11'
+      - series: 'shiftpv_csi_requests_total{shiftpv="true",namespace="transient",method="CreateVolume",code="Internal"}'
+        values: '0 1+0x10'
+      - series: 'shiftpv_csi_requests_total{shiftpv="true",namespace="transient",method="CreateVolume",code="OK"}'
+        values: '0+1x11'
+      - series: 'shiftpv_csi_requests_total{shiftpv="true",namespace="counter-reset",method="CreateVolume",code="Internal"}'
+        values: '10+0x4 0+0x6'
+      - series: 'shiftpv_csi_requests_total{shiftpv="true",namespace="counter-reset",method="CreateVolume",code="OK"}'
+        values: '100+1x4 0+1x6'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShiftPVCSIErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ShiftPVCSIErrorRate
+        exp_alerts: []
+
+  - name: six-hour pending state survives exporter Pod replacement
+    interval: 1m
+    input_series:
+      - series: 'shiftpv_volumes_without_persistent_volume{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pool="pool-a",pod="old",instance="old:8080"}'
+        values: '1 1 stale'
+      - series: 'shiftpv_volumes_without_persistent_volume{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pool="pool-a",pod="new",instance="new:8080"}'
+        values: '_ _ 1+0x359 0+0x4'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pod="old",instance="old:8080",source="metadata"}'
+        values: '1 1 stale'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pod="new",instance="new:8080",source="metadata"}'
+        values: '_ _ 1+0x365'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pod="old",instance="old:8080",source="metadata"}'
+        values: '1 60 stale'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pod="new",instance="new:8080",source="metadata"}'
+        values: '_ _ 120+60x365'
+      - series: 'shiftpv_persistent_volumes{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pool="pool-a",phase="Released",pod="old",instance="old:8080"}'
+        values: '2 2 stale'
+      - series: 'shiftpv_persistent_volumes{shiftpv="true",namespace="storage",release="shiftpv",component="controller",pool="pool-a",phase="Released",pod="new",instance="new:8080"}'
+        values: '_ _ 2+0x359 0+0x4'
+    alert_rule_test:
+      - eval_time: 5h59m
+        alertname: ShiftPVVolumesWithoutPersistentVolume
+        exp_alerts: []
+      - eval_time: 6h1m
+        alertname: ShiftPVVolumesWithoutPersistentVolume
+        exp_alerts:
+          - exp_labels: {component: controller, namespace: storage, release: shiftpv, pool: pool-a, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: ShiftPV retained owners have no PersistentVolume reference
+              description: '1 Ready or preserved Blocked Volume owner(s) on pool pool-a have no matching driver PersistentVolume. This may be delayed PV publication or retained data; inspect the Volume and provisioning history before deciding how to recover it. Data and capacity reservations remain protected.'
+              runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvvolumeswithoutpersistentvolume
+      - eval_time: 6h1m
+        alertname: ShiftPVReleasedVolumes
+        exp_alerts:
+          - exp_labels: {component: controller, namespace: storage, release: shiftpv, pool: pool-a, phase: Released, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: ShiftPV PersistentVolumes are waiting for a reclaim decision
+              description: '2 Released ShiftPV PersistentVolume(s) on pool pool-a kept their data after their claims were deleted and nothing reclaims them automatically; shiftpv_persistent_volumes_released_bytes{pool="pool-a"} reports the held capacity.'
+              runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvreleasedvolumes
+      - eval_time: 6h3m
+        alertname: ShiftPVVolumesWithoutPersistentVolume
+        exp_alerts: []
+      - eval_time: 6h3m
+        alertname: ShiftPVReleasedVolumes
+        exp_alerts: []

@@ -394,9 +394,9 @@ func TestChartRender(t *testing.T) {
 				wantArg(t, "helper service account wiring", args, "--helper-service-account="+helperName)
 				wantArg(t, "controller service account wiring", args, "--controller-service-account="+fullname+"-controller")
 				c.wantObject(t, "helper service account is created", "ServiceAccount", helperName)
-				wantRule(t, "helper may only write volume and move status",
+				wantRule(t, "helper reads exact storage authority",
 					c.wantObject(t, "helper cluster role", "ClusterRole", helperName),
-					"shiftpvvolumes/status", "shiftpvmoves/status")
+					"shiftpvpools", "shiftpvvolumes", "shiftpvmoves")
 				c.wantNoResource(t, "the retired cleanup CRD is gone", "shiftpvcleanups")
 				guard := c.wantObject(t, "uninstall guard job", "Job", guardJob)
 				wantAnnotation(t, "helm uninstall hook", guard, "helm.sh/hook", "pre-delete")

@@ -16,6 +16,7 @@ docker run --rm -d --name "${CONTAINER_NAME}" -p 127.0.0.1::9090 \
 docker exec "${CONTAINER_NAME}" promtool check rules /etc/prometheus/preview-rules.json
 docker exec "${CONTAINER_NAME}" promtool check rules /etc/shiftpv-alerts/shiftpv-rules.yaml
 docker exec "${CONTAINER_NAME}" promtool test rules /etc/prometheus/alerts-test.yml
+docker exec "${CONTAINER_NAME}" promtool test rules /etc/prometheus/lifecycle-alerts-test.yml
 endpoint="http://$(docker port "${CONTAINER_NAME}" 9090/tcp)"
 ready=0
 for _ in {1..60}; do
