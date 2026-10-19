@@ -134,6 +134,11 @@ orphan/missing/unsafe copy observation, filesystem 공간 소진, PV 없는 보�
 `Released` PersistentVolume을 경고한다. Invalid/truncated/missing inventory는 inventory 경보로 다루며
 가짜 `copy_observations{state="NeedsReview"}` 수를 더하지 않는다. 실제 관측된 unsafe copy는 계속 집계한다.
 
+생성·이동·정리 중 승인된 사본의 부재는 `InFlight` 또는 `CleanupTarget`으로 분류한다.
+`Missing`은 실제 부재 관측 외에, 최신 generation의 fresh·complete inventory에 없는 현재 owner도
+집계한다. 초기 생성 receipt보다 오래된 scan이나 불완전한 inventory로 부재를 추론하지 않는다.
+이 지표는 비원자적으로 읽은 운영 관측이며 삭제·소유권 변경의 증거가 아니다.
+
 현재 metric에는 개별 hold owner/role, cleanup reason class, journal별 age가 label로 노출되지 않는다.
 상세 원인은 해당 Volume/Move status, Event와 log에서 확인한다.
 

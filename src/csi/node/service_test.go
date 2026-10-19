@@ -112,8 +112,11 @@ type poolsByIdentity map[string]volumeapi.Pool
 
 func (p poolsByIdentity) PoolForIdentity(_ context.Context, name, uid, node string) (volumeapi.Pool, error) {
 	pool, found := p[name]
-	if !found || pool.UID != uid || pool.NodeName != node {
+	if !found {
 		return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
+	}
+	if pool.UID != uid || pool.NodeName != node {
+		return volumeapi.Pool{}, volumeapi.ErrPoolIdentityChanged
 	}
 	return pool, nil
 }

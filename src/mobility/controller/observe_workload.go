@@ -126,11 +126,13 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 	if ambiguous {
 		result.Consumer, result.Replacement = nil, nil
 		result.FSM.ConsumersAmbiguous = true
-		result.FSM.UnsafeReason = "MultipleConsumers"
-		result.FSM.PreflightDeferred = !move.Status.CapacityApproved
 		// Preparation cannot disrupt this shape. Approved execution must still
 		// observe its Jobs, placement and cleanup rather than inventing absence.
-		return !move.Status.CapacityApproved, nil
+		if !move.Status.CapacityApproved {
+			result.FSM.UnsafeReason = "MultipleConsumers"
+			result.FSM.PreflightDeferred = true
+			return true, nil
+		}
 	}
 	return false, nil
 }
