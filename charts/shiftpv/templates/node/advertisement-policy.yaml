@@ -39,6 +39,8 @@ spec:
     - expression: >-
         has(object.metadata.labels) == has(oldObject.metadata.labels) &&
         (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) &&
+        has(object.metadata.generateName) == has(oldObject.metadata.generateName) &&
+        (!has(object.metadata.generateName) || object.metadata.generateName == oldObject.metadata.generateName) &&
         has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
         (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers) &&
         has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) &&

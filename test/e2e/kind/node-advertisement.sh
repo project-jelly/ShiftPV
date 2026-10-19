@@ -48,6 +48,8 @@ denied_update "${name}" '.metadata.annotations["example.test/unrelated"]="change
  'ShiftPV Node may change only capability and RPC annotations'
 denied_update "${name}" '.metadata.labels["example.test/unrelated"]="changed"' \
  'ShiftPV Node may change only capability and RPC annotations'
+denied_update "${name}" '.metadata.generateName="changed-"' \
+ 'ShiftPV Node may change only capability and RPC annotations'
 denied_update "${name}" '.metadata.finalizers=["example.test/unrelated"]' \
  'ShiftPV Node may change only capability and RPC annotations'
 
