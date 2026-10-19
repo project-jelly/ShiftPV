@@ -42,6 +42,7 @@ var definitions = []struct {
 	{"pool_reserved_bytes", "Volume owner and active Move capacity holds, not disk usage.", []string{"pool", "node"}},
 	{"pool_accounting_valid", "Whether the latest Pool capacity-hold accounting is valid.", []string{"pool", "node"}},
 	{"pool_ready", "Pool readiness including generation and probe freshness.", []string{"pool", "node"}},
+	{"pool_registration_retired", "Whether the Controller retired this exact Pool registration; not physical absence.", []string{"pool", "node"}},
 	{"pool_filesystem_size_bytes", "Total size of the filesystem containing the registered directory.", []string{"pool", "node"}},
 	{"pool_filesystem_available_bytes", "Filesystem bytes available to unprivileged users, including external writers.", []string{"pool", "node"}},
 	{"pool_filesystem_available_inodes", "Free filesystem inodes reported by statfs.", []string{"pool", "node"}},

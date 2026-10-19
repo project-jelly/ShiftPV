@@ -4,6 +4,43 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  - name: intentional retirement is distinct from an active Pool failure
+    interval: 1m
+    input_series:
+      - series: 'shiftpv_pool_ready{shiftpv="true",namespace="storage",pool="retired",node="worker"}'
+        values: '0+0x6'
+      - series: 'shiftpv_pool_inventory_valid{shiftpv="true",namespace="storage",pool="retired",node="worker"}'
+        values: '0+0x6'
+      - series: 'shiftpv_pool_registration_retired{shiftpv="true",namespace="storage",pool="retired",node="worker"}'
+        values: '1+0x6'
+      - series: 'shiftpv_pool_ready{shiftpv="true",namespace="storage",pool="active",node="worker"}'
+        values: '0+0x6'
+      - series: 'shiftpv_pool_inventory_valid{shiftpv="true",namespace="storage",pool="active",node="worker"}'
+        values: '0+0x6'
+      - series: 'shiftpv_pool_registration_retired{shiftpv="true",namespace="storage",pool="active",node="worker"}'
+        values: '0+0x6'
+      - series: 'shiftpv_metrics_snapshot_success{shiftpv="true",namespace="storage",source="metadata"}'
+        values: '1+0x6'
+      - series: 'shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",namespace="storage",source="metadata"}'
+        values: '1+60x6'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ShiftPVPoolNotReady
+        exp_alerts:
+          - exp_labels: {namespace: storage, pool: active, node: worker, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: ShiftPV Pool is not ready
+              description: 'Pool active on node worker is not ready for allocation. Inspect Pool conditions and the original mounted filesystem.'
+              runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnotready
+      - eval_time: 6m
+        alertname: ShiftPVPoolInventoryUnsafe
+        exp_alerts:
+          - exp_labels: {namespace: storage, pool: active, node: worker, severity: warning, shiftpv: "true"}
+            exp_annotations:
+              summary: ShiftPV Pool copy inventory is incomplete
+              description: 'The inventory of Pool active on node worker is invalid (shiftpv_pool_inventory_valid=0), so absence is not proven.'
+              runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolinventoryunsafe
+
   - name: lifecycle alerts fire after sustained failure and clear on recovery
     interval: 1m
     input_series:

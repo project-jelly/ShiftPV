@@ -642,7 +642,28 @@ Node 또는 API가 unavailable이면 기다린다. Unknown orphan이 있으면 �
 identity를 복원한 뒤, 삭제 요청 이후의 empty inventory와 controller 승인이 확인되면 등록 해제가 재개된다.
 `kubectl get shiftpvpool <name> -o yaml`에서 UID, 조건, inventory를 확인한다.
 원래 디스크를 복원할 수 없다면 데이터 부재를 추측해 finalizer나 `.shiftpv` marker를 제거하지 않는다.
-영구 소실된 Pool의 등록 포기는 현재 지원하지 않는다.
+
+### Unavailable Pool registration retirement
+
+원래 디스크를 복원할 수 없고 논리 참조를 모두 정산했다면 등록을 중단할 수 있다.
+Controller·Node를 함께 갱신한 뒤 정확한 UID로 요청한다.
+
+```bash
+pool_name=bulk-node-a
+pool_uid=$(kubectl get shiftpvpool "${pool_name}" -o jsonpath='{.metadata.uid}')
+kubectl annotate shiftpvpool "${pool_name}" "shiftpv.io/retire-registration=${pool_uid}" --overwrite
+kubectl wait shiftpvpool/"${pool_name}" \
+  --for=jsonpath='{.metadata.annotations.shiftpv\.io/registration-retired}'="${pool_uid}" --timeout=180s
+```
+
+요청 즉시 신규 배치를 막는다. 현재 owner·초기 예약·PV·Move hold/cleanup·실행 중인 helper가 남거나
+조회가 실패하면 승인을 보류한다. 아직 Pool에 묶이지 않은 요청과 이동 후보 노드는 예약으로 세지 않는다.
+승인 뒤에는 정상 peer가 이 Pool의 가용성을 기다리지 않는다. 중단된 Pool은 용량을 배정하지 않으며
+`shiftpv_pool_registration_retired=1`로 구분한다. 요청 annotation을 지워도 승인된 중단은 유지된다.
+
+기존 Pool CR·최종 제거 보호·경로 예약·마커·데이터는 남는다. 중단은 물리적 빈 상태나 identity release를
+증명하지 않는다. 완전 삭제는 원래 저장소 복원 후 기존 삭제 절차를 따라야 하며, 남은 볼륨의 손실 복구를
+제공하지 않는다. `registration-retired`는 Controller 전용 승인 값이므로 직접 설정하지 않는다.
 
 ## Uninstall
 

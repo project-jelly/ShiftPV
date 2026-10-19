@@ -71,7 +71,8 @@ func (p Pool) registrationAllocation() registration.Allocation {
 	return registration.Allocation{
 		UID: p.UID, NodeName: p.NodeName, MountPath: p.MountPath,
 		Policy: p.CapacityPolicy, Approved: p.RegistrationApproved(), Deleting: p.DeletionTimestamp != nil,
-		Unit: p.Status.CapacityUnit, Evidence: registration.Check{OK: verified, Known: true},
+		Retired: p.RegistrationRetired(),
+		Unit:    p.Status.CapacityUnit, Evidence: registration.Check{OK: verified, Known: true},
 	}
 }
 

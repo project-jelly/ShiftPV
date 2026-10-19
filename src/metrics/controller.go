@@ -235,6 +235,7 @@ func (c *Controller) poolSamples(pools []volumeapi.Pool, volumes map[string]volu
 		labels := []string{pool.Name, pool.NodeName}
 		ready, _ := pool.ReadyAt(time.Now(), staleAfter)
 		values = append(values, sample{"pool_ready", boolValue(ready), labels})
+		values = append(values, sample{"pool_registration_retired", boolValue(pool.RegistrationRetired()), labels})
 		inventoryValid, inventoryTruncated := false, false
 		if pool.Status.Inventory != nil {
 			inventoryValid, inventoryTruncated = pool.Status.Inventory.Valid, pool.Status.Inventory.Truncated

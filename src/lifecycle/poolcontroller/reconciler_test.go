@@ -20,6 +20,7 @@ type memoryPools struct {
 	ensured   []string
 	removed   []string
 	approved  []string
+	retired   []string
 	listError error
 }
 
@@ -39,6 +40,16 @@ func (m *memoryPools) RemovePoolFinalizer(_ context.Context, name, uid string) e
 
 func (m *memoryPools) ApprovePoolIdentityRelease(_ context.Context, name, uid string) error {
 	m.approved = append(m.approved, name+"/"+uid)
+	return nil
+}
+
+func (m *memoryPools) ApprovePoolRetirement(_ context.Context, name, uid string) error {
+	m.retired = append(m.retired, name+"/"+uid)
+	for i := range m.pools {
+		if m.pools[i].Name == name && m.pools[i].UID == uid {
+			m.pools[i].RetirementApproval = uid
+		}
+	}
 	return nil
 }
 
@@ -64,6 +75,10 @@ func (m *memorySafety) CheckPoolDeleteAfter(_ context.Context, _ string, _ types
 		m.called <- struct{}{}
 	}
 	return m.report, m.err
+}
+
+func (m *memorySafety) CheckPoolRetirement(ctx context.Context, name string, uid types.UID) (uninstallcheck.Report, error) {
+	return m.CheckPoolDeleteAfter(ctx, name, uid, time.Time{})
 }
 
 func TestReconcileProtectsActivePool(t *testing.T) {

@@ -51,6 +51,7 @@ type Allocation struct {
 	Policy    string
 	Approved  bool
 	Deleting  bool
+	Retired   bool
 	Unit      *CapacityUnit
 	Evidence  Check
 }

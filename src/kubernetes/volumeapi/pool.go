@@ -31,6 +31,8 @@ type Pool struct {
 	DeletionTimestamp       *metav1.Time
 	Finalizers              []string
 	IdentityReleaseApproval string
+	RetirementRequest       string
+	RetirementApproval      string
 	CapacityProbeRequest    string
 	Status                  PoolStatus
 }
@@ -217,7 +219,7 @@ func (r *Registry) PoolForNode(ctx context.Context, nodeName string) (Pool, erro
 	}
 	var result Pool
 	for _, pool := range pools {
-		if pool.NodeName != nodeName {
+		if pool.NodeName != nodeName || pool.RegistrationRetired() {
 			continue
 		}
 		if result.NodeName != "" {
@@ -245,7 +247,7 @@ func (r *Registry) PoolForNodeLifecycle(ctx context.Context, nodeName string) (P
 	candidates := make([]Pool, 0, 2)
 	deleting := make([]Pool, 0, 1)
 	for _, pool := range pools {
-		if pool.NodeName != nodeName {
+		if pool.NodeName != nodeName || pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
 			continue
 		}
 		candidates = append(candidates, pool)
@@ -575,6 +577,12 @@ func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 }
 
 func (p Pool) readyAt(now time.Time, staleAfter time.Duration, generation int64) (bool, string) {
+	if p.RegistrationRetired() {
+		return false, "PoolRegistrationRetired"
+	}
+	if p.RetirementRequested() {
+		return false, "PoolRetirementPending"
+	}
 	if p.DeletionTimestamp != nil {
 		return false, "PoolDeregistering"
 	}
@@ -712,6 +720,7 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, PoolGroup: poolGroup, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy, CapacityPolicy: capacityPolicy,
 		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), DeletionTimestamp: object.GetDeletionTimestamp(),
 		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation],
+		RetirementRequest: object.GetAnnotations()[PoolRetirementRequestAnnotation], RetirementApproval: object.GetAnnotations()[PoolRetirementApprovalAnnotation],
 		CapacityProbeRequest: object.GetAnnotations()[PoolCapacityProbeRequestAnnotation], Status: status,
 	}, nil
 }

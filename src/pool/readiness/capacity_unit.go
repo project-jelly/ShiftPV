@@ -136,7 +136,9 @@ func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]alloca
 			continue
 		}
 		observed := allocationObservation{}
-		if check := pool.BackingConfigurationCheck(); !check.OK {
+		if pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
+			observed.backing = Check{Known: true, Reason: "PoolRegistrationRetired", Message: "registration is retired; storage and identity remain preserved"}
+		} else if check := pool.BackingConfigurationCheck(); !check.OK {
 			observed.backing = check
 		} else if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
 			observed.unit, observed.backing = r.Inspector.InspectCapacityUnit(pool)
@@ -146,7 +148,8 @@ func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]alloca
 		allocations = append(allocations, registration.Allocation{
 			UID: pool.UID, NodeName: pool.NodeName, MountPath: pool.MountPath,
 			Policy: pool.CapacityPolicy, Approved: pool.RegistrationApproved(), Deleting: pool.DeletionTimestamp != nil,
-			Unit: observed.unit, Evidence: observed.backing,
+			Retired: pool.RegistrationRetired(),
+			Unit:    observed.unit, Evidence: observed.backing,
 		})
 	}
 	for _, target := range allocations {

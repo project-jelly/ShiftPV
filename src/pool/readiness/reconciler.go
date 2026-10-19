@@ -131,6 +131,7 @@ func (r *Reconciler) observationSnapshot(pools []volumeapi.Pool, changed []Obser
 		if !ok || observation.Pool.Generation != pool.Generation {
 			observation = Observation{Pool: pool}
 		}
+		observation.Pool = pool
 		live[pool.UID] = observation
 		snapshot = append(snapshot, observation)
 	}
@@ -145,6 +146,16 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 	now := time.Now().UTC()
 	if r.Now != nil {
 		now = r.Now().UTC()
+	}
+	if pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
+		status := pool.Status
+		status.Conditions = append([]metav1.Condition(nil), pool.Status.Conditions...)
+		status.RegistrationApproved = pool.RegistrationApproved()
+		status.ObservedGeneration = pool.Generation
+		check := Check{Known: true, Reason: "PoolRegistrationRetired", Message: "registration is retired; storage and identity remain preserved"}
+		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, check, pool.Generation, now))
+		status.Inventory = &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "PoolRegistrationRetired: no storage observation requested"}
+		return Result{}, r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status)
 	}
 	result = r.inspectPool(pool, allocation)
 	status, cleanupReady := r.observedStatus(ctx, pool, result, now)

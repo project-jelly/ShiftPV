@@ -44,6 +44,8 @@ const (
 	PoolConditionIdentityReleased        = "IdentityReleased"
 	PoolProtectionFinalizer              = "shiftpv.io/pool-protection"
 	PoolIdentityReleaseAnnotation        = "shiftpv.io/release-pool-identity"
+	PoolRetirementRequestAnnotation      = "shiftpv.io/retire-registration"
+	PoolRetirementApprovalAnnotation     = "shiftpv.io/registration-retired"
 	PoolConditionWritable                = "Writable"
 	PoolConditionCapacityReadable        = "CapacityReadable"
 	DefaultPoolReadinessStaleAfter       = 3 * time.Minute
