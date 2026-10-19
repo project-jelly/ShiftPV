@@ -14,7 +14,7 @@ pool=$(kubectl get shiftpvpools -o json | jq -ce --arg node "${source_node}" \
  '[.items[] | select(.spec.nodeName==$node)] | select(length==1) | .[0]')
 name=$(jq -er '.metadata.name' <<<"${pool}")
 uid=$(jq -er '.metadata.uid' <<<"${pool}")
-root=$(jq -er '.spec.mountPath | select(startswith("/var/lib/") and .!="/var/lib/")' <<<"${pool}")
+root=$(jq -er '.spec.mountPath | select(.=="/mnt/shiftpv")' <<<"${pool}")
 peer_root=/var/lib/shiftpv-retirement-test
 jq '{apiVersion,kind,metadata:{name:.metadata.name},spec}' <<<"${pool}" >"${work_dir}/original.json"
 test -z "$(kubectl get namespace "${namespace}" --ignore-not-found -o name)"
