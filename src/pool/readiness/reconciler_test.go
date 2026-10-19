@@ -3,6 +3,7 @@ package readiness
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ func (f fakeInspector) InspectCapacityUnit(volumeapi.Pool) (*volumeapi.PoolCapac
 }
 
 type fakeRepository struct {
+	mu         sync.Mutex
 	pool       volumeapi.Pool
 	pools      []volumeapi.Pool
 	currentUID string
@@ -48,6 +50,8 @@ func testRegistration(pool volumeapi.Pool) volumeapi.Pool {
 }
 
 func (f *fakeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if errors.Is(f.err, volumeapi.ErrPoolNotFound) {
 		return nil, nil
 	}
@@ -65,6 +69,8 @@ func (f *fakeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Poo
 }
 
 func (f *fakeRepository) SetPoolStatus(_ context.Context, name, uid, node string, status volumeapi.PoolStatus) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	pools := f.pools
 	if pools == nil {
 		pools = []volumeapi.Pool{f.pool}

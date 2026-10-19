@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,8 @@ func (f backingResolver) Resolve(device string) ([]capacityunit.Extent, error) {
 // Registry encoding, registration, path validation and write probes are real;
 // mount/sysfs and inventory observations are injected at their existing seams.
 type backingFixture struct {
+	countsMu   sync.Mutex
+	stateMu    sync.RWMutex
 	registry   *volumeapi.Registry
 	client     *dynamicfake.FakeDynamicClient
 	reconciler *Reconciler
@@ -65,17 +68,28 @@ func newBackingFixture(t *testing.T) *backingFixture {
 	f.registry = &volumeapi.Registry{Client: f.client, Now: func() time.Time { return testTime }}
 	f.probe, err = NewProbeWithDependencies(host, ProbeDependencies{
 		Allocations: backingResolver(func(device string) ([]capacityunit.Extent, error) {
+			f.stateMu.RLock()
+			defer f.stateMu.RUnlock()
 			if extents, ok := f.extents[device]; ok {
-				return extents, nil
+				return append([]capacityunit.Extent(nil), extents...), nil
 			}
 			return nil, fmt.Errorf("device %s unavailable", device)
 		}),
 		InspectDirectory: inspectDirectory,
-		Write:            func(path string) error { f.writes[filepath.Base(path)]++; return writeProbe(path) },
+		Write: func(path string) error {
+			f.countsMu.Lock()
+			f.writes[filepath.Base(path)]++
+			f.countsMu.Unlock()
+			return writeProbe(path)
+		},
 		StatFS: func(string) (capacity.Filesystem, error) {
 			return capacity.Filesystem{TotalBytes: 2 << 30, AvailableBytes: 1 << 30, AvailableInodes: 64}, nil
 		},
-		ListMounts: func() ([]mountutils.MountInfo, error) { return f.mounts, nil },
+		ListMounts: func() ([]mountutils.MountInfo, error) {
+			f.stateMu.RLock()
+			defer f.stateMu.RUnlock()
+			return append([]mountutils.MountInfo(nil), f.mounts...), nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +100,9 @@ func newBackingFixture(t *testing.T) *backingFixture {
 	}
 	f.reconciler.Now = func() time.Time { return testTime }
 	f.reconciler.Inventory = func(_ context.Context, pool volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
+		f.countsMu.Lock()
 		f.scans[pool.Name]++
+		f.countsMu.Unlock()
 		if err := f.probe.VerifyBacking(pool); err != nil {
 			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: err.Error()}
 		}
@@ -229,7 +245,9 @@ func TestEarlyProbeReturnReplacesSameGenerationBackingSuccess(t *testing.T) {
 					if scenario == "directory unavailable" {
 						return os.ErrPermission
 					}
+					f.stateMu.Lock()
 					f.mounts = []mountutils.MountInfo{f.mounts[0], f.mounts[len(f.mounts)-1]}
+					f.stateMu.Unlock()
 				}
 				return inspectDirectory(path)
 			}
@@ -255,7 +273,9 @@ func TestRegistrationRecheckNeverApprovesOwnHealthyOverlappingCandidate(t *testi
 		if pool.Name == "a" {
 			// The first complete scan has succeeded. Only the final admission
 			// recheck can observe this newly conflicting peer allocation.
+			f.stateMu.Lock()
 			f.extents["8:2"] = append([]capacityunit.Extent(nil), f.extents["8:1"]...)
+			f.stateMu.Unlock()
 		}
 		return result
 	}
@@ -306,7 +326,9 @@ func TestRegistrationRecheckRejectsOwnBackingChangeAfterInventory(t *testing.T) 
 	f.reconciler.Inventory = func(ctx context.Context, pool volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
 		result := inventory(ctx, pool, now)
 		if pool.Name == "a" {
+			f.stateMu.Lock()
 			f.extents["8:1"] = []capacityunit.Extent{{Device: "8:0", Start: 300, Sectors: 100}}
+			f.stateMu.Unlock()
 		}
 		return result
 	}

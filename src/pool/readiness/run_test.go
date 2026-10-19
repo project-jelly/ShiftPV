@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,7 +37,10 @@ func TestChangingInventoryRecoversWithoutExternalWake(t *testing.T) {
 	r.Clock = c
 	passes := make(chan []Observation, 8)
 	scans := map[string]int{}
+	var scansMu sync.Mutex
 	r.Inventory = func(_ context.Context, p volumeapi.Pool, _ time.Time) volumeapi.PoolInventory {
+		scansMu.Lock()
+		defer scansMu.Unlock()
 		scans[p.UID]++
 		if p.UID == "changing-uid" && scans[p.UID] <= 2 {
 			return volumeapi.PoolInventory{Reason: volumeapi.InventoryPhysicalChanged, Message: volumeapi.InventoryPhysicalChanged}

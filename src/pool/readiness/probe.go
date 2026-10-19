@@ -33,6 +33,8 @@ type Result struct {
 	MountIdentity    *volumeapi.PoolMountIdentity
 }
 
+// Calls for different Pool UIDs may overlap. Implementations must not share
+// mutable observation state between those calls.
 type Inspector interface {
 	AllocationInspector
 	Inspect(volumeapi.Pool) Result

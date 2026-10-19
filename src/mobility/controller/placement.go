@@ -61,6 +61,10 @@ func (r *Reconciler) placementPod(move volumeapi.Move, replacement *corev1.Pod, 
 	sort.Strings(candidates)
 	affinity := placementAffinity(replacement.Spec.Affinity, candidates)
 	zero := int64(0)
+	// Admission must agree with the dedicated class for both initial placement
+	// and approved recreation; workload priority never authorizes preemption.
+	priority := int32(0)
+	never := corev1.PreemptNever
 	controller := true
 	blockOwnerDeletion := true
 	return &corev1.Pod{
@@ -81,8 +85,9 @@ func (r *Reconciler) placementPod(move volumeapi.Move, replacement *corev1.Pod, 
 			Affinity:                      affinity,
 			Tolerations:                   append([]corev1.Toleration(nil), replacement.Spec.Tolerations...),
 			SchedulerName:                 replacement.Spec.SchedulerName,
-			PriorityClassName:             replacement.Spec.PriorityClassName,
-			PreemptionPolicy:              replacement.Spec.PreemptionPolicy,
+			PriorityClassName:             r.PlacementPriorityClassName,
+			Priority:                      &priority,
+			PreemptionPolicy:              &never,
 			RuntimeClassName:              replacement.Spec.RuntimeClassName,
 			HostNetwork:                   replacement.Spec.HostNetwork,
 			OS:                            replacement.Spec.OS,

@@ -221,7 +221,7 @@ jobs:
   kubernetes-primitives:
     name: kubernetes-primitives
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       CLUSTER_NAME: shiftpv-primitives-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -241,6 +241,18 @@ jobs:
 
       - name: Verify CRD upgrades and Kubernetes API contracts
         run: make v04-kubernetes-primitives
+
+      - name: Verify stale cancellation and non-preempting recreation
+        run: bash test/regression/run-native.sh
+
+      - name: Upload native boundary regression evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boundary-regressions
+          path: .tmp/boundary-regressions/native
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Delete isolated kind cluster
         if: always()

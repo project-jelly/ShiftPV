@@ -48,8 +48,8 @@ func (r *Reconciler) inspectPool(pool volumeapi.Pool, allocation allocationObser
 	return result
 }
 
-// Reconcile serializes this node worker's observations. A candidate's approval
-// additionally requires a fresh registration snapshot and live backing read.
+// New registration approvals are serialized independently of existing Pool
+// observations, with a fresh registration snapshot and live backing read.
 // Controller placement rechecks the whole approved set, including conflicts.
 func (r *Reconciler) recheckRegistration(ctx context.Context, pool volumeapi.Pool, result *Result) error {
 	pools, err := r.Pools.ListPoolRegistrations(ctx)
@@ -66,7 +66,7 @@ func (r *Reconciler) recheckRegistration(ctx context.Context, pool volumeapi.Poo
 	if !current {
 		return fmt.Errorf("%w: Pool registration changed during observation", volumeapi.ErrStateConflict)
 	}
-	allocation := r.capacityIsolation(pools)[pool.UID]
+	allocation := r.capacityIsolation(ctx, pools, pool.UID)[pool.UID]
 	result.Independent = allocation.independent
 	if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
 		if !allocation.backing.OK {

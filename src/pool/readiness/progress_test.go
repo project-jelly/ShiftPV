@@ -71,6 +71,7 @@ func TestPoolDeadlineAllowsIndependentObservationAndRecovery(t *testing.T) {
 			if _, ok := repository.statuses[a.Name]; ok {
 				t.Fatal("expired Pool observation published status")
 			}
+			waitPoolWorkers(t, r)
 			blocked, repository.blocked = false, false
 			if err := r.Reconcile(ctx); err != nil {
 				t.Fatal(err)

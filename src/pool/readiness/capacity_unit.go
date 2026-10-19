@@ -1,6 +1,7 @@
 package readiness
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -128,21 +129,33 @@ func (p *Probe) VerifyCapacityUnit(pool volumeapi.Pool) error {
 }
 
 // capacityIsolation collects read-only evidence before any write or inventory.
-func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]allocationObservation {
+func (r *Reconciler) capacityIsolation(ctx context.Context, pools []volumeapi.Pool, heldUID string) map[string]allocationObservation {
 	results := make(map[string]allocationObservation)
 	allocations := []registration.Allocation{}
+	var peers []volumeapi.Pool
 	for _, pool := range pools {
 		if pool.NodeName != r.NodeName {
 			continue
 		}
-		observed := allocationObservation{}
-		if pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
-			observed.backing = Check{Known: true, Reason: "PoolRegistrationRetired", Message: "registration is retired; storage and identity remain preserved"}
-		} else if check := pool.BackingConfigurationCheck(); !check.OK {
-			observed.backing = check
-		} else if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
-			observed.unit, observed.backing = r.Inspector.InspectCapacityUnit(pool)
+		if heldUID != "" && pool.UID == heldUID {
+			// Keep this call inside its current worker until the host really
+			// returns. A nested goroutine must not outlive the UID execution gate.
+			results[pool.UID] = r.capacityObservation(ctx, pool, heldUID)
+		} else {
+			peers = append(peers, pool)
 		}
+	}
+	work := parallelPoolWork(ctx, peers, func(ctx context.Context, pool volumeapi.Pool) poolWorkResult {
+		return poolWorkResult{allocation: r.capacityObservation(ctx, pool, "")}
+	})
+	for uid, result := range work {
+		results[uid] = result.allocation
+	}
+	for _, pool := range pools {
+		if pool.NodeName != r.NodeName {
+			continue
+		}
+		observed := results[pool.UID]
 		observed.independent = observed.backing
 		results[pool.UID] = observed
 		allocations = append(allocations, registration.Allocation{
@@ -164,6 +177,35 @@ func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]alloca
 		results[target.UID] = observed
 	}
 	return results
+}
+
+func (r *Reconciler) capacityObservation(ctx context.Context, pool volumeapi.Pool, heldUID string) allocationObservation {
+	if pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
+		return allocationObservation{backing: Check{Known: true, Reason: "PoolRegistrationRetired", Message: "registration is retired; storage and identity remain preserved"}}
+	}
+	if check := pool.BackingConfigurationCheck(); !check.OK {
+		return allocationObservation{backing: check}
+	}
+	if pool.CapacityPolicy != volumeapi.PoolCapacityPolicyFixedBlock {
+		return allocationObservation{}
+	}
+	if err := ctx.Err(); err != nil {
+		return allocationObservation{backing: Check{Reason: "CapacityObservationUnavailable", Message: err.Error()}}
+	}
+	run := func(context.Context) poolWorkResult {
+		unit, check := r.Inspector.InspectCapacityUnit(pool)
+		return poolWorkResult{allocation: allocationObservation{unit: unit, backing: check}}
+	}
+	// Approval rechecks run inside this Pool's existing worker. Inspect its own
+	// backing inline; peers still use their bounded independent workers.
+	if heldUID != "" && heldUID == pool.UID {
+		return run(ctx).allocation
+	}
+	work := r.poolWork(ctx, pool, run)
+	if work.err != nil {
+		return allocationObservation{backing: Check{Reason: "CapacityObservationUnavailable", Message: work.err.Error()}}
+	}
+	return work.allocation
 }
 
 type allocationObservation struct {
