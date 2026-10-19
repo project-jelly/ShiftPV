@@ -65,6 +65,7 @@ original UID; cancellation restores source authority, not that Pod's lifetime.
 The recorded placement Pod UID fences preparation through execution approval.
 After approval, the controller may recreate the same Move-owned reservation on
 the persisted destination; this does not change the Pool, copy plan or owner.
+Recreation keeps the same priority-0, non-preempting policy used for preparation.
 Cancellation may remove a recreated reservation owned by the exact Move UID.
 Removal uses the current observed Pod UID as a DELETE precondition and waits for
 actual API absence before releasing its hold. Foreign ownership remains a conflict.

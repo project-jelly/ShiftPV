@@ -66,7 +66,7 @@ func (r *Reconciler) recheckRegistration(ctx context.Context, pool volumeapi.Poo
 	if !current {
 		return fmt.Errorf("%w: Pool registration changed during observation", volumeapi.ErrStateConflict)
 	}
-	allocation := r.capacityIsolation(pools)[pool.UID]
+	allocation := r.capacityIsolation(ctx, pools, pool.UID)[pool.UID]
 	result.Independent = allocation.independent
 	if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
 		if !allocation.backing.OK {

@@ -28,13 +28,6 @@ func (r *Reconciler) ensurePreparedPlacement(ctx context.Context, move volumeapi
 	desiredMove := move
 	desiredMove.Status.CandidateNodes = candidates
 	desired := r.placementPod(desiredMove, live, namesFor(move.Name))
-	never := corev1.PreemptNever
-	zero := int32(0)
-	// Priority admission derives both fields from the named PriorityClass.
-	// Explicit expectations fail closed if that class is misconfigured.
-	desired.Spec.PriorityClassName = r.PlacementPriorityClassName
-	desired.Spec.Priority = &zero
-	desired.Spec.PreemptionPolicy = &never
 	placement, err := r.ensurePlacementPod(ctx, move, desired)
 	if err != nil || placement == nil || placement.DeletionTimestamp != nil {
 		return nil, "", err

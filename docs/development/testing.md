@@ -83,6 +83,12 @@ uninstall 후 용량 객체 GC를 검증한다. `get_capacity_test.go`는 여러
 | Measurement | 측정 전후 Pool/mount/copy 변경, API·du 실패, read-only bind, mount 유실 |
 | Inventory | generation stale, invalid signature/identity, incomplete/truncated scan, copy reappearance, 물리 수집 전후 생성 완료, stage 이동·경로 타입 변경·parent symlink, 경로 변경 중 부재 승인 거부 |
 | Removal | unresolved Volume/Move/hold, unavailable node, API read error, generation-fenced empty inventory |
+| Quiesce cancellation | 이전 attempt 조회 뒤 같은 ConfigMap UID에 새 attempt 갱신; UID/RV 삭제 조건으로 새 attempt 보존 (DI + 실제 API) |
+| Placement recreation | 승인 후 재생성에도 priority 0 / Never 유지; 실제 scheduler에서 공간 부족 중 기존 Pod 보존, 공간 반환 후 같은 예약 Pod 진행 |
+| Pool observation | 취소에 응답하지 않는 allocation·filesystem·inventory·release·status 호출 주입; peer 진행, UID당 단일 작업, 만료 결과 폐기, 복구 후 fresh 승인 |
+
+`test/regression/run-native.sh`는 CI의 `kubernetes-primitives`에서 별도 Kind 클러스터로
+취소 경쟁과 예약 재생성을 검증한다. Pool 호출 중단은 `probe_isolation_test.go`의 DI 검증이다.
 
 각 fault case는 반복 reconcile 뒤 다음을 함께 확인한다.
 

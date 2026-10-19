@@ -133,7 +133,7 @@ func TestNestedPoolRootsAreRejectedBeforeWrites(t *testing.T) {
 	a := volumeapi.Pool{Name: "pool-a", UID: "a-uid", NodeName: "node", MountPath: "/mnt/a", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
 	b := volumeapi.Pool{Name: "pool-b", UID: "b-uid", NodeName: "node", MountPath: "/mnt/a/nested", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
 	r := &Reconciler{NodeName: "node", Inspector: fakeAllocationInspector{}}
-	observations := r.capacityIsolation([]volumeapi.Pool{testRegistration(a), testRegistration(b)})
+	observations := r.capacityIsolation(context.Background(), []volumeapi.Pool{testRegistration(a), testRegistration(b)}, "")
 	for _, p := range []volumeapi.Pool{a, b} {
 		if observed := observations[p.UID]; observed.independent.OK || observed.independent.Reason != "CapacityPathsOverlap" {
 			t.Fatalf("nested root approved: %+v", observed)
@@ -151,7 +151,7 @@ func TestDeletingLegacyDuplicateStillCanBeInspected(t *testing.T) {
 	for i := range pools {
 		pools[i] = testRegistration(pools[i])
 	}
-	observations := r.capacityIsolation(pools)
+	observations := r.capacityIsolation(context.Background(), pools, "")
 	if observed := observations["a-uid"]; observed.independent.Reason != "" && !observed.independent.OK {
 		t.Fatal("terminating legacy Pool was blocked from cleanup inspection")
 	}
@@ -196,7 +196,7 @@ func TestMissingLivePeerEvidenceDoesNotReuseOldAnchor(t *testing.T) {
 	left.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(left)
 	right.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(right)
 	r := &Reconciler{NodeName: "node", Inspector: changedPeerInspector{inspector}}
-	results := r.capacityIsolation([]volumeapi.Pool{testRegistration(left), testRegistration(right)})
+	results := r.capacityIsolation(context.Background(), []volumeapi.Pool{testRegistration(left), testRegistration(right)}, "")
 	if results["a"].independent.Reason != "CapacityPeerUnproven" || results["b"].independent.Reason != "CapacityAllocationUnproven" {
 		t.Fatalf("ambiguous peer results=%+v", results)
 	}

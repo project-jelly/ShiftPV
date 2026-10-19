@@ -21,6 +21,8 @@ type Repository interface {
 
 type Reconciler struct {
 	reconcileMu sync.Mutex
+	workMu      sync.Mutex
+	inFlight    map[string]*poolWork
 	// Metrics snapshots retain peers across a targeted retry. Never used as
 	// storage authority; every reconciliation still reads live registrations.
 	lastObservations map[string]Observation
@@ -29,8 +31,8 @@ type Reconciler struct {
 	Inspector        Inspector
 	Interval         time.Duration
 	Clock            clock.WithTicker
-	// PoolTimeout bounds context-aware inventory, release and API work for
-	// each Pool. It cannot interrupt synchronous host filesystem syscalls.
+	// PoolTimeout bounds each Pool observation's wait. A blocked host call keeps
+	// one worker until it returns, without delaying other Pools or starting duplicates.
 	PoolTimeout time.Duration
 	Wake        <-chan struct{}
 	Now         func() time.Time
@@ -84,7 +86,7 @@ func (r *Reconciler) reconcile(ctx context.Context, only map[string]bool) (retry
 		return nil, err
 	}
 	retry = make(map[string]bool)
-	isolation := r.capacityIsolation(pools)
+	isolation := r.capacityIsolation(ctx, pools, "")
 	observed := false
 	for _, pool := range pools {
 		if ctx.Err() != nil {
@@ -94,13 +96,10 @@ func (r *Reconciler) reconcile(ctx context.Context, only map[string]bool) (retry
 			continue
 		}
 		observed = true
-		timeout := r.PoolTimeout
-		if timeout == 0 {
-			timeout = defaultPoolTimeout
+		result, err := r.observePool(ctx, pool, isolation[pool.UID])
+		if r.Observe != nil {
+			r.Observe(pool, result, err)
 		}
-		poolCtx, cancel := context.WithTimeout(ctx, timeout)
-		result, err := r.reconcilePool(poolCtx, pool, isolation[pool.UID])
-		cancel()
 		observations = append(observations, Observation{Pool: pool, Result: result, Err: err})
 		retry[pool.UID] = result.RetryInventory
 		reconcileErr = errors.Join(reconcileErr, err)
@@ -140,9 +139,6 @@ func (r *Reconciler) observationSnapshot(pools []volumeapi.Pool, changed []Obser
 }
 
 func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, allocation allocationObservation) (result Result, reconcileErr error) {
-	if r.Observe != nil {
-		defer func() { r.Observe(pool, result, reconcileErr) }()
-	}
 	now := time.Now().UTC()
 	if r.Now != nil {
 		now = r.Now().UTC()
@@ -158,7 +154,13 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 		return Result{}, r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status)
 	}
 	result = r.inspectPool(pool, allocation)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	status, cleanupReady := r.observedStatus(ctx, pool, result, now)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if !pool.RegistrationApproved() && status.RegistrationApproved {
 		if err := r.recheckRegistration(ctx, pool, &result); err != nil {
 			return result, err
