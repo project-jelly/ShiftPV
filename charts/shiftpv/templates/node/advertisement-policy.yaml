@@ -1,0 +1,60 @@
+{{- $nodeAccount := include "shiftpv.nodeServiceAccount" . }}
+{{- if or (eq $nodeAccount (include "shiftpv.controllerServiceAccount" .)) (eq $nodeAccount (include "shiftpv.helperServiceAccount" .)) }}
+{{- fail "Node ServiceAccount must be distinct from controller and helper ServiceAccounts" }}
+{{- end }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "shiftpv.fullname" . }}-node-advertisement
+  labels:
+    {{- include "shiftpv.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [UPDATE]
+        resources: [pods]
+  matchConditions:
+    - name: node-service-account
+      expression: {{ printf "request.userInfo.username == 'system:serviceaccount:%s:%s'" .Release.Namespace (include "shiftpv.nodeServiceAccount" .) | quote }}
+  variables:
+    - name: allowedAnnotations
+      expression: "['shiftpv.io/node-effects', 'shiftpv.io/node-move-cleanup', 'shiftpv.io/node-rpc-certificate', 'shiftpv.io/node-rpc-port']"
+    - name: before
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: after
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+  validations:
+    - expression: >-
+        has(request.userInfo.extra) &&
+        'authentication.kubernetes.io/pod-name' in request.userInfo.extra &&
+        'authentication.kubernetes.io/pod-uid' in request.userInfo.extra &&
+        request.userInfo.extra['authentication.kubernetes.io/pod-name'] == [oldObject.metadata.name] &&
+        request.userInfo.extra['authentication.kubernetes.io/pod-uid'] == [string(oldObject.metadata.uid)]
+      message: ShiftPV Node may update only its token-bound Pod
+    - expression: "object.spec == oldObject.spec"
+      message: ShiftPV Node may not change Pod execution settings
+    - expression: >-
+        has(object.metadata.labels) == has(oldObject.metadata.labels) &&
+        (!has(object.metadata.labels) || object.metadata.labels == oldObject.metadata.labels) &&
+        has(object.metadata.finalizers) == has(oldObject.metadata.finalizers) &&
+        (!has(object.metadata.finalizers) || object.metadata.finalizers == oldObject.metadata.finalizers) &&
+        has(object.metadata.ownerReferences) == has(oldObject.metadata.ownerReferences) &&
+        (!has(object.metadata.ownerReferences) || object.metadata.ownerReferences == oldObject.metadata.ownerReferences) &&
+        variables.before.all(k, k in variables.allowedAnnotations ||
+          (k in variables.after && variables.before[k] == variables.after[k])) &&
+        variables.after.all(k, k in variables.allowedAnnotations ||
+          (k in variables.before && variables.after[k] == variables.before[k]))
+      message: ShiftPV Node may change only capability and RPC annotations
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "shiftpv.fullname" . }}-node-advertisement
+  labels:
+    {{- include "shiftpv.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "shiftpv.fullname" . }}-node-advertisement
+  validationActions: [Deny]

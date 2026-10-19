@@ -1,13 +1,72 @@
 package helm
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
+	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
+
+func TestNodeAdvertisementPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name, account string
+		args          []string
+	}{
+		{"default", fullname + "-node", nil},
+		{"external account", "external-node", []string{"--set", "serviceAccount.node.create=false,serviceAccount.node.name=external-node"}},
+		{"RPC disabled", fullname + "-node", []string{"--set", "nodeRPC.enabled=false"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output, err := render(t, test.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var policy admissionv1.ValidatingAdmissionPolicy
+			var binding admissionv1.ValidatingAdmissionPolicyBinding
+			for _, doc := range strings.Split(output, "\n---") {
+				var header struct{ Kind string }
+				if err := yaml.Unmarshal([]byte(doc), &header); err != nil {
+					t.Fatal(err)
+				}
+				switch header.Kind {
+				case "ValidatingAdmissionPolicy":
+					if err := yaml.Unmarshal([]byte(doc), &policy); err != nil {
+						t.Fatal(err)
+					}
+				case "ValidatingAdmissionPolicyBinding":
+					if err := yaml.Unmarshal([]byte(doc), &binding); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if policy.Name == "" || policy.Spec.FailurePolicy == nil || *policy.Spec.FailurePolicy != admissionv1.Fail ||
+				binding.Spec.PolicyName != policy.Name || !slices.Equal(binding.Spec.ValidationActions, []admissionv1.ValidationAction{admissionv1.Deny}) {
+				t.Fatal("Node advertisement must be enforced by a fail-closed bound policy")
+			}
+			wantActor := fmt.Sprintf("request.userInfo.username == 'system:serviceaccount:storage:%s'", test.account)
+			if len(policy.Spec.MatchConditions) != 1 || policy.Spec.MatchConditions[0].Expression != wantActor {
+				t.Fatal("policy is not scoped to the configured Node ServiceAccount")
+			}
+			if policy.Spec.MatchConstraints == nil || len(policy.Spec.MatchConstraints.ResourceRules) != 1 {
+				t.Fatal("policy must constrain only Pod updates")
+			}
+			rule := policy.Spec.MatchConstraints.ResourceRules[0]
+			if !slices.Equal(rule.Resources, []string{"pods"}) || !slices.Equal(rule.Operations, []admissionv1.OperationType{admissionv1.Update}) {
+				t.Fatal("policy unexpectedly affects another resource or operation")
+			}
+		})
+	}
+	for _, account := range []string{fullname + "-controller", fullname + "-helper"} {
+		output, err := render(t, "--set", "serviceAccount.node.name="+account)
+		if err == nil || !strings.Contains(output, "Node ServiceAccount must be distinct") {
+			t.Fatal("shared Node credentials must fail before changing runtime permissions")
+		}
+	}
+}
 
 func workloadSpec(t *testing.T, raw, kind string) corev1.PodSpec {
 	t.Helper()

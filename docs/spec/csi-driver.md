@@ -201,6 +201,18 @@ journal을 종결하고 해당 hold를 해제한다.
 
 ## Failure boundary
 
+### Node API permissions
+
+Node의 Pod update는 capability·RPC 공개 인증서 광고에 사용한다. Chart는 Pod-bound token의 Pod name·UID가
+수정 대상과 같은지, 실행 사양과 그 외 metadata가 그대로인지 Kubernetes ValidatingAdmissionPolicy로 검사한다.
+Node ServiceAccount를 Controller·helper와 공유하면 chart가 배포를 거부한다. 정책은 RPC 비활성화 때도 적용한다.
+
+Node의 cluster-wide Volume/Move status 권한은 생성 영수증, native cleanup 영수증과 publication 기록에
+필요하다. 이 권한이나 privileged host 접근이 불필요해졌다는 의미는 아니다. Node는 신뢰된 저장소 실행자이며,
+이번 Pod 정책은 status 전체를 필드별로 격리하거나 침해된 host를 격리하는 경계가 아니다.
+
+Pod token의 name·UID는 [Kubernetes authentication metadata](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#additional-metadata-in-pod-bound-tokens)를 사용한다.
+
 일시적인 API, process 또는 network 실패는 durable journal과 holds를 유지한 채 재시도한다. 모순되거나
 복구 권한을 자동으로 증명할 수 없는 Move는 `Blocked`, cleanup은 `NeedsReview`이며 삭제, owner 전환과
 capacity release가 모두 닫힌다.
