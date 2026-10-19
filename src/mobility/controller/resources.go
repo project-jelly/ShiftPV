@@ -51,7 +51,7 @@ func (r *Reconciler) ensureCopyResources(ctx context.Context, move volumeapi.Mov
 	if err := r.ensureSourceService(ctx, move, names); err != nil {
 		return err
 	}
-	ready, err := r.sourcePodReady(ctx, names.SourcePod)
+	ready, err := r.sourcePodReady(ctx, move, names)
 	if err != nil {
 		return err
 	}

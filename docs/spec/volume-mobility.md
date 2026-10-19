@@ -77,6 +77,12 @@ update pins the destination and removes only ShiftPV's gate, preserving user
 constraints. Publication wait and source cleanup revisit held replacements;
 recreation does not require returning to the Copying phase or changing owner.
 
+If multiple live consumers appear after approval, execution keeps observing its
+Jobs and cleanup but waits with `MultipleConsumers`. It resumes when one consumer
+remains; it never selects an arbitrary replacement. Before approval this shape
+still defers or cancels preparation. A terminal Move-owned rsync source Pod is
+deleted with its exact UID and recreated; copying waits for the new Pod's readiness.
+
 Before switching, settle active legacy work with its compatible old controller
 and helper images. Exclude new work through cutover, run the candidate image's
 read-only `upgrade-check`, and require a complete report with no blockers before
