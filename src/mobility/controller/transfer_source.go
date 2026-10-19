@@ -15,10 +15,23 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
-func (r *Reconciler) sourcePodReady(ctx context.Context, name string) (bool, error) {
-	pod, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, name, metav1.GetOptions{})
+func (r *Reconciler) sourcePodReady(ctx context.Context, move volumeapi.Move, names resourceNames) (bool, error) {
+	pod, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.SourcePod, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("read rsync source Pod: %w", err)
+	}
+	if pod.DeletionTimestamp != nil {
+		return false, nil
+	}
+	expected := moveObjectMeta(move, names.SourcePod, r.Namespace, sourceLabels(names, move))
+	if !sameMoveObject(&pod.ObjectMeta, &expected) {
+		return false, fmt.Errorf("rsync source Pod %q identity changed", names.SourcePod)
+	}
+	if terminalPod(pod) {
+		return false, nil
 	}
 	for _, condition := range pod.Status.Conditions {
 		if condition.Type == corev1.PodReady {
@@ -127,6 +140,19 @@ func (r *Reconciler) ensureSourcePod(ctx context.Context, move volumeapi.Move, n
 	}
 	if !sameMoveObject(&current.ObjectMeta, &expected.ObjectMeta) || !sameSourcePod(current, expected) {
 		return fmt.Errorf("rsync source Pod %q identity changed", names.SourcePod)
+	}
+	if terminalPod(current) {
+		if current.UID == "" {
+			return fmt.Errorf("terminal rsync source Pod %q has no UID", current.Name)
+		}
+		// A terminal bare Pod cannot restart itself. Replace only this Move's
+		// exact incarnation; the next pass creates it before any copy Job.
+		err := r.Client.CoreV1().Pods(r.Namespace).Delete(ctx, current.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &current.UID},
+		})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("replace terminal rsync source Pod: %w", err)
+		}
 	}
 	return nil
 }

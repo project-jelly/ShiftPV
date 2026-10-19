@@ -97,6 +97,7 @@ type Observation struct {
 	SourceHealthy          bool
 	SourceAuthorityInvalid bool
 	ConsumerExists         bool
+	ConsumersAmbiguous     bool
 	PublishedOnSource      bool
 	ReplacementExists      bool
 	ReplacementHeld        bool
@@ -155,6 +156,9 @@ func decideExecution(current Phase, observation Observation) (Decision, error) {
 	}
 	if decision, guarded, err := authorityGuard(current, observation); guarded {
 		return decision, err
+	}
+	if observation.ConsumersAmbiguous {
+		return transition(current, current, ActionWait, "MultipleConsumers")
 	}
 
 	switch current {

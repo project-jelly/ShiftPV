@@ -97,6 +97,7 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 	if err != nil {
 		return false, fmt.Errorf("list consumer Pods: %w", err)
 	}
+	ambiguous := false
 	for index := range pods.Items {
 		pod := &pods.Items[index]
 		if !podUsesClaim(pod, claim.Name) || terminalPod(pod) {
@@ -109,9 +110,8 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 		}
 		if move.Status.ConsumerName == "" && pod.Spec.NodeName == move.Spec.SourceNode {
 			if result.Consumer != nil {
-				result.FSM.UnsafeReason = "MultipleConsumers"
-				result.FSM.PreflightDeferred = preEviction(move)
-				return true, nil
+				ambiguous = true
+				break
 			}
 			result.Consumer = pod.DeepCopy()
 			continue
@@ -119,12 +119,18 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 		if result.Replacement == nil {
 			result.Replacement = pod.DeepCopy()
 		} else {
-			// Do not hide a second live consumer behind the first held Pod.
-			// Preparation may not reserve or disrupt this unsupported shape.
-			result.FSM.UnsafeReason = "MultipleConsumers"
-			result.FSM.PreflightDeferred = true
-			return true, nil
+			ambiguous = true
+			break
 		}
+	}
+	if ambiguous {
+		result.Consumer, result.Replacement = nil, nil
+		result.FSM.ConsumersAmbiguous = true
+		result.FSM.UnsafeReason = "MultipleConsumers"
+		result.FSM.PreflightDeferred = !move.Status.CapacityApproved
+		// Preparation cannot disrupt this shape. Approved execution must still
+		// observe its Jobs, placement and cleanup rather than inventing absence.
+		return !move.Status.CapacityApproved, nil
 	}
 	return false, nil
 }
