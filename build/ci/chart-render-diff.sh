@@ -2,6 +2,7 @@
 # Prove that a chart refactor is render-neutral: template charts/shiftpv at a
 # base ref and at the working tree for every values combination the test suite
 # and the known downstream installs use, then fail on any byte difference.
+# A chart release normalizes only its version label and default runtime tags.
 #
 # Usage: build/ci/chart-render-diff.sh [base-ref]            (default: origin/main)
 # Extra values files (for example a downstream GitOps values file kept outside
@@ -22,11 +23,23 @@ git -C "${ROOT_DIR}" archive "${BASE_REF}" "${CHART_PATH}" | tar -x -C "${WORK_D
 BASE_CHART="${WORK_DIR}/base/${CHART_PATH}"
 HEAD_CHART="${ROOT_DIR}/${CHART_PATH}"
 
-# Chart.yaml version reaches the rendered helm.sh/chart label, so a deliberate
-# version bump would mask itself as a diff in every document. Compare renders
-# with the base version in both trees and check the version separately.
+# --version selects remote chart packages; it does not replace local metadata.
+# Render a temporary copy with the base metadata for an intentional release.
 BASE_VERSION=$(awk '/^version:/ {print $2}' "${BASE_CHART}/Chart.yaml")
 HEAD_VERSION=$(awk '/^version:/ {print $2}' "${HEAD_CHART}/Chart.yaml")
+RELEASE_OVERRIDES=()
+if [[ ${BASE_VERSION} != "${HEAD_VERSION}" ]]; then
+	mkdir -p "${WORK_DIR}/head"
+	cp -R "${HEAD_CHART}" "${WORK_DIR}/head/shiftpv"
+	HEAD_CHART="${WORK_DIR}/head/shiftpv"
+	sed -i.bak "s/^version:.*/version: ${BASE_VERSION}/" "${HEAD_CHART}/Chart.yaml"
+	rm "${HEAD_CHART}/Chart.yaml.bak"
+	for component in controller node; do
+		tag=$(awk -v section="${component}:" '$0 == section { found = 1 } found && /^    tag:/ { print $2; exit }' "${BASE_CHART}/values.yaml")
+		[[ -n ${tag} ]] || { echo "missing base ${component} image tag" >&2; exit 1; }
+		RELEASE_OVERRIDES+=(--set-string "${component}.image.tag=${tag}")
+	done
+fi
 
 # Every values combination exercised by test/helm/*.go, test/e2e/kind/**/*.sh,
 # and the default install. One line per combination: a label, then helm args.
@@ -86,12 +99,12 @@ fi
 # helm template, capturing stdout and stderr together so a deliberate template
 # failure (fail/schema rejection) is compared as text like any other render.
 render() {
-	local chart=$1 version=$2
-	shift 2
+	local chart=$1
+	shift
 	helm template test "${chart}" \
 		--namespace storage \
 		--kube-version 1.35.8 \
-		--version "${version}" \
+		"${RELEASE_OVERRIDES[@]}" \
 		"$@" 2>&1 || true
 }
 
@@ -104,8 +117,8 @@ for combination in "${COMBINATIONS[@]}"; do
 	count=$((count + 1))
 	base_out="${WORK_DIR}/base.${count}.yaml"
 	head_out="${WORK_DIR}/head.${count}.yaml"
-	render "${BASE_CHART}" "${BASE_VERSION}" "${args[@]}" >"${base_out}"
-	render "${HEAD_CHART}" "${BASE_VERSION}" "${args[@]}" >"${head_out}"
+	render "${BASE_CHART}" "${args[@]}" >"${base_out}"
+	render "${HEAD_CHART}" "${args[@]}" >"${head_out}"
 	# Paths appear in helm's own error text; normalise them out.
 	sed -i.bak "s#${BASE_CHART}#CHART#g" "${base_out}" && rm -f "${base_out}.bak"
 	sed -i.bak "s#${HEAD_CHART}#CHART#g" "${head_out}" && rm -f "${head_out}.bak"
