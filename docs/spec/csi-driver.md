@@ -106,7 +106,7 @@ gRPC `ReclaimCopy`도 같은 journal을 사용한다. RPC와 Watch 복구는 동
 filesystem primitive를 공유한다. 응답 유실은 같은 operation ID의 저장된 receipt로 해결한다.
 용량 RPC는 최대 2초, effect RPC는 최대 2분이며 Controller의 더 짧은 timeout이 우선한다.
 
-통신은 TLS 1.3과 Controller 전용 projected ServiceAccount 토큰으로 인증한다. Controller는 Kubernetes에서
+Node RPC 통신은 TLS 1.3과 Controller 전용 projected ServiceAccount 토큰으로 인증한다. Controller는 Kubernetes에서
 확인한 정확한 Pod UID의 공개 인증서를 신뢰하고, Node는 TokenReview로 audience·namespace·account를
 확인한다. 인증서는 Node 프로세스마다 새로 생성하며 비밀키는 메모리에만 둔다. 연결은 노드별로 재사용하고
 Pod UID·주소·인증서 변경 시 교체한다. 실행과 복구의 권한은 API intent와 local proof에 남는다.
