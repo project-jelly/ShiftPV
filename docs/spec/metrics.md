@@ -24,6 +24,7 @@ cleanup 완료나 capacity release의 권한으로 사용하지 않는다.
 | `shiftpv_pool_reserved_bytes` | `pool`, `node` | 정확한 Pool UID에 속한 Volume owner와 미정산 Move hold의 합계; disk usage가 아님 |
 | `shiftpv_pool_accounting_valid` | `pool`, `node` | 최신 hold 계산이 유효한지 여부 |
 | `shiftpv_pool_ready` | `pool`, `node` | generation과 probe freshness를 포함한 Pool readiness |
+| `shiftpv_pool_registration_retired` | `pool`, `node` | 정확한 Pool UID에 대한 Controller의 등록 중단 승인; 물리적 부재 증거가 아님 |
 | `shiftpv_pool_filesystem_size_bytes` | `pool`, `node` | 등록 directory가 속한 filesystem 전체 크기 |
 | `shiftpv_pool_filesystem_available_bytes` | `pool`, `node` | `statfs`가 보고한 비특권 사용자 가용 bytes |
 | `shiftpv_pool_filesystem_available_inodes` | `pool`, `node` | `statfs`가 보고한 가용 inode |
@@ -177,6 +178,8 @@ Move status의 reason, current owner, publication과 cleanup 증거를 대조하
 성공·신선한 metadata 관측에서 Pool NotReady가 5분 유지되면 경고한다. Pool conditions의 generation,
 마운트·backing identity, 쓰기 가능 여부와 peer capacity 증거를 확인한다. 원래 마운트가 유실됐다면
 원래 filesystem을 복원한다. 빈 디렉터리나 다른 디스크를 같은 경로에 놓아 복구로 취급하지 않는다.
+Controller가 등록 중단을 승인한 Pool은 이 경보와 inventory 경보에서 제외하고 별도 retired 지표로
+표시한다. 중단된 Pool의 filesystem 값을 새로 만들거나 inventory를 빈 상태로 간주하지 않는다.
 
 ### ShiftPVCSIErrorRate
 

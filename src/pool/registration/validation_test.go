@@ -37,6 +37,14 @@ func TestRegistrationIsolation(t *testing.T) {
 		{"nested candidate", func(a, b *Allocation) { a.Approved = true; b.MountPath = a.MountPath + "/nested" }, "", "CapacityPathsOverlap"},
 		{"deleting approved still reserves backing", func(a, b *Allocation) { a.Approved = true; a.Deleting = true; b.Unit = a.Unit }, "", "CapacityBackingOverlap"},
 		{"other node", func(a, b *Allocation) { b.NodeName = "other"; b.Unit = a.Unit }, "", ""},
+		{"retired approved peer no longer allocates", func(a, b *Allocation) {
+			a.Approved, b.Approved, b.Retired = true, true, true
+			b.Unit, b.Evidence = nil, failed("CapacityMountUnavailable", "missing")
+		}, "", "PoolRegistrationRetired"},
+		{"retired paths still preserve their namespace", func(a, b *Allocation) {
+			a.Approved, b.Approved, b.Retired = true, true, true
+			a.MountPath = b.MountPath + "/nested"
+		}, "CapacityPathsOverlap", "PoolRegistrationRetired"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := allocation("a", 0, false), allocation("b", 1024, false)

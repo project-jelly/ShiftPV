@@ -10,6 +10,9 @@ import (
 // Independent isolates rejected candidates, but never hides an approved peer
 // whose live backing is now unknown. Conflicting candidates are all rejected.
 func Independent(target Allocation, allocations []Allocation) Check {
+	if target.Retired && !target.Deleting {
+		return failed("PoolRegistrationRetired", "Pool registration no longer participates in allocation")
+	}
 	if target.Policy != "" && target.Policy != FixedBlock {
 		return failed("CapacityPolicyInvalid", "unsupported capacity policy")
 	}
@@ -24,6 +27,12 @@ func Independent(target Allocation, allocations []Allocation) Check {
 	}
 	for _, peer := range allocations {
 		if peer.NodeName != target.NodeName || peer.UID == target.UID || (target.Approved && !peer.Approved) {
+			continue
+		}
+		if peer.Retired {
+			if PathsOverlap(target.MountPath, peer.MountPath) {
+				return failed("CapacityPathsOverlap", "retired Pool paths remain reserved until physical identity release")
+			}
 			continue
 		}
 		if check := independentPair(target, peer); !check.OK {

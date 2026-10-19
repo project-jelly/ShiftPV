@@ -445,7 +445,7 @@ func TestDedicatedMetricFamilyContract(t *testing.T) {
 	e.ObserveDiscovery(nil, nil)
 	_, _ = e.intercept(context.Background(), nil, &grpc.UnaryServerInfo{FullMethod: "/csi.v1.Controller/CreateVolume"}, func(context.Context, any) (any, error) { return nil, status.Error(codes.Code(1000), "unknown code") })
 	families, err := e.Registry.Gather()
-	if err != nil || len(families) != 20 {
+	if err != nil || len(families) != 21 {
 		t.Fatalf("families=%d err=%v", len(families), err)
 	}
 	for _, family := range families {

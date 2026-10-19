@@ -1,6 +1,6 @@
 # 0015. 소실된 Pool은 등록 중단과 저장소 제거를 구분한다
 
-- 상태: Proposed — 설계안이며 runtime에는 아직 구현하지 않음
+- 상태: Accepted
 - 날짜: 2026-10-19
 - 관련 계약: [Pool 제거](0011-fail-closed-uninstall-guard.md), [독립 용량](0014-independent-capacity-pools-per-node.md)
 
@@ -12,7 +12,7 @@ API 참조가 없다는 사실은 디스크가 비었다는 증거가 아니다.
 
 ## Decision
 
-기존 `ShiftPVPool`에 명시적인 등록 중단 상태를 제안한다. 별도 CRD, 서비스, 정리 Job은 추가하지 않는다.
+기존 `ShiftPVPool`에 명시적인 등록 중단 상태를 기록한다. 별도 CRD, 서비스, 정리 Job은 추가하지 않는다.
 
 ```text
 등록됨 → 운영자 등록 중단 요청(정확한 Pool UID) → 신규 배치 중단
@@ -31,11 +31,12 @@ API 참조가 없다는 사실은 디스크가 비었다는 증거가 아니다.
 - 중단 의도를 CR과 metrics에서 식별한다. 의도된 중단을 Pool NotReady 장애 경보와 구분하고,
   현재 디스크의 빈 상태나 cleanup 완료로 표현하지 않는다.
 - 기존 Pool CR을 기록으로 남긴다. 원래 마커·데이터·마운트에는 쓰지 않고 `IdentityReleased=True`도
-  만들지 않는다. 디스크가 돌아와도 자동 재활성화·재등록·정리하지 않는다.
+  만들지 않는다. 경로 예약도 유지한다. 디스크 복귀만으로 재활성화·재등록·정리하지 않는다.
 - 정상 Pool 삭제와 uninstall은 기존 inventory·identity release 조건을 유지한다. 원래 저장소를
-  복원하기 전까지 중단된 Pool의 최종 제거 보호는 남는다.
+  복원하기 전까지 중단된 Pool의 최종 제거 보호는 남는다. 명시적인 삭제 요청이 있다면 원래
+  저장소의 빈 상태와 node release를 새로 증명한 뒤 정상 제거한다.
 
-### 구현 전 검증 기준
+### 검증 기준
 
 | 경우 | 필요한 결과 |
 |---|---|
@@ -43,11 +44,13 @@ API 참조가 없다는 사실은 디스크가 비었다는 증거가 아니다.
 | Volume/PV, 초기 예약, Move preparation/hold/cleanup 존재 | 보류 |
 | 실행 중인 source/copy/promote/verify helper 존재 | 보류 |
 | 참조 목록 실패, 불명확한 identity | 보류 |
+| Pool에 묶이지 않은 legacy 생성 요청·미승인 이동 후보 | 중단을 막지 않음; 새 binding은 요청·UID 잠금으로 차단 |
 | 생성·이동 admission과 요청 동시 실행 | 같은 UID 잠금으로 정산; 뒤늦은 새 예약 금지 |
 | 승인 직후 응답 유실·Controller 재시작·요청 제거 | 중단 승인 유지; 중복 저장소 작업 없음 |
 | 중단 승인 뒤 capacity 조회·경보 관측 | 해당 Pool의 가용 배정량 0; 정상 peer 배치 재개; 중단 의도 식별 |
 | 중단 뒤 원래 디스크 복귀 또는 다른 디스크가 같은 경로 사용 | 자동 쓰기·identity 해제·활성화 없음 |
 | 삭제 대기 Pool의 등록 중단 승인 | 정상 peer 배치 허용; finalizer와 데이터 유지 |
+| 중단된 Pool 경로와 겹치는 신규 등록 | 경로 예약을 유지하여 거부 |
 
 ## Alternatives considered
 
@@ -60,5 +63,5 @@ API 참조가 없다는 사실은 디스크가 비었다는 증거가 아니다.
 ## Consequences
 
 정상 peer의 배치 재개와 원본 보존을 기존 Pool 객체 하나로 표현한다. 중단된 CR은 남으며, 이 단계는
-영구 소실 Pool의 완전 삭제나 사용 중인 손실 볼륨의 복구를 제공하지 않는다. 실제 구현 PR은 위 동시성·
-재시작·identity 검증을 통과해야 하며, 이 문서의 머지는 기능 구현이나 장애 복구 합격 증거가 아니다.
+영구 소실 Pool의 완전 삭제나 사용 중인 손실 볼륨의 복구를 제공하지 않는다. 기능의 검증 기준은 위
+동시성·재시작·identity 검사이며, 실제 LVM·디스크 장애와 장시간 qualification은 별도의 실행 증거다.

@@ -51,7 +51,10 @@ groups:
             (shiftpv_pool_accounting_valid={{ $value }}).
           runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolaccountinginvalid
       - alert: ShiftPVPoolInventoryUnsafe
-        expr: shiftpv_pool_inventory_valid{shiftpv="true"} == 0 or shiftpv_pool_inventory_truncated{shiftpv="true"} == 1
+        expr: |
+          (shiftpv_pool_inventory_valid{shiftpv="true"} == 0 or shiftpv_pool_inventory_truncated{shiftpv="true"} == 1)
+          unless on (job, instance, cluster, namespace, release, component, pod, pool, node)
+            (shiftpv_pool_registration_retired{shiftpv="true"} == 1)
         for: 5m
         labels:
           severity: warning
@@ -175,6 +178,8 @@ groups:
               (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} > 0)
             and on (job, instance, cluster, namespace, release, component, pod)
               (time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} < 300)
+            unless on (job, instance, cluster, namespace, release, component, pod, pool, node)
+              (shiftpv_pool_registration_retired{shiftpv="true"} == 1)
           ) == 0
         for: 5m
         labels:

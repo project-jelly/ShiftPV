@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	uninstallcheck "github.com/project-jelly/ShiftPV/src/lifecycle/uninstall"
 )
 
@@ -163,9 +164,23 @@ func poolProtectedMetadataChanged(request *admissionv1.AdmissionRequest) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("read updated Pool lifecycle metadata: %w", err)
 	}
+	requested := newMetadata.Annotations[volumeapi.PoolRetirementRequestAnnotation]
+	if requested != "" && requested != oldMetadata.Annotations[volumeapi.PoolRetirementRequestAnnotation] {
+		var previous struct {
+			Metadata struct{ UID string } `json:"metadata"`
+			Status   volumeapi.PoolStatus `json:"status"`
+		}
+		if err := json.Unmarshal(request.OldObject.Raw, &previous); err != nil {
+			return false, err
+		}
+		if requested != previous.Metadata.UID || !(volumeapi.Pool{Status: previous.Status}).RegistrationApproved() {
+			return false, fmt.Errorf("retirement request must name the UID of an approved registration")
+		}
+	}
 	finalizerRemoved := slices.Contains(oldMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer) && !slices.Contains(newMetadata.Finalizers, uninstallcheck.PoolProtectionFinalizer)
 	approvalChanged := oldMetadata.Annotations[uninstallcheck.PoolIdentityReleaseAnnotation] != newMetadata.Annotations[uninstallcheck.PoolIdentityReleaseAnnotation]
-	return finalizerRemoved || approvalChanged, nil
+	retirementChanged := oldMetadata.Annotations[volumeapi.PoolRetirementApprovalAnnotation] != newMetadata.Annotations[volumeapi.PoolRetirementApprovalAnnotation]
+	return finalizerRemoved || approvalChanged || retirementChanged, nil
 }
 
 type poolMetadata struct {

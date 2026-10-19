@@ -18,10 +18,10 @@ func TestDeletionReportsSafetyAndNodeEvidenceWaits(t *testing.T) {
 	pools := &memoryPools{pools: []volumeapi.Pool{pool}}
 	blocker := uninstallcheck.Blocker{Kind: uninstallcheck.PoolInventoryBlockerKind, Name: pool.Name, Reason: "inventory=stale observedGeneration=3 generation=4"}
 	safety := &memorySafety{report: uninstallcheck.Report{Blockers: []uninstallcheck.Blocker{blocker}}}
-	var observed DeletionObservation
+	var observed Observation
 	locks := &poolcapacity.Locker{}
 	r := &Reconciler{Pools: pools, Safety: safety, Quiesce: memoryQuiesce{}, PoolLocks: locks, Interval: time.Second,
-		ObserveDelete: func(p volumeapi.Pool, o DeletionObservation) {
+		Observe: func(p volumeapi.Pool, o Observation) {
 			// Calling the observer while holding the Pool fence would deadlock.
 			released := make(chan struct{})
 			go func() { unlock := locks.Lock(p.UID); unlock(); close(released) }()
