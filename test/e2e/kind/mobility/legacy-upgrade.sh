@@ -22,6 +22,7 @@ LEGACY_ARGS=$(jq -c --arg image "${LEGACY_CONTROLLER}" '
  elif startswith("--mobility-helper-image=") then "--mobility-helper-image="+$image
  else . end)' <<<"${CANDIDATE_ARGS}")
 CHECK_ACCOUNT=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o jsonpath='{.spec.template.spec.serviceAccountName}')
+CANDIDATE_HELPER_RULES=$(kubectl get clusterrole/shiftpv-helper -o json | jq -c '.rules')
 inspection_dir=$(mktemp -d)
 
 # This Pod starts only the candidate's GET/LIST inspection command. It never
@@ -84,6 +85,9 @@ kubectl create --dry-run=client --validate=false \
 	| jq '.spec.versions[].schema.openAPIV3Schema.properties.spec["x-kubernetes-validations"] |=
 		map(select(.message != "new Moves require prepared-v1"))' >"${legacy_contract_file}"
 kubectl apply -f "${legacy_contract_file}"
+# The pinned old cleanup helper writes status. Restore only its preceding grant
+# while that writer settles; the candidate helper's grant remains read-only.
+kubectl patch clusterrole/shiftpv-helper --type=json -p '[{"op":"add","path":"/rules/-","value":{"apiGroups":["shiftpv.io"],"resources":["shiftpvvolumes/status","shiftpvmoves/status"],"verbs":["update"]}}]'
 kubectl -n shiftpv-system patch deployment/shiftpv-controller --type=strategic -p "$(jq -nc \
 	--arg image "${LEGACY_CONTROLLER}" --argjson args "${LEGACY_ARGS}" \
 	'{spec:{template:{spec:{containers:[{name:"shiftpv-controller",image:$image,args:$args}]}}}}')"
@@ -195,6 +199,8 @@ BEFORE_MOVE=$(kubectl get "shiftpvmove/${MOVE}" -o json | jq -cS '{uid:.metadata
 BEFORE_VOLUME=$(kubectl get "shiftpvvolume/${VOLUME}" -o json | jq -cS '{uid:.metadata.uid,owner:.status.ownerNode,copy:.status.currentCopy}')
 BEFORE_ACTORS=$(legacy_actor_uids)
 BEFORE_MOVES=$(kubectl get shiftpvmoves -o json | jq -c --arg volume "${VOLUME}" '[.items[] | select(.spec.volumeID == $volume) | .metadata.uid] | sort')
+kubectl patch clusterrole/shiftpv-helper --type=json -p "$(jq -nc \
+ --argjson rules "${CANDIDATE_HELPER_RULES}" '[{op:"replace",path:"/rules",value:$rules}]')"
 kubectl -n shiftpv-system patch deployment/shiftpv-controller --type=strategic -p "$(jq -nc \
  --arg image "${CANDIDATE_CONTROLLER}" --argjson args "${CANDIDATE_ARGS}" \
  '{spec:{template:{spec:{containers:[{name:"shiftpv-controller",image:$image,args:$args}]}}}}')"

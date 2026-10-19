@@ -130,8 +130,8 @@ API receipt만 있고 absence가 없거나 absence만 있고 receipt가 없는 �
 기본 dashboard는 collection 상태, Pool readiness/inventory, Pool별 aggregate hold와 filesystem 여유,
 Volume/active Move phase, mobility deferral, CSI rate/error/latency를 분리해 보여 준다. 기본 alert rules는
 snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory, cleanup `NeedsReview`,
-orphan/missing/unsafe copy observation, filesystem 공간 소진, PV 없는 보존 owner와 회수 판단을 기다리는
-`Released` PersistentVolume을 경고한다. Invalid/truncated/missing inventory는 inventory 경보로 다루며
+orphan/missing/unsafe copy observation, filesystem 공간 소진, PV 없는 보존 owner, `Released` PV,
+active Move의 `Blocked`, Pool NotReady와 지속적인 CSI 서버 오류를 경고한다. Invalid/truncated/missing inventory는 inventory 경보로 다루며
 가짜 `copy_observations{state="NeedsReview"}` 수를 더하지 않는다. 실제 관측된 unsafe copy는 계속 집계한다.
 
 생성·이동·정리 중 승인된 사본의 부재는 `InFlight` 또는 `CleanupTarget`으로 분류한다.
@@ -155,6 +155,8 @@ Pool별 PV 부재 count가 6시간 양수로 유지되고 metadata snapshot이 �
 [Retain lifecycle](storage-class.md#retain-lifecycle)의 지원 경로로 같은 handle을 다시 연결하거나 명시적으로
 폐기한다. 이 경보를 근거로 finalizer·Volume·디렉터리를 강제 삭제하거나 예약을 반환하지 않는다.
 PV를 복구하면 부재 지표는 0으로 돌아가며 기존 예약은 유지된다.
+이 경보와 `ShiftPVReleasedVolumes`는 Pod·instance label을 집계에서 제거하므로 관측이 이어지는
+exporter Pod 교체로 6시간 대기를 다시 시작하지 않는다. 관측 자체가 끊기면 별도의 stale 경보를 확인한다.
 
 ### ShiftPVPoolNoSpace
 
@@ -163,3 +165,23 @@ PV를 복구하면 부재 지표는 0으로 돌아가며 기존 예약은 유지
 먼저 filesystem의 공간·inode와 외부 writer를 확인하고 안전하게 식별한 외부 점유를 줄인다. cleanup은
 durable intent를 기록하지 못하면 계속 대기한다. 데이터·metadata를 임의 삭제하거나 receipt·absence
 검증을 건너뛰지 않는다. 여유 회복 후 새 관측과 정상 재시도로 수렴하는지 확인한다.
+
+### ShiftPVMoveBlocked
+
+성공·신선한 metadata 관측에서 active Move의 `Blocked` 수가 5분 유지되면 경고한다.
+Move status의 reason, current owner, publication과 cleanup 증거를 대조하고 지원되는 recovery를 선택한다.
+보존된 과거 terminal Move는 이 지표에 포함하지 않는다.
+
+### ShiftPVPoolNotReady
+
+성공·신선한 metadata 관측에서 Pool NotReady가 5분 유지되면 경고한다. Pool conditions의 generation,
+마운트·backing identity, 쓰기 가능 여부와 peer capacity 증거를 확인한다. 원래 마운트가 유실됐다면
+원래 filesystem을 복원한다. 빈 디렉터리나 다른 디스크를 같은 경로에 놓아 복구로 취급하지 않는다.
+
+### ShiftPVCSIErrorRate
+
+RPC method·component·node별 5분 요청 중 서버·인증 오류 비율이 5%를 넘는 상태가 5분 유지되면 경고한다.
+대상 code는 `Unknown`, `DeadlineExceeded`, `PermissionDenied`, `Internal`, `Unavailable`, `DataLoss`,
+`Unauthenticated`다. 정상적인 capacity 대기(`ResourceExhausted`), precondition과 경쟁 재시도는 제외한다.
+API 가용성, 인증·권한, 해당 CSI code와 로그를 확인한다. exporter Pod별 counter에 `rate`를 적용한 뒤
+합산하므로 counter reset을 오류 증가로 세지 않는다.
