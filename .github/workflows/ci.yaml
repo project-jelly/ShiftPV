@@ -317,6 +317,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      - name: Upload preserved retirement evidence
+        if: always() && matrix.group == 'g2'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preserved-retirement
+          path: .tmp/preserved-uninstall
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload read-only Unpublish evidence
         if: always() && matrix.group == 'g2'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
