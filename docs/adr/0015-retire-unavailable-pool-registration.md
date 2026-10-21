@@ -32,9 +32,10 @@ API 참조가 없다는 사실은 디스크가 비었다는 증거가 아니다.
   현재 디스크의 빈 상태나 cleanup 완료로 표현하지 않는다.
 - 기존 Pool CR을 기록으로 남긴다. 원래 마커·데이터·마운트에는 쓰지 않고 `IdentityReleased=True`도
   만들지 않는다. 경로 예약도 유지한다. 디스크 복귀만으로 재활성화·재등록·정리하지 않는다.
-- 정상 Pool 삭제와 uninstall은 기존 inventory·identity release 조건을 유지한다. 원래 저장소를
+- 정상 Pool 삭제와 기본 uninstall은 기존 inventory·identity release 조건을 유지한다. 원래 저장소를
   복원하기 전까지 중단된 Pool의 최종 제거 보호는 남는다. 명시적인 삭제 요청이 있다면 원래
-  저장소의 빈 상태와 node release를 새로 증명한 뒤 정상 제거한다.
+  저장소의 빈 상태와 node release를 새로 증명한 뒤 정상 제거한다. Driver만 제거하며 중단 Pool의
+  기록·보호를 남기는 명시적 경로는 [ADR 0016](0016-uninstall-with-preserved-retired-pools.md)을 따른다.
 
 ### 검증 기준
 

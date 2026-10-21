@@ -39,13 +39,14 @@ type CleanupRepository interface {
 }
 
 type Checker struct {
-	Client            kubernetes.Interface
-	Volumes           VolumeRepository
-	StorageClassNames []string
-	Namespace         string
-	Cleanups          CleanupRepository
-	Now               func() time.Time
-	InventoryMaxAge   time.Duration
+	Client                  kubernetes.Interface
+	Volumes                 VolumeRepository
+	StorageClassNames       []string
+	Namespace               string
+	Cleanups                CleanupRepository
+	Now                     func() time.Time
+	InventoryMaxAge         time.Duration
+	PreserveRetiredPoolUIDs []string
 }
 
 type Blocker struct {
@@ -71,16 +72,37 @@ func (c *Checker) Check(ctx context.Context) (Report, error) {
 }
 
 func (c *Checker) ReleasePoolProtection(ctx context.Context) error {
+	return c.ReleasePoolProtectionAfter(ctx, time.Time{})
+}
+
+// ReleasePoolProtectionAfter retains the same quiesce observation boundary when
+// rechecking an explicit preservation before releasing ordinary registrations.
+func (c *Checker) ReleasePoolProtectionAfter(ctx context.Context, inventoryAfter time.Time) error {
 	if c == nil || c.Volumes == nil {
 		return fmt.Errorf("uninstall checker is not configured")
+	}
+	// A preserved retirement is an exception to physical observation, never to
+	// current logical obligations. Recheck them after quiesce and before release.
+	if len(c.PreserveRetiredPoolUIDs) > 0 {
+		report, err := c.CheckAfter(ctx, inventoryAfter)
+		if err != nil {
+			return err
+		}
+		if !report.Safe() {
+			return fmt.Errorf("storage dependencies changed before Pool protection release: %+v", report.Blockers)
+		}
 	}
 	pools, err := c.Volumes.ListPoolRegistrations(ctx)
 	if err != nil {
 		return fmt.Errorf("list ShiftPVPools: %w", err)
 	}
+	preserved, err := c.preservedPoolUIDs(pools)
+	if err != nil {
+		return err
+	}
 	var result error
 	for _, pool := range pools {
-		if !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+		if preserved[pool.UID] || !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
 			continue
 		}
 		if err := c.Volumes.RemovePoolFinalizer(ctx, pool.Name, pool.UID); err != nil {
@@ -385,15 +407,27 @@ func (c *Checker) cleanupBlockers(ctx context.Context, pool *volumeapi.Pool) ([]
 
 // poolBlockers reports the inventory and retained identity of every Pool.
 func (c *Checker) poolBlockers(ctx context.Context, inventoryAfter time.Time) ([]Blocker, error) {
-	pools, err := c.Volumes.ListPools(ctx)
+	pools, err := c.Volumes.ListPoolRegistrations(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list ShiftPVPools: %w", err)
+	}
+	preserved, err := c.preservedPoolUIDs(pools)
+	if err != nil {
+		return nil, err
 	}
 	now := c.now()
 	maxAge := c.inventoryMaxAge()
 	observedAfter := inventoryAfter.UTC()
 	blockers := []Blocker{}
 	for _, pool := range pools {
+		if preserved[pool.UID] {
+			report, err := c.retirementReferences(ctx, pool)
+			if err != nil {
+				return nil, err
+			}
+			blockers = append(blockers, report.Blockers...)
+			continue
+		}
 		blockers = append(blockers, poolInventoryBlockers(pool, now, maxAge, observedAfter)...)
 		if pool.DeletionTimestamp == nil {
 			continue
