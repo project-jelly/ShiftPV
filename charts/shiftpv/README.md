@@ -677,9 +677,47 @@ kubectl wait shiftpvpool/"${pool_name}" \
 - stale, invalid, incomplete Pool observation
 - Kubernetes API read failure
 
+먼저 새 작업 유입을 멈추고 [읽기 전용 사전 검사](../../docs/development/versioning.md#전환-사전-검사)의
+`upgrade-check`로 미정산 작업을 확인한다. 이 검사의 SAFE는 uninstall 허가가 아니며, 기존 PVC/PV도
+모두 이관·정리해야 한다. 실제 제거 가능 여부는 아래 pre-delete guard가 검사한다.
+
 ```bash
 helm uninstall shiftpv --namespace shiftpv-system
 ```
+
+### 거부된 Helm uninstall 복구
+
+Dependency 때문에 guard가 실패하면 해당 uninstall attempt의 quiesce를 자동 취소한다. Helm release는
+`uninstalling`으로 남아 다음 upgrade가 `has no deployed releases`로 실패할 수 있다. 아래는 기본
+release·namespace 기준이며, 사용자 지정 이름은 실제 설치값으로 바꾼다.
+
+1. Guard 로그의 blocker와 취소 오류를 확인하고, permit ConfigMap이 `NotFound`인지 확인한다.
+   남아 있다면 `state`, `attempt`, `expiresAt`을 확인한다. 진행 중인 다른 제거 시도가 없는 상태에서
+   만료(발급 후 5분)를 기다린다. 조회 실패·취소 실패를 해제로 간주하거나 ConfigMap을 수동 삭제하지 않는다.
+
+   ```bash
+   kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard
+   kubectl -n shiftpv-system get configmap shiftpv-uninstall-permit -o yaml
+   helm history shiftpv --namespace shiftpv-system
+   ```
+
+2. History에서 현재 설치와 같은 chart·이미지·Pool 선언을 가진 마지막 성공 revision을 고른다.
+   해당 revision의 values를 확인한 뒤 rollback한다. 저장소 프로토콜이 바뀌는 과거 버전은 선택하지 않는다.
+
+   ```bash
+   successful_revision='<확인한 revision>'
+   helm get values shiftpv --namespace shiftpv-system --revision "${successful_revision}" --all
+   helm rollback shiftpv "${successful_revision}" --namespace shiftpv-system --wait --timeout=5m
+   helm status shiftpv --namespace shiftpv-system
+   kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
+   kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
+   ```
+
+   Chart에는 rollback hook이 없다. Rollback은 release·리소스를 복원하고, quiesce 해제는 앞 단계의
+   취소·만료 후 Controller가 관측한다. 호환되는 성공 revision이 없으면 임의 downgrade로 복구하지 않는다.
+3. Release가 `deployed`이고 기존 workload가 Ready인지 확인한다. 기존 PVC의 실제 읽기·쓰기를 확인하고,
+   같은 StorageClass의 별도 시험 PVC와 consumer Pod로 신규 provisioning·읽기·쓰기를 검증한다.
+   기존 PVC I/O만으로는 신규 provisioning fence 해제를 확인할 수 없다. 시험 리소스를 정리한 뒤 작업 유입을 재개한다.
 
 Emergency `--no-hooks`와 admission 제거는 보증을 우회한다. Metadata와 host data를 자동 정리하지 않으며,
 동일 installation identity와 Pool 선언을 복원하기 전에는 workload를 재개하지 않는다.
