@@ -125,9 +125,13 @@ func (r *Reconciler) observePreconditions(ctx context.Context, move volumeapi.Mo
 		return r.deferOnPreflight(ctx, result, preconditions)
 	}
 	if move.Status.Phase == string(fsm.PhaseStartingDisruption) && result.Consumer != nil && result.Consumer.DeletionTimestamp == nil {
-		// Retrying an intent must still respect a newly denied PDB. A terminating
-		// original is already disrupted, even when its eviction reply was lost.
-		reason, err := r.preflightPDB(ctx, result.Consumer)
+		// A live original must remain available while another consumer exists.
+		// A terminating original is already disrupted, even if its reply was lost.
+		reason := "MultipleConsumers"
+		var err error
+		if result.Replacement == nil {
+			reason, err = r.preflightPDB(ctx, result.Consumer)
+		}
 		if err != nil {
 			return err
 		}
