@@ -14,7 +14,8 @@ mkdir -p "${evidence}"
 registration=$(kubectl get "shiftpvpool/${pool}" -o json)
 uid=$(jq -er '.metadata.uid' <<<"${registration}")
 jq -e '.status.registrationApproved == true' <<<"${registration}" >/dev/null
-jq '{apiVersion,kind,metadata:{name:.metadata.name},spec}' <<<"${registration}" >"${evidence}/original.json"
+# scanEpoch is a mutable inventory request counter, not registration identity.
+jq '{apiVersion,kind,metadata:{name:.metadata.name},spec:(.spec | del(.scanEpoch))}' <<<"${registration}" >"${evidence}/original.json"
 revision=$(helm history shiftpv -n shiftpv-system -o json | jq -er '[.[] | select(.status=="deployed")][-1].revision')
 masked=0
 backed=0
@@ -31,7 +32,7 @@ helm_apply() {
 }
 assert_preserved() {
 	kubectl get "shiftpvpool/${pool}" -o json | tee "${evidence}/$1.json" | jq -e --arg uid "${uid}" --argjson spec "$(jq -c '.spec' "${evidence}/original.json")" '
-	 .metadata.uid==$uid and .spec==$spec and .metadata.deletionTimestamp!=null and
+	 .metadata.uid==$uid and (.spec | del(.scanEpoch))==$spec and .metadata.deletionTimestamp!=null and
 	 (.metadata.finalizers | index("shiftpv.io/pool-protection")!=null) and
 	 .metadata.annotations["shiftpv.io/registration-retired"]==$uid and
 	 all(.status.conditions[]?; .type!="IdentityReleased" or .status!="True")' >/dev/null
