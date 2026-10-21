@@ -92,6 +92,7 @@ kubectl get "shiftpvpool/${pool}" -o json >"${evidence}/readonly-release-blocked
 assert_preserved before-uninstall
 if helm uninstall shiftpv -n shiftpv-system --wait --timeout=2m; then echo 'default uninstall accepted lost backing' >&2; exit 1; fi
 kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard | tee "${evidence}/default-denied.log" | grep -F 'ShiftPV uninstall denied'
+grep -F "ShiftPVPoolIdentity ${pool}: PoolStorageRestorationRequired" "${evidence}/default-denied.log"
 kubectl -n shiftpv-system wait configmap/shiftpv-uninstall-permit --for=delete --timeout=30s
 assert_preserved after-denial
 
@@ -109,10 +110,10 @@ assert_preserved reinstalled
 # A new UID at the retired path cannot become approved or adopt its marker.
 jq --arg name "${candidate}" '.metadata.name=$name' "${evidence}/original.json" | kubectl create -f -
 kubectl wait "shiftpvpool/${candidate}" --for=jsonpath='{.status.conditions[?(@.type=="CapacityIndependent")].reason}'=CapacityPathsOverlap --timeout=2m
-kubectl get "shiftpvpool/${candidate}" -o json | tee "${evidence}/overlap-rejected.json" | jq -e --arg uid "${uid}" '
+kubectl get "shiftpvpool/${candidate}" -o json | tee "${evidence}/overlap-candidate-rejected.json" | jq -e --arg uid "${uid}" '
  .metadata.uid!=$uid and .status.registrationApproved!=true and
  any(.status.conditions[]; .type=="Ready" and .status=="False")' >/dev/null
-assert_preserved overlap-rejected
+assert_preserved after-overlap-rejection
 kubectl wait "shiftpvpool/${candidate}" --for=jsonpath='{.metadata.finalizers[0]}'=shiftpv.io/pool-protection --timeout=2m
 kubectl delete "shiftpvpool/${candidate}" --wait=false
 
