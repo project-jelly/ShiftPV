@@ -43,8 +43,7 @@ func validateReservedSource(observation Observation) error {
 // Lifecycle routing precedes execution health checks. Cancellation does not
 // require a live workload binding, and terminal history cannot regain authority.
 func decideLifecycle(current State, observation Observation) (Decision, bool, error) {
-	if observation.WorkloadRetired && beforeExecutionApproval(observation) &&
-		current.Phase != PhaseCanceling && current.Phase != PhaseCancelled && current.Phase != PhaseSucceeded && current.RecoveryPhase == "" {
+	if canCancelRetiredPreparation(current, observation) {
 		if observation.SourceAuthorityInvalid || !observation.SourcePlanRecorded || !observation.SourceClaimed || !observation.PreparationReserved {
 			return Decision{}, true, fmt.Errorf("retired preparation requires its exact reserved source authority")
 		}
@@ -86,6 +85,11 @@ func decideLifecycle(current State, observation Observation) (Decision, bool, er
 		return decision, true, err
 	}
 	return Decision{}, false, nil
+}
+
+func canCancelRetiredPreparation(current State, observation Observation) bool {
+	return observation.WorkloadRetired && beforeExecutionApproval(observation) &&
+		current.Phase != PhaseCanceling && current.Phase != PhaseCancelled && current.Phase != PhaseSucceeded && current.RecoveryPhase == ""
 }
 
 func canRequestSettlement(current State, observation Observation) bool {
