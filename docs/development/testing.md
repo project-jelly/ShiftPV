@@ -339,16 +339,20 @@ contracts, not cluster latency measurements.
 
 The running mobility dispatcher delays only repeated discovery with a known
 deferral, for the configured reconciliation interval. It retains a next-attempt
-time and routing identity, never an approval. Volume UID, owner/copy or Node UID
-changes invalidate the delay; workload/PVC policy changes are rechecked when the
+time and routing identity, never an approval. Volume UID, owner/copy, Node UID or
+exact source-copy availability changes invalidate the delay. Each scan uses one
+bulk Pool observation for cordoned sources; resource versions, timestamps and
+unrelated copies do not reset the delay. Workload/PVC policy changes are rechecked when the
 interval expires. Move and held-Pod work continues in the same lane. Timers retry
 without another coordinator wake, and restart discards the process-local delay.
 An explicit synchronous `ReconcileAll` still performs fresh inspection.
 
 In the DI API-cost regression, four unchanged deferred Volumes undergo 20 complete
-scan/work cycles inside one 30-second interval: API reads fall from 900 to 140,
+scan/work cycles inside one 30-second interval: API reads fall from 920 to 160,
 with no writes. Both modes execute the production Registry/dispatcher path; the
-baseline disables only the scheduling delay. This measures request amplification
+baseline disables only the scheduling delay. The source-proof dependency adds
+one Pool LIST per scan, without repeating each deferred Volume's preflight.
+This measures request amplification
 for that trace, not production latency or throughput.
 
 Controller admission has its own 50 QPS/100 burst budget shared by its typed and
