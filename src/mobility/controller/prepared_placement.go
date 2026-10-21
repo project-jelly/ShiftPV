@@ -12,8 +12,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	resourcehelper "k8s.io/component-helpers/resource"
+	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 )
 
 func (r *Reconciler) ensurePreparedPlacement(ctx context.Context, move volumeapi.Move, observed observation, candidates []string) (*corev1.Pod, string, error) {
@@ -51,48 +53,53 @@ func (r *Reconciler) ensurePreparedPlacement(ctx context.Context, move volumeapi
 	return placement, "", nil
 }
 
-func (r *Reconciler) validatePreparedPlacement(ctx context.Context, move volumeapi.Move, observed observation) (string, error) {
+// Availability is separate from identity: only the exact reserved placement may
+// resume after transient Node/Pool health recovers.
+func (r *Reconciler) validatePreparedPlacement(ctx context.Context, move volumeapi.Move, observed observation) (string, bool, error) {
 	if err := volumeapi.ValidateMovePreparation(move); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if move.Status.Preparation == nil {
-		return "PreparationMissing", nil
+		return "PreparationMissing", false, nil
 	}
 	names := namesFor(move.Name)
 	pod, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.PlacementPod, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return "PreparedPlacementMissing", nil
+		return "PreparedPlacementMissing", false, nil
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if validatePlacementIdentity(pod, move, names) != nil || !nonPreemptingPlacement(pod) || pod.DeletionTimestamp != nil ||
 		pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded ||
 		pod.Spec.NodeName != move.Status.Preparation.NodeName {
-		return "PreparedPlacementChanged", nil
-	}
-	if !slices.Contains(observed.CandidateNodes, pod.Spec.NodeName) {
-		return "PreparedDestinationUnavailable", nil
+		return "PreparedPlacementChanged", false, nil
 	}
 	preparation := move.Status.Preparation
 	pool, err := r.Repository.ReadyPoolForIdentity(ctx, preparation.Pool.Name, preparation.Pool.UID, preparation.NodeName)
 	if err != nil {
-		if apierrors.IsNotFound(err) || errors.Is(err, volumeapi.ErrPoolNotReady) || errors.Is(err, volumeapi.ErrPoolNotFound) {
-			return "PreparedDestinationUnavailable", nil
+		if errors.Is(err, volumeapi.ErrPoolIdentityChanged) || errors.Is(err, volumeapi.ErrPoolNotFound) {
+			return "PreparedDestinationChanged", false, nil
 		}
-		return "", err
+		if errors.Is(err, volumeapi.ErrPoolNotReady) {
+			return "PreparedDestinationUnavailable", true, nil
+		}
+		return "", false, err
 	}
 	if valid, err := r.preparationPoolGroup(ctx, move, pool); err != nil || !valid {
-		return "PreparedDestinationChanged", err
+		return "PreparedDestinationChanged", false, err
+	}
+	if !slices.Contains(observed.CandidateNodes, pod.Spec.NodeName) {
+		return "PreparedDestinationUnavailable", true, nil
 	}
 	consumer := observed.Consumer
-	if consumer == nil {
+	if consumer == nil || consumer.DeletionTimestamp != nil {
 		consumer = observed.Replacement
 	}
 	if consumer == nil {
-		// StartingDisruption may have evicted the original before a crash.
-		// The replacement is checked again before execution approval.
-		return "", nil
+		// The intent may already have evicted the original; workload constraints
+		// are checked when its replacement exists, before execution approval.
+		return "", false, nil
 	}
 	return r.preparedWorkloadFits(ctx, move, observed.PV, pod, consumer)
 }
@@ -102,32 +109,43 @@ func nonPreemptingPlacement(pod *corev1.Pod) bool {
 		pod.Spec.PreemptionPolicy != nil && *pod.Spec.PreemptionPolicy == corev1.PreemptNever
 }
 
-func (r *Reconciler) preparedWorkloadFits(ctx context.Context, move volumeapi.Move, pv *corev1.PersistentVolume, placement, consumer *corev1.Pod) (string, error) {
+func (r *Reconciler) preparedWorkloadFits(ctx context.Context, move volumeapi.Move, pv *corev1.PersistentVolume, placement, consumer *corev1.Pod) (string, bool, error) {
 	template, reason, err := r.consumerTemplate(ctx, consumer)
 	if err != nil || reason != "" {
-		return reason, err
+		return reason, false, err
 	}
 	live := placementProbePod(consumer, template, move.Spec.SourceNode)
-	// A replacement's ShiftPV hold is intentional; other scheduling gates
-	// remain unsupported by the ordinary preflight contract.
 	live.Spec.SchedulingGates = slices.DeleteFunc(live.Spec.SchedulingGates, func(gate corev1.PodSchedulingGate) bool {
 		return gate.Name == placementHoldName
 	})
 	if reason := unsupportedConsumerPlacement(live.Spec, template.Spec); reason != "" {
-		return reason, nil
+		return reason, false, nil
 	}
 	affinity, reason := requiredPVAffinity(pv)
 	if reason != "" {
-		return reason, nil
+		return reason, false, nil
 	}
-	nodes, reason, err := r.compatibleDestinations(ctx, []string{placement.Spec.NodeName}, live, template, affinity)
-	if err != nil || reason != "" {
-		return reason, err
+	// Node health and taints may change without changing the reserved workload
+	// or placement identity. Wait on them; never adopt a new reservation.
+	node, err := r.Client.CoreV1().Nodes().Get(ctx, placement.Spec.NodeName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "PreparedDestinationUnavailable", true, nil
 	}
-	if len(nodes) == 0 {
-		return "PreparedWorkloadPlacementChanged", nil
+	if err != nil {
+		return "", false, err
 	}
-	return preparedPlacementCoverage(placement, live, template), nil
+	if !admission.NodeReady(node) || node.Spec.Unschedulable || !toleratesPlacement(live.Spec, node) || !toleratesPlacement(template.Spec, node) {
+		return "PreparedDestinationUnavailable", true, nil
+	}
+	liveMatch, liveErr := nodeaffinity.GetRequiredNodeAffinity(live).Match(node)
+	templateMatch, templateErr := nodeaffinity.GetRequiredNodeAffinity(&corev1.Pod{Spec: template.Spec}).Match(node)
+	if liveErr != nil || templateErr != nil {
+		return "InvalidNodeAffinity", false, nil
+	}
+	if !liveMatch || !templateMatch || (affinity != nil && !affinity.Match(node)) {
+		return "PreparedWorkloadPlacementChanged", false, nil
+	}
+	return preparedPlacementCoverage(placement, live, template), false, nil
 }
 
 // Compare the resources actually reserved with requirements, not whole Pod

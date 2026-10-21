@@ -24,10 +24,14 @@ func lifecycleGuard(current Phase, observation Observation) (Decision, bool, err
 // not yet moved to the destination.
 func authorityGuard(current Phase, observation Observation) (Decision, bool, error) {
 	if observation.SourceAuthorityInvalid {
-		return blockedWith(observation, "SourceAuthorityInvalid"), true, nil
+		return blockedWith(current, observation, "SourceAuthorityInvalid"), true, nil
 	}
 	if beforeCommit(current) && !observation.OwnerCommitted && !observation.SourceHealthy {
-		return blockedWith(observation, "SourceUnavailable"), true, nil
+		if beforeExecutionApproval(observation) && disruptionPossible(current) {
+			decision, err := transition(current, current, ActionWait, reasonOr(observation.UnsafeReason, "SourceUnavailable"))
+			return decision, true, err
+		}
+		return blockedWith(current, observation, "SourceUnavailable"), true, nil
 	}
 	return Decision{}, false, nil
 }
@@ -44,7 +48,7 @@ func decideWaitingForReplacement(current Phase, observation Observation) (Decisi
 		return transition(current, current, ActionWait, "")
 	}
 	if !observation.ReplacementHeld {
-		return blockedWith(observation, "PlacementHoldLost"), nil
+		return blockedWith(current, observation, "PlacementHoldLost"), nil
 	}
 	return transition(current, PhaseWaitingForDestination, ActionEnsurePlacement, "")
 }
@@ -54,13 +58,13 @@ func decideWaitingForDestination(current Phase, observation Observation) (Decisi
 	// unavailable destination is not a wait condition here and a blocked one
 	// reports DestinationUnavailable rather than InvalidDestination.
 	if observation.DestinationBlocked {
-		return blockedWith(observation, "DestinationUnavailable"), nil
+		return blockedWith(current, observation, "DestinationUnavailable"), nil
 	}
 	if !observation.ReplacementExists {
 		return transition(current, current, ActionWait, "")
 	}
 	if !observation.ReplacementHeld {
-		return blockedWith(observation, "PlacementHoldLost"), nil
+		return blockedWith(current, observation, "PlacementHoldLost"), nil
 	}
 	if !observation.DestinationScheduled {
 		return transition(current, current, ActionEnsurePlacement, "")
@@ -80,7 +84,9 @@ func decideWaitingForCapacity(current Phase, observation Observation) (Decision,
 		return decision, err
 	}
 	if observation.CapacityBlocked {
-		return blockedWith(observation, "DestinationCapacityInsufficient"), nil
+		// CapacityReason is persisted from a prior probe. Recheck it so physical
+		// space recovery can approve the existing reservation without a new Move.
+		return transition(current, current, ActionEnsureCapacity, reasonOr(observation.UnsafeReason, "DestinationCapacityInsufficient"))
 	}
 	if observation.CapacityApproved {
 		return transition(current, PhaseCopying, ActionEnsureCopy, "")
@@ -94,7 +100,7 @@ func decideCopying(current Phase, observation Observation) (Decision, error) {
 	}
 	if observation.CopyFailed {
 		observation.UnsafeReason = ""
-		return blockedWith(observation, "CopyFailed"), nil
+		return blockedWith(current, observation, "CopyFailed"), nil
 	}
 	if decision, guarded, err := consumerGuard(current, observation); guarded {
 		return decision, err
@@ -119,7 +125,7 @@ func decidePromoting(current Phase, observation Observation) (Decision, error) {
 	}
 	if observation.PromotionFailed {
 		observation.UnsafeReason = ""
-		return blockedWith(observation, "PromotionFailed"), nil
+		return blockedWith(current, observation, "PromotionFailed"), nil
 	}
 	if decision, guarded, err := consumerGuard(current, observation); guarded {
 		return decision, err
@@ -174,7 +180,7 @@ func decideReleasingDestination(current Phase, observation Observation) (Decisio
 func decideWaitingForDestinationPublish(current Phase, observation Observation) (Decision, error) {
 	if observation.CleanupFailed {
 		observation.UnsafeReason = ""
-		return blockedWith(observation, "CleanupFailed"), nil
+		return blockedWith(current, observation, "CleanupFailed"), nil
 	}
 	if observation.DestinationUnavailable {
 		return transition(current, current, ActionWait, "DestinationUnavailable")
@@ -198,7 +204,7 @@ func decideCleaningSource(current Phase, observation Observation) (Decision, err
 	}
 	if observation.CleanupFailed {
 		observation.UnsafeReason = ""
-		return blockedWith(observation, "CleanupFailed"), nil
+		return blockedWith(current, observation, "CleanupFailed"), nil
 	}
 	if observation.ReplacementExists && observation.ReplacementHeld {
 		return transition(current, current, ActionReleasePlacement, "")

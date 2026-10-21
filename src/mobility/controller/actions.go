@@ -48,8 +48,42 @@ func (r *Reconciler) execute(ctx context.Context, move *volumeapi.Move, observed
 	}
 }
 
+// An eligibility short-circuit is not evidence that the recorded consumer
+// disappeared. Check absence before changing source publication authority.
+func (r *Reconciler) validateDisruptionConsumer(ctx context.Context, move volumeapi.Move, observed observation) error {
+	if !observed.ConsumersObserved {
+		return errLifecyclePending
+	}
+	if observed.Consumer != nil {
+		if observed.Consumer.Name != move.Status.ConsumerName || string(observed.Consumer.UID) != move.Status.ConsumerUID {
+			return fmt.Errorf("disruption consumer identity differs from its prepared plan")
+		}
+		return nil
+	}
+	if move.Status.ClaimNamespace == "" || move.Status.ConsumerName == "" || move.Status.ConsumerUID == "" {
+		return fmt.Errorf("disruption requires the recorded consumer identity")
+	}
+	pod, err := r.Client.CoreV1().Pods(move.Status.ClaimNamespace).Get(ctx, move.Status.ConsumerName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("confirm disrupted consumer absence: %w", err)
+	}
+	if pod.UID == "" {
+		return fmt.Errorf("disruption consumer observation has no UID")
+	}
+	if terminalPod(pod) {
+		return nil // Unpublication still has to prove the original mounts are gone.
+	}
+	if string(pod.UID) != move.Status.ConsumerUID {
+		return nil // The exact original is gone; never evict its same-name replacement.
+	}
+	return errLifecyclePending
+}
+
 func (r *Reconciler) evictConsumer(ctx context.Context, move *volumeapi.Move, observed observation) error {
-	if observed.Consumer == nil {
+	if observed.Consumer == nil || observed.Consumer.DeletionTimestamp != nil {
 		move.Status.EvictionRequested = true
 		return nil
 	}

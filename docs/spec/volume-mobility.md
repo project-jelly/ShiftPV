@@ -54,13 +54,26 @@ disk plan. The bytes stay counted once, even if the Pool limit was reduced after
 the hold was granted. Logical reservations are not quotas: source growth or an
 external writer can still make the physical-space check fail.
 
-Until execution approval, a deleted Move or changed binding, workload placement,
-destination or source cordon can cancel preparation. `Canceling` restores the exact
-source to Ready, confirms the owned placement Pod is absent, then records
-`Cancelled` and releases the logical hold. A later pass clears `activeMove` before
-retiring the journal. Cancellation needs no surviving PVC or consumer. After
-`StartingDisruption`, an already submitted eviction can still complete for the
-original UID; cancellation restores source authority, not that Pod's lifetime.
+Before `StartingDisruption`, changed prerequisites can cancel preparation. That
+durable intent marks possible eviction even when the API response was lost.
+From this point, temporary Node/Pool unavailability, PDB denial, consumer
+ambiguity or insufficient physical space retains the same Move, placement and
+capacity hold for retry. Identity or placement contradictions enter `Blocked`;
+they never authorize a different reservation or disk plan. A fresh PDB check
+still precedes eviction of a live original Pod. An already terminating original
+is observed as disrupted without re-eviction.
+
+Confirmed retirement of the recorded original PVC UID can still settle an
+unapproved Move with no destination effect intent. This requires its exact
+reserved source authority. The controller first persists `Canceling` to fence
+late approvals, then restores the exact source (including one blocked by that
+Move) to Ready,
+confirms the owned placement Pod is absent, then records `Cancelled` and releases
+the logical hold. A later pass clears `activeMove` before retiring the journal.
+Existing cancellation journals remain settleable without a surviving consumer;
+they do not automatically reopen. Deleting a Move after disruption preserves its
+authority in `Blocked`; it does not authorize stopping the workload or bypassing
+the original-claim retirement check.
 
 The recorded placement Pod UID fences preparation through execution approval.
 After approval, the controller may recreate the same Move-owned reservation on
@@ -83,7 +96,8 @@ Jobs and cleanup. Before owner commit it waits with `MultipleConsumers` until on
 consumer remains; it never selects an arbitrary replacement. After commit,
 destination publication and approved cleanup progress from their own evidence;
 consumer ambiguity cannot hide Job failure or settled cleanup. Before approval
-this shape still defers or cancels preparation. A terminal Move-owned rsync source
+this shape waits after disruption intent, or defers/cancels earlier preparation.
+A terminal Move-owned rsync source
 Pod is deleted with its exact UID and recreated; copying waits for its readiness.
 
 Before switching, settle active legacy work with its compatible old controller

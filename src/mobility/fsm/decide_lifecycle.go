@@ -43,6 +43,14 @@ func validateReservedSource(observation Observation) error {
 // Lifecycle routing precedes execution health checks. Cancellation does not
 // require a live workload binding, and terminal history cannot regain authority.
 func decideLifecycle(current State, observation Observation) (Decision, bool, error) {
+	if observation.WorkloadRetired && beforeExecutionApproval(observation) &&
+		current.Phase != PhaseCanceling && current.Phase != PhaseCancelled && current.Phase != PhaseSucceeded && current.RecoveryPhase == "" {
+		if observation.SourceAuthorityInvalid || !observation.SourcePlanRecorded || !observation.SourceClaimed || !observation.PreparationReserved {
+			return Decision{}, true, fmt.Errorf("retired preparation requires its exact reserved source authority")
+		}
+		decision, err := transition(current.Phase, PhaseCanceling, ActionWait, "WorkloadRetired")
+		return decision, true, err
+	}
 	if canRequestSettlement(current, observation) {
 		return Decision{Next: State{Phase: PhaseBlocked}, Action: ActionRequestSettlement, Reason: "WorkloadRetired"}, true, nil
 	}
@@ -57,8 +65,7 @@ func decideLifecycle(current State, observation Observation) (Decision, bool, er
 			return Decision{Next: current, Action: ActionFinalizeHistory}, true, nil
 		}
 		if beforeExecutionApproval(observation) && current.RecoveryPhase == "" {
-			decision, err := transition(current.Phase, PhaseCanceling, ActionWait, "UnapprovedMoveBlocked")
-			return decision, true, err
+			return Decision{Next: current, Action: ActionFinalizeSourceUsage}, true, nil
 		}
 		if observation.RecoveryRequested {
 			decision, err := decideRecovery(current, observation)
@@ -67,7 +74,7 @@ func decideLifecycle(current State, observation Observation) (Decision, bool, er
 		return Decision{Next: current, Action: ActionFinalizeSourceUsage}, true, nil
 	}
 	if beforeExecutionApproval(observation) && observation.PreparationChangedReason != "" {
-		decision, err := transition(current.Phase, PhaseCanceling, ActionWait, observation.PreparationChangedReason)
+		decision, err := preparationChanged(current.Phase, observation)
 		return decision, true, err
 	}
 	switch current.Phase {
@@ -100,11 +107,11 @@ func decidePreparation(current Phase, observation Observation) (Decision, error)
 		return transition(current, current, ActionProtectMove, "")
 	}
 	if observation.SourceAuthorityInvalid {
-		return blockedWith(observation, "SourceAuthorityInvalid"), nil
+		return blockedWith(current, observation, "SourceAuthorityInvalid"), nil
 	}
 	if !observation.SourceHealthy || !observation.PreconditionsValid || observation.PreflightDeferred {
 		if observation.PreparationReserved {
-			return blockedWith(observation, "PreparationChanged"), nil
+			return blockedWith(current, observation, "PreparationChanged"), nil
 		}
 		action := ActionWait
 		if observation.PlacementExists {
@@ -132,12 +139,14 @@ func decideStartingDisruption(current Phase, observation Observation) (Decision,
 	if !observation.ProtectionPresent || !observation.SourcePlanRecorded || !observation.SourceClaimed || !observation.PreparationReserved {
 		return Decision{}, fmt.Errorf("disruption requires the protected plan, source claim and reservation")
 	}
-	if observation.SourceAuthorityInvalid || !observation.SourceHealthy || observation.PreflightDeferred ||
-		(observation.ConsumerExists && !observation.PreconditionsValid) {
-		return blockedWith(observation, "PreparationChanged"), nil
+	if observation.SourceAuthorityInvalid {
+		return blockedWith(current, observation, "SourceAuthorityInvalid"), nil
+	}
+	if !observation.SourceHealthy || observation.PreflightDeferred {
+		return transition(current, current, ActionWait, reasonOr(observation.UnsafeReason, "PreparationUnavailable"))
 	}
 	if observation.ReplacementExists && !observation.ReplacementHeld {
-		return transition(current, PhaseCanceling, ActionWait, "UnexpectedConsumerPlacement")
+		return blockedWith(current, observation, "UnexpectedConsumerPlacement"), nil
 	}
 	return transition(current, PhaseWaitingForUnpublish, ActionStartDisruption, "")
 }
@@ -149,7 +158,7 @@ func decideCancellation(current State, observation Observation) (Decision, error
 	if current.Phase == PhaseCanceling && observation.SourcePlanRecorded && !observation.SourceClaimed {
 		return Decision{Next: current, Action: ActionClaimSource}, nil
 	}
-	if observation.SourceClaimed && observation.SourceMoving {
+	if observation.SourceClaimed && (observation.SourceMoving || observation.SourceBlocked) {
 		return Decision{Next: current, Action: ActionRestoreSource}, nil
 	}
 	if !observation.PlacementAbsent {

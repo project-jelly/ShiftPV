@@ -81,7 +81,23 @@ func (r *Reconciler) observeWorkloadRetirement(ctx context.Context, move volumea
 			return observation{}, false, nil
 		}
 	}
-	if err := validatePreparedStage(move); err != nil {
+	if !move.Status.CapacityApproved && noDestinationEffectIntent(move) {
+		if err := cancellablePreparation(move); err != nil {
+			return observation{}, true, err
+		}
+		if err := volumeapi.ValidateMovePreparation(move); err != nil {
+			return observation{}, true, err
+		}
+		if state.ActiveMove != move.Name {
+			return observation{}, true, fmt.Errorf("retired preparation lost its exact source claim")
+		}
+		if state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseMoving && state.Phase != volumeapi.PhaseBlocked {
+			return observation{}, true, fmt.Errorf("retired preparation has no restorable source")
+		}
+		if err := cancellationSourceIdentity(move, state); err != nil {
+			return observation{}, true, err
+		}
+	} else if err := validatePreparedStage(move); err != nil {
 		return observation{}, true, err
 	}
 	if err := recordedOwnerIntact(move, state); err != nil {
@@ -114,7 +130,8 @@ func needsWorkloadLifetime(move volumeapi.Move) bool {
 	case fsm.PhaseSucceeded, fsm.PhaseCancelled, fsm.PhaseCanceling:
 		return false
 	}
-	return move.Status.CapacityApproved || !noDestinationEffectIntent(move)
+	return move.Status.CapacityApproved || !noDestinationEffectIntent(move) ||
+		(move.Status.SourceCopy != nil && move.Status.Preparation != nil)
 }
 
 // The Volume fence competes with owner commit on the same exact copy. If that

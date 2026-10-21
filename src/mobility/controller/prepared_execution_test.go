@@ -2,6 +2,7 @@ package controller
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -101,39 +102,64 @@ func TestPreparedExecutionMeasurementResponseLossStopsBeforeApproval(t *testing.
 	assertPreparationReserved(t, f, preparationRequestedBytes)
 }
 
-func TestPreparedExecutionCancelsBeforeDiskAuthority(t *testing.T) {
-	for _, change := range []string{"physical space", "claim missing"} {
-		t.Run(change, func(t *testing.T) {
-			f, move := preparationAtCapacity(t)
-			if change == "physical space" {
-				f.reconciler.CapacityProbe = fakeMoveCapacityProbe{usage: 2 << 20, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 20}}
-				f.reconciler.SourceUsage = f.reconciler.CapacityProbe.(SourceUsage)
-				if err := f.reconciler.reconcileMove(f.ctx, move); err != nil {
-					t.Fatal(err)
-				}
-				move = f.move(t, 0)
-				if move.Status.CapacityReason != "DestinationFilesystemSpace" || move.Status.CapacityApproved {
-					t.Fatalf("physical denial not recorded: %+v", move.Status)
-				}
-			} else if err := f.client.CoreV1().PersistentVolumeClaims(move.Status.ClaimNamespace).Delete(f.ctx, move.Status.ClaimName, metav1.DeleteOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.reconciler.reconcileMove(f.ctx, move); err != nil {
-				t.Fatal(err)
-			}
-			if f.move(t, 0).Status.Phase != "Canceling" {
-				t.Fatalf("pre-disk failure did not cancel: %+v", f.move(t, 0).Status)
-			}
-			for range 8 {
-				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			state, settled := f.state(t, 0), f.move(t, 0)
-			if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || settled.Status.CapacityApproved || settled.Status.IncomingCopy != nil {
-				t.Fatalf("source/hold did not settle: state=%+v move=%+v", state, settled)
-			}
-			assertPreparationReserved(t, f, 0)
-		})
+func TestPreparedExecutionRetainsHoldUntilPhysicalSpaceRecovers(t *testing.T) {
+	f, move := preparationAtCapacity(t)
+	source := f.state(t, 0)
+	f.reconciler.CapacityProbe = fakeMoveCapacityProbe{usage: 2 << 20, stats: poolcapacity.Filesystem{AvailableBytes: 1 << 20}}
+	f.reconciler.SourceUsage = f.reconciler.CapacityProbe.(SourceUsage)
+	for range 3 {
+		if err := f.reconciler.reconcileMove(f.ctx, f.move(t, 0)); err != nil {
+			t.Fatal(err)
+		}
+		waiting := f.move(t, 0)
+		if waiting.UID != move.UID || waiting.Status.Phase != "WaitingForCapacity" ||
+			waiting.Status.CapacityReason != "DestinationFilesystemSpace" || waiting.Status.CapacityApproved ||
+			!reflect.DeepEqual(waiting.Status.Preparation, move.Status.Preparation) || waiting.Status.IncomingCopy != nil {
+			t.Fatalf("temporary physical shortage lost the held transaction: %+v", waiting)
+		}
+		if !reflect.DeepEqual(source, f.state(t, 0)) {
+			t.Fatal("temporary physical shortage released or changed source authority")
+		}
+		assertPreparationReserved(t, f, preparationRequestedBytes)
+		singleLifecycleNoDiskWork(t, f)
 	}
+	f.reconciler.CapacityProbe = fakeMoveCapacityProbe{usage: 2 << 20, stats: poolcapacity.Filesystem{AvailableBytes: 256 << 20}}
+	f.reconciler.SourceUsage = f.reconciler.CapacityProbe.(SourceUsage)
+	if err := f.reconciler.reconcileMove(f.ctx, f.move(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	approved := f.move(t, 0)
+	if approved.UID != move.UID || approved.Status.Phase != "WaitingForCapacity" || !approved.Status.CapacityApproved ||
+		approved.Status.CapacityReason != "" || approved.Status.Preparation != nil || approved.Status.IncomingCopy == nil {
+		t.Fatalf("fresh physical capacity did not approve the same held transaction: %+v", approved)
+	}
+	if !reflect.DeepEqual(source, f.state(t, 0)) {
+		t.Fatal("capacity approval changed source authority")
+	}
+	assertPreparationReserved(t, f, preparationRequestedBytes)
+	singleLifecycleNoDiskWork(t, f)
+}
+
+func TestPreparedExecutionSettlesRetiredClaimBeforeDiskAuthority(t *testing.T) {
+	f, move := preparationAtCapacity(t)
+	if err := f.client.CoreV1().PersistentVolumeClaims(move.Status.ClaimNamespace).Delete(f.ctx, move.Status.ClaimName, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconciler.reconcileMove(f.ctx, move); err != nil {
+		t.Fatal(err)
+	}
+	if canceling := f.move(t, 0); canceling.Status.Phase != "Canceling" || canceling.Status.Reason != "WorkloadRetired" {
+		t.Fatalf("retired claim did not enter cancellation settlement: %+v", canceling.Status)
+	}
+	for range 8 {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, settled := f.state(t, 0), f.move(t, 0)
+	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || settled.Status.CapacityApproved || settled.Status.IncomingCopy != nil {
+		t.Fatalf("source/hold did not settle: state=%+v move=%+v", state, settled)
+	}
+	assertPreparationReserved(t, f, 0)
+	singleLifecycleNoDiskWork(t, f)
 }

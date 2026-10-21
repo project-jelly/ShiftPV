@@ -141,6 +141,12 @@ func (r *Reconciler) observeSource(ctx context.Context, move volumeapi.Move, poo
 	if !sourceHealthy && !result.FSM.OwnerCommitted {
 		result.FSM.UnsafeReason = "SourceUnavailable"
 	}
+	if copy := moveSourceCopy(move, state); copy != nil && !result.FSM.OwnerCommitted {
+		if _, registered := indexedCopyPool(pools.registered, copy); !registered {
+			result.FSM.SourceAuthorityInvalid = true
+			result.FSM.UnsafeReason = "SourcePoolIdentityChanged"
+		}
+	}
 
 	return false, nil
 }

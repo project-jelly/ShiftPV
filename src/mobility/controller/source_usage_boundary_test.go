@@ -124,7 +124,12 @@ func TestSourceUsageCancellationRestoresSourceBeforeHelperAbsence(t *testing.T) 
 		}
 		return false, nil, nil
 	})
-	if err := f.reconciler.requestPreparationCancellation(f.ctx, &move, "PrerequisiteChanged"); err != nil {
+	// An already admitted cancellation must settle even when its measurement
+	// helper outlives the decision. This does not admit a fresh cancellation.
+	move = f.move(t, 0)
+	previous := move.Status
+	move.Status.Phase = "Canceling"
+	if err := f.reconciler.persistMoveStatus(f.ctx, &move, previous); err != nil {
 		t.Fatal(err)
 	}
 	for range 8 {

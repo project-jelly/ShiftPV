@@ -45,20 +45,26 @@ func validatePreparedExecutionPlan(move volumeapi.Move) error {
 	})
 }
 
-// Before approval there are no destination disk effects. Conditions that no
-// longer permit the prepared placement cancel that hold and restore the source.
-func (r *Reconciler) preparedExecutionChanged(ctx context.Context, move volumeapi.Move, observed observation) (string, error) {
+// Before approval, retain the disrupted workload's reservation across transient
+// availability changes; confirmed identity changes are handled by the FSM.
+func (r *Reconciler) preparedExecutionChanged(ctx context.Context, move volumeapi.Move, observed observation) (string, bool, error) {
 	if !preparedBindingMatches(move, observed.PV, observed.Claim) {
-		return "VolumeBindingChanged", nil
+		return "VolumeBindingChanged", false, nil
+	}
+	if observed.FSM.SourceAuthorityInvalid {
+		return preparationReason(observed.FSM.UnsafeReason, "SourceAuthorityInvalid"), false, nil
+	}
+	if !observed.FSM.SourceHealthy {
+		return preparationReason(observed.FSM.UnsafeReason, "SourceUnavailable"), true, nil
 	}
 	if !observed.SourceCordoned {
-		return "SourceNotCordoned", nil
+		return "SourceNotCordoned", false, nil
 	}
-	if observed.FSM.SourceAuthorityInvalid || !observed.FSM.SourceHealthy || observed.FSM.PreflightDeferred || observed.FSM.UnsafeReason == "AdmissionNotEnabled" {
-		return preparationReason(observed.FSM.UnsafeReason, "SourceUnavailable"), nil
+	if observed.FSM.PreflightDeferred || observed.FSM.UnsafeReason == "AdmissionNotEnabled" {
+		return preparationReason(observed.FSM.UnsafeReason, "PreparationUnavailable"), true, nil
 	}
 	if observed.Replacement != nil && (observed.Replacement.Spec.NodeName != "" || !hasPlacementHold(observed.Replacement)) {
-		return "UnexpectedConsumerPlacement", nil
+		return "UnexpectedConsumerPlacement", false, nil
 	}
 	return r.validatePreparedPlacement(ctx, move, observed)
 }

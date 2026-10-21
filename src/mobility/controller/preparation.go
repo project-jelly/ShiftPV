@@ -25,7 +25,7 @@ func (r *Reconciler) observePreparation(ctx context.Context, move volumeapi.Move
 	if err := volumeapi.ValidateMovePreparation(move); err != nil {
 		return result, err
 	}
-	if move.Deleting {
+	if move.Deleting && move.Status.Phase != string(fsm.PhaseStartingDisruption) {
 		result.FSM.PreparationChangedReason = "MoveDeleting"
 		return result, nil
 	}
@@ -39,13 +39,34 @@ func (r *Reconciler) observePreparation(ctx context.Context, move volumeapi.Move
 		return result, err
 	}
 	result.Pools = pools
+	if result.FSM.WorkloadRetired {
+		return result, nil
+	}
+	// A prior markBlocked may have fenced the Volume before its Move status CAS
+	// was observed. Preserve that fence and finish recording the same decision.
+	if move.Status.Phase == string(fsm.PhaseStartingDisruption) && result.Volume.Phase == volumeapi.PhaseBlocked && result.Volume.ActiveMove == move.Name {
+		if err := cancellationSourceIdentity(move, result.Volume); err != nil {
+			return result, err
+		}
+		result.FSM.PreparationChangedReason = "SourceBlocked"
+		return result, nil
+	}
 	if err := preparationSourceAuthority(move, result.Volume); err != nil {
 		return result, err
+	}
+	if move.Deleting {
+		result.FSM.PreparationChangedReason = "MoveDeleting"
+		return result, nil
 	}
 	return r.observePreparationPlan(ctx, move, result)
 }
 
 func (r *Reconciler) observePreparationPlan(ctx context.Context, move volumeapi.Move, result observation) (observation, error) {
+	if move.Status.Phase == string(fsm.PhaseStartingDisruption) && !result.FSM.SourceHealthy && !result.FSM.SourceAuthorityInvalid {
+		result.FSM.PreparationChangedReason = preparationReason(result.FSM.UnsafeReason, "SourceUnavailable")
+		result.FSM.PreparationUnavailable = true
+		return result, nil
+	}
 	if !result.SourceCordoned {
 		result.FSM.PreparationChangedReason = "SourceNotCordoned"
 		return result, nil
@@ -80,12 +101,13 @@ func (r *Reconciler) observePreparationPlan(ctx context.Context, move volumeapi.
 		return result, nil
 	}
 	if !result.FSM.SourceHealthy || result.FSM.PreflightDeferred ||
-		(result.Consumer != nil && !result.FSM.PreconditionsValid) {
+		(move.Status.Phase != string(fsm.PhaseStartingDisruption) && result.Consumer != nil && !result.FSM.PreconditionsValid) {
+		result.FSM.PreparationUnavailable = !result.FSM.SourceAuthorityInvalid && (!result.FSM.SourceHealthy || result.FSM.PreflightDeferred)
 		result.FSM.PreparationChangedReason = preparationReason(result.FSM.UnsafeReason, "PreparationChanged")
 		return result, nil
 	}
-	reason, err := r.validatePreparedPlacement(ctx, move, result)
-	result.FSM.PreparationChangedReason = reason
+	reason, unavailable, err := r.validatePreparedPlacement(ctx, move, result)
+	result.FSM.PreparationChangedReason, result.FSM.PreparationUnavailable = reason, unavailable
 	return result, err
 }
 
@@ -347,11 +369,17 @@ func (r *Reconciler) startPreparedDisruption(ctx context.Context, move *volumeap
 	if observed.Volume.ActiveMove != move.Name || move.Status.Preparation == nil {
 		return fmt.Errorf("disruption requires its source claim and durable preparation")
 	}
-	reason, err := r.validatePreparedPlacement(ctx, *move, observed)
+	if err := r.validateDisruptionConsumer(ctx, *move, observed); err != nil {
+		return err
+	}
+	reason, unavailable, err := r.validatePreparedPlacement(ctx, *move, observed)
 	if err != nil {
 		return err
 	}
 	if reason != "" {
+		if unavailable {
+			return errLifecyclePending
+		}
 		return preparationChanged(reason)
 	}
 	if observed.Volume.Phase == volumeapi.PhaseReady {

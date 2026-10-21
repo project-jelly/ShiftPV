@@ -12,19 +12,20 @@ import (
 )
 
 type observation struct {
-	FSM             fsm.Observation
-	Volume          volumeapi.State
-	Pools           poolIndex
-	VolumeMissing   bool
-	PV              *corev1.PersistentVolume
-	Claim           *corev1.PersistentVolumeClaim
-	Consumer        *corev1.Pod
-	Replacement     *corev1.Pod
-	Placement       *corev1.Pod
-	DestinationNode string
-	CandidateNodes  []string
-	Names           resourceNames
-	SourceCordoned  bool
+	FSM               fsm.Observation
+	Volume            volumeapi.State
+	Pools             poolIndex
+	VolumeMissing     bool
+	PV                *corev1.PersistentVolume
+	Claim             *corev1.PersistentVolumeClaim
+	Consumer          *corev1.Pod
+	Replacement       *corev1.Pod
+	Placement         *corev1.Pod
+	DestinationNode   string
+	CandidateNodes    []string
+	Names             resourceNames
+	SourceCordoned    bool
+	ConsumersObserved bool
 }
 
 // observe builds the immutable snapshot the reconciler decides on. Each step
@@ -122,6 +123,18 @@ func (r *Reconciler) observePreconditions(ctx context.Context, move volumeapi.Mo
 	result.FSM.PreconditionsValid = preconditions
 	if preEviction(move) && result.Consumer != nil && sourceHealthy {
 		return r.deferOnPreflight(ctx, result, preconditions)
+	}
+	if move.Status.Phase == string(fsm.PhaseStartingDisruption) && result.Consumer != nil && result.Consumer.DeletionTimestamp == nil {
+		// Retrying an intent must still respect a newly denied PDB. A terminating
+		// original is already disrupted, even when its eviction reply was lost.
+		reason, err := r.preflightPDB(ctx, result.Consumer)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			result.FSM.PreflightDeferred, result.FSM.PreparationUnavailable = true, true
+			result.FSM.UnsafeReason = reason
+		}
 	}
 	return nil
 }
