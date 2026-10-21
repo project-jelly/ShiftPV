@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -96,6 +97,79 @@ func (m *mutableVolumeRepository) observeEmpty(at time.Time) {
 	defer m.mu.Unlock()
 	m.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(at.UTC())
 	m.pools[0].Status.Inventory.Copies = nil
+}
+
+func identityReleaseChecker() (*uninstallcheck.Checker, *fake.Clientset, *mutableVolumeRepository) {
+	now := metav1.Now()
+	repository := &mutableVolumeRepository{pools: []volumeapi.Pool{{
+		Name: "lost", UID: "lost-uid", NodeName: "node", Generation: 1, DeletionTimestamp: &now,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1,
+			Inventory: &volumeapi.PoolInventory{ObservedAt: now, Valid: true},
+			Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionIdentityReleased, Status: metav1.ConditionFalse,
+				ObservedGeneration: 1, Reason: "PoolStorageRestorationRequired"}},
+		},
+	}}}
+	client := fake.NewClientset()
+	checker := &uninstallcheck.Checker{Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassNames: []string{"shiftpv"}}
+	return checker, client, repository
+}
+
+func TestCheckAfterQuiesceDoesNotInventBlockersBeforeFirstObservation(t *testing.T) {
+	checker, client, _ := identityReleaseChecker()
+	failure := errors.New("first API observation failed")
+	client.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, failure
+	})
+	_, err := checkAfterQuiesce(context.Background(), checker, time.Time{})
+	if !errors.Is(err, failure) || strings.Contains(err.Error(), "last observed blockers") || strings.Contains(err.Error(), "PoolStorageRestorationRequired") {
+		t.Fatalf("first failure fabricated a prior observation: %v", err)
+	}
+}
+
+func TestCheckAfterQuiesceRetainsObservedBlockersWhenAPIFails(t *testing.T) {
+	checker, client, _ := identityReleaseChecker()
+	failure := errors.New("later API observation failed")
+	calls := 0
+	client.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		calls++
+		if calls == 1 {
+			return false, nil, nil
+		}
+		return true, nil, failure
+	})
+	_, err := checkAfterQuiesce(context.Background(), checker, time.Time{})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "last observed blockers:") || !strings.Contains(err.Error(), "ShiftPVPoolIdentity lost: PoolStorageRestorationRequired") {
+		t.Fatalf("later API failure lost its prior observation: %v", err)
+	}
+}
+
+func TestCheckAfterQuiesceRetainsObservedBlockersAtDeadline(t *testing.T) {
+	checker, _, _ := identityReleaseChecker()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := checkAfterQuiesce(ctx, checker, time.Time{})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "last observed blockers:") || !strings.Contains(err.Error(), "ShiftPVPoolIdentity lost: PoolStorageRestorationRequired") {
+		t.Fatalf("deadline lost its prior observation: %v", err)
+	}
+}
+
+func TestCheckAfterQuiesceAcceptsFreshReleaseAfterPriorBlocker(t *testing.T) {
+	checker, client, repository := identityReleaseChecker()
+	calls := 0
+	client.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		calls++
+		if calls == 2 {
+			repository.mu.Lock()
+			repository.pools[0].Status.Conditions[0].Status = metav1.ConditionTrue
+			repository.pools[0].Status.Conditions[0].Reason = "PoolIdentityReleased"
+			repository.mu.Unlock()
+		}
+		return false, nil, nil
+	})
+	report, err := checkAfterQuiesce(context.Background(), checker, time.Time{})
+	if err != nil || !report.Safe() || calls != 2 {
+		t.Fatalf("prior blocker prevented a fresh safe observation: report=%+v calls=%d err=%v", report, calls, err)
+	}
 }
 
 func TestRunCompletesQuiescedTeardown(t *testing.T) {

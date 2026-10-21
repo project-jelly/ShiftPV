@@ -139,17 +139,29 @@ func run(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstall
 func checkAfterQuiesce(ctx context.Context, checker *uninstallcheck.Checker, inventoryAfter time.Time) (uninstallcheck.Report, error) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	var lastObserved uninstallcheck.Report
 	for {
 		report, err := checker.CheckAfter(ctx, inventoryAfter)
-		if err != nil || report.Safe() || !report.WaitingForInventory() {
-			return report, err
+		if err != nil {
+			return report, withLastObservedBlockers(err, lastObserved)
 		}
+		if report.Safe() || !report.WaitingForInventory() {
+			return report, nil
+		}
+		lastObserved = report
 		select {
 		case <-ctx.Done():
-			return uninstallcheck.Report{}, ctx.Err()
+			return uninstallcheck.Report{}, withLastObservedBlockers(ctx.Err(), lastObserved)
 		case <-ticker.C:
 		}
 	}
+}
+
+func withLastObservedBlockers(err error, report uninstallcheck.Report) error {
+	if report.Safe() {
+		return err
+	}
+	return fmt.Errorf("%w; last observed blockers:\n%s", err, formatBlockers(report))
 }
 
 func formatBlockers(report uninstallcheck.Report) string {
