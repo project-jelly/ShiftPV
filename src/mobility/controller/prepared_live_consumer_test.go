@@ -144,6 +144,86 @@ func TestPreparedDisruptionBlocksTemplateWithMultiplePVCsBeforeEviction(t *testi
 	singleLifecycleNoDiskWork(t, f)
 }
 
+func TestStatefulSetGeneratedPVCIsAcceptedBeforeAndAfterPreparation(t *testing.T) {
+	f, sts := statefulSetGeneratedPVCFixture(t)
+	w := f.workloads[0]
+	if len(sts.Spec.VolumeClaimTemplates) != 1 || len(pvcNames(sts.Spec.Template.Spec)) != 0 || len(pvcNames(w.Consumer.Spec)) != 1 {
+		t.Fatal("fixture must retain one generated live PVC and no explicit PVC in the raw StatefulSet template")
+	}
+	move := f.move(t, 0)
+	t.Run("preflight", func(t *testing.T) {
+		observed, err := f.reconciler.observe(f.ctx, move)
+		if err != nil || !observed.FSM.PreconditionsValid || observed.FSM.UnsafeReason != "" {
+			t.Fatalf("single StatefulSet-generated PVC rejected by preflight: observed=%+v error=%v", observed.FSM, err)
+		}
+	})
+	t.Run("prepared workload", func(t *testing.T) {
+		placement := f.reconciler.placementPod(move, w.Consumer, namesFor(move.Name))
+		placement.Spec.NodeName = "destination"
+		reason, unavailable, err := f.reconciler.preparedWorkloadFits(f.ctx, move, w.PV, placement, w.Consumer)
+		if err != nil || reason != "" || unavailable {
+			t.Fatalf("single StatefulSet-generated PVC rejected by prepared validation: reason=%s unavailable=%v error=%v", reason, unavailable, err)
+		}
+	})
+}
+
+func statefulSetGeneratedPVCFixture(t *testing.T) (*preparationRegistryFixture, *appsv1.StatefulSet) {
+	t.Helper()
+	f := newPreparationRegistryFixture(t, 1)
+	w := f.workloads[0]
+	one := int32(1)
+	labels := map[string]string{"app": "stateful"}
+	claimTemplate := corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "data"}, Spec: *w.Claim.Spec.DeepCopy()}
+	claimTemplate.Spec.VolumeName = ""
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: w.Consumer.Namespace, UID: "consumer-sts-uid"},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &one, Ordinals: &appsv1.StatefulSetOrdinals{Start: 1}, ServiceName: "consumer",
+			Selector:             &metav1.LabelSelector{MatchLabels: labels},
+			Template:             corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}, Spec: *w.ReplicaSet.Spec.Template.Spec.DeepCopy()},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{claimTemplate},
+		},
+	}
+	// StatefulSet adds this volume to each generated Pod. It is deliberately
+	// absent from the raw Pod template read by consumerTemplate.
+	sts.Spec.Template.Spec.Volumes = nil
+	sts.Spec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/data"}}
+	sts, err := f.client.AppsV1().StatefulSets(sts.Namespace).Create(f.ctx, sts, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := w.Claim.DeepCopy()
+	claim.Name, claim.UID, claim.ResourceVersion = "data-"+w.Consumer.Name, "generated-claim-uid", "1"
+	claim, err = f.client.CoreV1().PersistentVolumeClaims(claim.Namespace).Create(f.ctx, claim, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.client.CoreV1().PersistentVolumeClaims(w.Claim.Namespace).Delete(f.ctx, w.Claim.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pv := w.PV.DeepCopy()
+	pv.Spec.ClaimRef.Name, pv.Spec.ClaimRef.UID = claim.Name, claim.UID
+	pv, err = f.client.CoreV1().PersistentVolumes().Update(f.ctx, pv, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := w.Consumer.DeepCopy()
+	pod.Labels = map[string]string{"app": "stateful", "statefulset.kubernetes.io/pod-name": pod.Name, "apps.kubernetes.io/pod-index": "1"}
+	pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sts, appsv1.SchemeGroupVersion.WithKind("StatefulSet"))}
+	pod.Spec = *sts.Spec.Template.Spec.DeepCopy()
+	pod.Spec.NodeName, pod.Spec.Hostname, pod.Spec.Subdomain = "source", pod.Name, sts.Spec.ServiceName
+	pod.Spec.Volumes = []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim.Name}}}}
+	pod, err = f.client.CoreV1().Pods(pod.Namespace).Update(f.ctx, pod, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.client.AppsV1().ReplicaSets(w.ReplicaSet.Namespace).Delete(f.ctx, w.ReplicaSet.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	w.Consumer, w.Claim, w.PV = pod, claim, pv
+	return f, sts
+}
+
 // Exercise the production Registry and Reconciler. Both controllers desire one
 // replica; a Deployment may nevertheless create a surge Pod in a new ReplicaSet.
 // The extra consumer is created only after StartingDisruption is persisted so
