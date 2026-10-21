@@ -100,15 +100,22 @@ func (r *Reconciler) observePreparationPlan(ctx context.Context, move volumeapi.
 		result.FSM.PreparationChangedReason = "UnexpectedConsumerPlacement"
 		return result, nil
 	}
-	if !result.FSM.SourceHealthy || result.FSM.PreflightDeferred ||
-		(move.Status.Phase != string(fsm.PhaseStartingDisruption) && result.Consumer != nil && !result.FSM.PreconditionsValid) {
-		result.FSM.PreparationUnavailable = !result.FSM.SourceAuthorityInvalid && (!result.FSM.SourceHealthy || result.FSM.PreflightDeferred)
-		result.FSM.PreparationChangedReason = preparationReason(result.FSM.UnsafeReason, "PreparationChanged")
+	if reason, unavailable := preparationPlanDeferral(move, result); reason != "" {
+		result.FSM.PreparationChangedReason, result.FSM.PreparationUnavailable = reason, unavailable
 		return result, nil
 	}
 	reason, unavailable, err := r.validatePreparedPlacement(ctx, move, result)
 	result.FSM.PreparationChangedReason, result.FSM.PreparationUnavailable = reason, unavailable
 	return result, err
+}
+
+func preparationPlanDeferral(move volumeapi.Move, observed observation) (string, bool) {
+	if !observed.FSM.SourceHealthy || observed.FSM.PreflightDeferred ||
+		(move.Status.Phase != string(fsm.PhaseStartingDisruption) && observed.Consumer != nil && !observed.FSM.PreconditionsValid) {
+		unavailable := !observed.FSM.SourceAuthorityInvalid && (!observed.FSM.SourceHealthy || observed.FSM.PreflightDeferred)
+		return preparationReason(observed.FSM.UnsafeReason, "PreparationChanged"), unavailable
+	}
+	return "", false
 }
 
 func preparationDeferred(observed observation) bool {
