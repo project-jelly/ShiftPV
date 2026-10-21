@@ -168,7 +168,6 @@ func main() {
 	lifecycleClient, lifecycleDynamicClient := lifecycleClients.Typed, lifecycleClients.Dynamic
 	controllerService, csiOperator := newCSILifecycle(cfg, config, fatal)
 	volumeRegistry := &volumeapi.Registry{Client: dynamicClient, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
-	cleanupStore := &cleanupapi.Store{Client: dynamicClient}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	exporter := startMetrics(ctx, cfg, config)
@@ -177,8 +176,6 @@ func main() {
 	if err := wiring.BootstrapWithRetry(ctx, "uninstall quiesce state", quiesceGate.Bootstrap); err != nil {
 		klog.Fatalf("bootstrap uninstall quiesce gate: %v", err)
 	}
-	operator := newHelperRunner(cfg, client, volumeRegistry)
-	operator.ObserveStep = exporter.ObserveProvisioningStep
 	csiOperator.ObserveStep = exporter.ObserveProvisioningStep
 	retryClients := wiring.ForConfig(capacityRetryRESTConfig(config), "capacity retry", fatal)
 	retryPools := &volumeapi.Registry{Client: retryClients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
@@ -227,11 +224,14 @@ func main() {
 		klog.Fatalf("bootstrap mobility webhook certificate: %v", err)
 	}
 	go func() { errCh <- certificateManager.Run(ctx) }()
-	stopMobility := startMobility(ctx, cfg, mobilityComponents{
-		client: client, dynamicClient: dynamicClient, volumes: volumeRegistry, operator: operator,
-		capacityProbe: newMobilityCapacityProbe(probePools, effects.Discovery, mobilityRPC, exporter.ObserveProvisioningStep),
-		poolLocks:     poolLocks, cleanups: cleanupStore, cleanupOperator: effects, exporter: exporter, errCh: errCh,
-	})
+	mobility := newMobilityComponents(cfg, config, fatal)
+	if cfg.mobilityEnabled {
+		mobility.operator.ObserveStep = exporter.ObserveProvisioningStep
+		mobility.capacityProbe = newMobilityCapacityProbe(probePools, effects.Discovery, mobilityRPC, exporter.ObserveProvisioningStep)
+		mobility.poolLocks = poolLocks
+		mobility.cleanupOperator, mobility.exporter, mobility.errCh = effects, exporter, errCh
+	}
+	stopMobility := startMobility(ctx, cfg, mobility)
 	defer stopMobility()
 	webhookServer := newWebhookServer(cfg, config, certificateManager, fatal)
 	go serveWebhook(webhookServer, cfg.webhookAddress, errCh)
@@ -363,6 +363,30 @@ type mobilityComponents struct {
 	cleanupOperator *nodeexecutor.Client
 	exporter        *metrics.Exporter
 	errCh           chan error
+}
+
+// newMobilityComponents owns the API clients used by discovery, Move journals,
+// reservations and read-only source measurements. Effect execution and capacity
+// probes retain their independently injected clients and budgets.
+func newMobilityComponents(cfg config, restConfig *rest.Config, fail wiring.Fail) mobilityComponents {
+	if !cfg.mobilityEnabled {
+		return mobilityComponents{}
+	}
+	mobilityConfig := admissionRESTConfig(restConfig)
+	mobilityConfig.Timeout = 0 // Reconcile requests have deadlines; watches stay open.
+	mobilityConfig.UserAgent = "shiftpv-mobility"
+	return mobilityComponentsForConfig(cfg, mobilityConfig, fail)
+}
+
+// mobilityComponentsForConfig binds every journal, Pod and helper collaborator
+// to the clients of the selected role configuration.
+func mobilityComponentsForConfig(cfg config, mobilityConfig *rest.Config, fail wiring.Fail) mobilityComponents {
+	clients := wiring.ForConfig(mobilityConfig, "mobility", fail)
+	volumes := &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: cfg.poolReadinessStaleAfter}
+	return mobilityComponents{
+		client: clients.Typed, dynamicClient: clients.Dynamic, volumes: volumes,
+		operator: newHelperRunner(cfg, clients.Typed, volumes), cleanups: &cleanupapi.Store{Client: clients.Dynamic},
+	}
 }
 
 // startMobility starts the automatic cordon mobility reconciler when it is

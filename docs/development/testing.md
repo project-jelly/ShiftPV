@@ -369,6 +369,21 @@ caller cancellation. Pool safety/quiesce/CSI clients cannot consume this budget;
 each role retains its own bounded client. These tests establish isolation and
 preserved admission policy, not production throughput or a latency percentage.
 
+Mobility discovery, Move journals, reservations, Events and source-usage helpers
+share a separate 50 QPS/100 burst budget. `mobility_budget_test.go` exercises the
+production constructor and real HTTP reads/writes while the inherited background
+limiter is blocked, checks typed/dynamic budget sharing, cancellation and API
+denial, and keeps CSI/admission budgets separate. A controlled limiter at the
+production client-construction boundary proves both clients wait before HTTP;
+explicit release/cancellation checks also run with slow HTTP responses.
+Capacity probes and resident
+effects retain their existing roles; fresh validation, CAS and the shared Pool
+lock remain in place. Disabled mobility constructs no clients.
+Run `go test ./src/cmd/controller -run '^$' -bench '^BenchmarkMobilityAPIRequestBudget$' -benchtime=1x`
+to compare the old default typed/dynamic 5/10 clients with the shared 50/100 role
+over the same 120 HTTP requests. This isolates client token waits; it does not
+measure real copy time, service downtime or API-server contention.
+
 For a live throughput comparison, enable the existing Node metrics endpoint
 and capture `node_api_effects_wait` and `node_api_effects_roundtrip` histogram
 sum/count before and after the same 20-volume workload. Record API failures and
