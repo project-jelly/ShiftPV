@@ -199,8 +199,20 @@ run_cleanup_executor_retry() {
 		"${ROOT_DIR}/test/e2e/kind/cleanup-executor-retry.sh"
 }
 
+run_preserved_retired_uninstall() (
+	# Keep mount restoration and scenario variables inside this subshell.
+	# shellcheck source=test/e2e/kind/lifecycle/preserved-retired-pool.sh
+	source "${ROOT_DIR}/test/e2e/kind/lifecycle/preserved-retired-pool.sh"
+)
+
 install_shiftpv true
 wait_for_lifecycle_webhook
+
+if [[ "${PRESERVED_UNINSTALL_ONLY:-0}" == "1" ]]; then
+	run_preserved_retired_uninstall
+	echo "ShiftPV focused preserved retired Pool uninstall E2E passed"
+	exit 0
+fi
 
 if [[ "${NODE_EFFECTS_ONLY:-0}" == "1" ]]; then
  CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/pool-retirement.sh"
@@ -323,6 +335,7 @@ fi
 
 if group_selected g2; then
 	run_volume_delete_cleanup
+	run_preserved_retired_uninstall
 
 	# Lifecycle admission is read-only. A direct dry-run DELETE must not mint an
 	# uninstall permit even when no storage dependency exists.
