@@ -205,6 +205,12 @@
           "type": "string",
           "minLength": 1,
           "description": "helm or argocd; the pre-delete guard rejects any other value with a named error"
+        },
+        "preserveRetiredPoolUIDs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "description": "Exact approved retired Pool UIDs retained with CRs, protection finalizers, paths, and storage after uninstall"
         }
       }
     },

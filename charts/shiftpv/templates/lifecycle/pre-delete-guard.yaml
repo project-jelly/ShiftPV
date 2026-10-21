@@ -53,6 +53,9 @@ spec:
             - --storage-class={{ .name }}
             {{- end }}
             {{- end }}
+            {{- range .Values.lifecycle.preserveRetiredPoolUIDs }}
+            - {{ printf "--preserve-retired-pool=%s" . | quote }}
+            {{- end }}
             - --permit-namespace={{ .Release.Namespace }}
             - --permit-name={{ include "shiftpv.uninstallPermitName" . }}
             - --validation-webhook={{ include "shiftpv.validationWebhookConfigurationName" . }}

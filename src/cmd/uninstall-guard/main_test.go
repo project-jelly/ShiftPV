@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -291,4 +292,52 @@ func uninstallClient() *fake.Clientset {
 		OwnerReferences: []metav1.OwnerReference{{APIVersion: storagev1.SchemeGroupVersion.String(), Kind: "CSIDriver", Name: driver.Name, UID: driver.UID}},
 	}}
 	return fake.NewSimpleClientset(driver, validation)
+}
+
+// The quiesce, checker, protection release, webhook teardown and permit execute
+// together. An applied grant with a lost reply must remain retryable without
+// releasing either the ordinary or Terminating retired Pool tombstone.
+func TestRunPreservesRetiredPoolAcrossGrantResponseLoss(t *testing.T) {
+	for _, terminating := range []bool{false, true} {
+		t.Run(fmt.Sprint("terminating=", terminating), func(t *testing.T) {
+			client := uninstallClient()
+			store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+			gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			go func() { _ = gate.Run(ctx) }()
+			pool := volumeapi.Pool{Name: "lost", UID: "lost-uid", NodeName: "node", MountPath: "/mnt/lost", RetirementApproval: "lost-uid", Finalizers: []string{volumeapi.PoolProtectionFinalizer}, Status: volumeapi.PoolStatus{RegistrationApproved: true}}
+			if terminating {
+				at := metav1.Now()
+				pool.DeletionTimestamp = &at
+			}
+			repository := &mutableVolumeRepository{pools: []volumeapi.Pool{pool}}
+			checker := &uninstallcheck.Checker{Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system", PreserveRetiredPoolUIDs: []string{pool.UID}}
+			var lost atomic.Bool
+			client.PrependReactor("update", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				state := action.(k8stesting.UpdateAction).GetObject().(*corev1.ConfigMap)
+				if state.Data["state"] != "granted" || !lost.CompareAndSwap(false, true) {
+					return false, nil, nil
+				}
+				if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("configmaps"), state.DeepCopy(), state.Namespace); err != nil {
+					return true, nil, err
+				}
+				return true, nil, fmt.Errorf("injected applied grant response loss")
+			})
+			if err := run(ctx, checker, store, "shiftpv-lifecycle"); err == nil || !strings.Contains(err.Error(), "injected applied grant response loss") {
+				t.Fatalf("first run=%v", err)
+			}
+			if err := run(ctx, checker, store, "shiftpv-lifecycle"); err != nil {
+				t.Fatalf("retry=%v", err)
+			}
+			if granted, err := store.Granted(context.Background()); err != nil || !granted {
+				t.Fatalf("grant=%v,%v", granted, err)
+			}
+			repository.mu.Lock()
+			defer repository.mu.Unlock()
+			if len(repository.removed) != 0 || len(repository.pools) != 1 || repository.pools[0].UID != pool.UID || len(repository.pools[0].Finalizers) != 1 || repository.pools[0].Finalizers[0] != volumeapi.PoolProtectionFinalizer {
+				t.Fatalf("retired Pool tombstone changed: removed=%v pools=%+v", repository.removed, repository.pools)
+			}
+		})
+	}
 }

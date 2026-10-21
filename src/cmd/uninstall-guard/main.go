@@ -18,8 +18,9 @@ import (
 )
 
 func main() {
-	var storageClassNames flagvalue.Names
+	var storageClassNames, preserveRetiredPools flagvalue.Names
 	flag.Var(&storageClassNames, "storage-class", "repeatable ShiftPV StorageClass name")
+	flag.Var(&preserveRetiredPools, "preserve-retired-pool", "repeatable exact retired Pool UID to retain with protection and storage unchanged")
 	permitNamespace := flag.String("permit-namespace", os.Getenv("POD_NAMESPACE"), "namespace for the uninstall permit ConfigMap")
 	permitName := flag.String("permit-name", "shiftpv-uninstall-permit", "uninstall permit ConfigMap name")
 	validationWebhook := flag.String("validation-webhook", "shiftpv-lifecycle", "lifecycle ValidatingWebhookConfiguration name")
@@ -38,12 +39,13 @@ func main() {
 	clients := wiring.InCluster(deny)
 
 	checker := &uninstallcheck.Checker{
-		Client:            clients.Typed,
-		Volumes:           &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: *poolReadinessStaleAfter},
-		Cleanups:          &cleanupapi.Store{Client: clients.Dynamic},
-		StorageClassNames: storageClassNames.Values("shiftpv"),
-		Namespace:         *permitNamespace,
-		InventoryMaxAge:   *poolReadinessStaleAfter,
+		Client:                  clients.Typed,
+		Volumes:                 &volumeapi.Registry{Client: clients.Dynamic, PoolReadinessStaleAfter: *poolReadinessStaleAfter},
+		Cleanups:                &cleanupapi.Store{Client: clients.Dynamic},
+		StorageClassNames:       storageClassNames.Values("shiftpv"),
+		Namespace:               *permitNamespace,
+		InventoryMaxAge:         *poolReadinessStaleAfter,
+		PreserveRetiredPoolUIDs: preserveRetiredPools.Values(),
 	}
 	permit := &uninstallcheck.PermitStore{Client: clients.Typed, Namespace: *permitNamespace, Name: *permitName, CSIDriver: uninstallcheck.DriverName}
 	var runErr error
@@ -57,7 +59,10 @@ func main() {
 	if runErr != nil {
 		deny("quiesce and inspect ShiftPV dependencies", runErr)
 	}
-	fmt.Println("ShiftPV uninstall allowed: provisioning is quiesced and no dependent PV, PVC, reservation, Volume, active Move, unsettled Cleanup, or physical Pool copy exists")
+	fmt.Println("ShiftPV uninstall allowed: provisioning is quiesced and storage dependencies are settled")
+	if len(checker.PreserveRetiredPoolUIDs) > 0 {
+		fmt.Printf("Retained retired Pool UIDs: %v; CRs, protection finalizers, paths, markers, and storage remain. Physical absence was not established for these Pools.\n", checker.PreserveRetiredPoolUIDs)
+	}
 }
 
 func runWithRetry(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstallcheck.PermitStore, validationWebhook string, attemptTimeout, retryInterval time.Duration) error {
@@ -110,14 +115,15 @@ func run(ctx context.Context, checker *uninstallcheck.Checker, permit *uninstall
 	if err := permit.WaitForQuiesced(ctx, attempt); err != nil {
 		return fmt.Errorf("wait for controller quiesce: %w", err)
 	}
-	report, err := checkAfterQuiesce(ctx, checker, time.Now().UTC())
+	inventoryAfter := time.Now().UTC()
+	report, err := checkAfterQuiesce(ctx, checker, inventoryAfter)
 	if err != nil {
 		return fmt.Errorf("inspect ShiftPV dependencies: %w", err)
 	}
 	if !report.Safe() {
 		return fmt.Errorf("dependent storage resources still exist:\n%s", formatBlockers(report))
 	}
-	if err := checker.ReleasePoolProtection(ctx); err != nil {
+	if err := checker.ReleasePoolProtectionAfter(ctx, inventoryAfter); err != nil {
 		return fmt.Errorf("release Pool deletion protection: %w", err)
 	}
 	if err := permit.DisableValidation(ctx, validationWebhook); err != nil {

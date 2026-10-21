@@ -719,6 +719,26 @@ release·namespace 기준이며, 사용자 지정 이름은 실제 설치값으�
    같은 StorageClass의 별도 시험 PVC와 consumer Pod로 신규 provisioning·읽기·쓰기를 검증한다.
    기존 PVC I/O만으로는 신규 provisioning fence 해제를 확인할 수 없다. 시험 리소스를 정리한 뒤 작업 유입을 재개한다.
 
+### 중단된 Pool을 보존하는 uninstall
+
+영구 소실 Pool의 **등록 중단 승인을 받은 뒤** Driver만 제거하려면 정확한 Pool UID를 지정한다.
+다음 값을 기존 설치와 같은 chart·이미지 버전의 `helm upgrade`에 반영한 뒤 `helm uninstall`한다.
+`helm uninstall`은 values를 받지 않으므로 삭제 전에 release 값으로 저장해야 한다.
+
+```yaml
+lifecycle:
+  preserveRetiredPoolUIDs:
+    - <registration-retired 승인을 받은 Pool UID>
+```
+
+기본값은 `[]`다. Guard CLI는 반복 `--preserve-retired-pool=<UID>`를 받는다. 이름·교체 UID·미승인
+Pool은 거부하며, 전체 PVC/PV/Volume/Move/hold/cleanup 및 현재 helper Pod·nonterminal Job이 없어야 한다.
+조회 실패도 거부한다. 다른 정상 Pool에는 기존 fresh inventory 조건이 계속 적용된다.
+
+선택한 Pool CR·finalizer·경로 예약·마커·데이터는 그대로 남는다. Terminating CR도 완전 삭제하지 않는다.
+물리적 빈 상태를 증명한 것이 아니므로 CRD/finalizer를 지워서 정리하지 않는다. 재설치도 같은 기록을
+유지하며, 완전 삭제는 원본 저장소를 복원한 뒤 기존 Pool 삭제 절차로 진행한다.
+
 Emergency `--no-hooks`와 admission 제거는 보증을 우회한다. Metadata와 host data를 자동 정리하지 않으며,
 동일 installation identity와 Pool 선언을 복원하기 전에는 workload를 재개하지 않는다.
 
