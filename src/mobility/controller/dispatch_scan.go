@@ -74,12 +74,29 @@ func (r *Reconciler) scanDiscovery(ctx context.Context, volumes map[string]volum
 		cordoned[node.Name] = node.Spec.Unschedulable && admission.NodeReady(node)
 		nodeUIDs[node.Name] = string(node.UID)
 	}
+	// A newly written copy can become observable without changing its routing
+	// identity. Read one bulk snapshot for cordoned sources so that new backing
+	// proof can end a delay; timestamps and unrelated copies cannot. This remains
+	// a scheduling hint: the Volume lane repeats the complete live preflight.
+	var pools poolIndex
+	for _, state := range candidates {
+		if cordoned[state.OwnerNode] {
+			pools, err = r.observePools(ctx)
+			if err != nil {
+				observations.recordBatch(idle)
+				return fmt.Errorf("observe discovery source Pools: %w", err)
+			}
+			break
+		}
+	}
 	for id, state := range candidates {
 		if cordoned[state.OwnerNode] {
 			source := discoverySource{volumeUID: state.UID, ownerNode: state.OwnerNode, nodeUID: nodeUIDs[state.OwnerNode]}
 			if state.CurrentCopy != nil {
 				source.copy = *state.CurrentCopy
 			}
+			pool, existing := indexedCopyPool(pools.existing, state.CurrentCopy)
+			source.sourceAvailable = existing && sourceCopyPresent(pool, state.CurrentCopy)
 			emit(volumeWork{volumeID: id, volumeUID: state.UID, discover: true, source: source})
 		} else {
 			idle[id] = discoveryResult{uid: state.UID}

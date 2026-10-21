@@ -52,7 +52,7 @@ func TestDiscoveryDelayDoesNotExtendOnEarlyWakeOrHideOtherWork(t *testing.T) {
 }
 
 func TestDiscoveryDelayRejectsLateOrUncertainObservations(t *testing.T) {
-	for _, change := range []string{"Volume UID", "owner", "copy", "Pool UID", "Node UID", "active work", "removed", "API error", "successful observation", "unknown incarnation"} {
+	for _, change := range []string{"Volume UID", "owner", "copy", "Pool UID", "Node UID", "source proof", "active work", "removed", "API error", "successful observation", "unknown incarnation"} {
 		t.Run(change, func(t *testing.T) {
 			r := &Reconciler{Interval: time.Hour}
 			d := r.newVolumeDispatcher()
@@ -75,6 +75,8 @@ func TestDiscoveryDelayRejectsLateOrUncertainObservations(t *testing.T) {
 				next.source.copy.PoolUID = "new-pool"
 			case "Node UID":
 				next.source.nodeUID = "new-node"
+			case "source proof":
+				next.source.sourceAvailable = !next.source.sourceAvailable
 			case "active work":
 				next.discover = false
 			case "removed":
@@ -359,12 +361,16 @@ func TestDeferredDiscoveryCostAcrossRepeatedScans(t *testing.T) {
 			f.client.ClearActions()
 			f.dynamic.ClearActions()
 			firstPassGets := 0
+			firstPassPoolLists := 0
 			for pass := range 20 {
 				scanAndProcessDiscovery(t, f, d, observations)
 				if pass == 0 {
 					for _, a := range f.dynamic.Actions() {
 						if a.GetVerb() == "get" && a.GetResource().Resource == "shiftpvvolumes" {
 							firstPassGets++
+						}
+						if a.GetVerb() == "list" && a.GetResource() == volumeapi.PoolResource {
+							firstPassPoolLists++
 						}
 					}
 				}
@@ -393,6 +399,15 @@ func TestDeferredDiscoveryCostAcrossRepeatedScans(t *testing.T) {
 			}
 			if firstPassGets == 0 || counts["dynamic:get:shiftpvvolumes"] != expected {
 				t.Fatalf("reevaluation count=%d want=%d", counts["dynamic:get:shiftpvvolumes"], expected)
+			}
+			// Each complete scan adds one bulk source-proof observation, never
+			// one per deferred Volume. Unchanged workers still skip preflight.
+			expectedPoolLists := firstPassPoolLists * 20
+			if enabled {
+				expectedPoolLists = firstPassPoolLists + 19
+			}
+			if firstPassPoolLists != 5 || counts["dynamic:list:shiftpvpools"] != expectedPoolLists {
+				t.Fatalf("source-proof observation was not batched: first=%d total=%d want=%d", firstPassPoolLists, counts["dynamic:list:shiftpvpools"], expectedPoolLists)
 			}
 			t.Logf("four unchanged deferred Volumes,20 complete scan/work cycles within one retry interval: typed=%d dynamic=%d total=%d counts=%v", len(f.client.Actions()), len(f.dynamic.Actions()), len(f.client.Actions())+len(f.dynamic.Actions()), counts)
 			for _, result := range observations.results {

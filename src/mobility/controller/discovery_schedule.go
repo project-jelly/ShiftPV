@@ -11,6 +11,7 @@ import (
 type discoverySource struct {
 	volumeUID, ownerNode, nodeUID string
 	copy                          volume.CopyIdentity
+	sourceAvailable               bool
 }
 
 type deferredDiscovery struct {
