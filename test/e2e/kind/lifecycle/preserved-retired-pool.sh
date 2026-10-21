@@ -74,10 +74,13 @@ kubectl wait "pv/${pv}" "shiftpvvolume/${volume}" --for=delete --timeout=3m
 # through a second bind; an empty read-only overmount makes backing unavailable.
 docker exec "${node}" sh -ec 'test ! -e "$2"; mkdir "$2"; mount --bind "$1" "$2"' sh "${root}" "${backup}"
 backed=1
+# Keep the evidence bind out of the Pool's shared mount propagation group.
+docker exec "${node}" mount --make-private "${backup}"
 marker=$(docker exec "${node}" sha256sum "${backup}/.shiftpv/pool.json")
 docker exec "${node}" mount -t tmpfs -o ro,size=1m shiftpv-preserved-uninstall "${root}"
 masked=1
 docker exec "${node}" test ! -e "${root}/.shiftpv/pool.json"
+test "$(docker exec "${node}" sha256sum "${backup}/.shiftpv/pool.json")" = "${marker}"
 if docker exec "${node}" touch "${root}/.write-probe"; then echo 'fault Pool remained writable' >&2; exit 1; fi
 kubectl wait "shiftpvpool/${pool}" --for=jsonpath='{.status.conditions[?(@.type=="Writable")].reason}'=ReadOnly --timeout=2m
 kubectl wait "shiftpvpool/${pool}" --for=condition=Ready=false --timeout=2m
