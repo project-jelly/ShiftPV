@@ -9,7 +9,7 @@ candidate=shiftpv-preserved-overlap
 namespace=shiftpv-preserved-uninstall
 root=/mnt/shiftpv
 backup=/var/lib/shiftpv-preserved-original
-evidence="${WORK_DIR}/preserved-uninstall"
+evidence="${ROOT_DIR}/.tmp/preserved-uninstall/${CLUSTER_NAME}"
 mkdir -p "${evidence}"
 registration=$(kubectl get "shiftpvpool/${pool}" -o json)
 uid=$(jq -er '.metadata.uid' <<<"${registration}")
