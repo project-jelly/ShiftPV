@@ -95,6 +95,55 @@ func TestPreparedDisruptionContinuesWithOneHeldConsumerAfterOriginalDisrupted(t 
 	}
 }
 
+func TestPreparedDisruptionBlocksTemplateWithMultiplePVCsBeforeEviction(t *testing.T) {
+	f := newPreparationRegistryFixture(t, 1)
+	f.untilPrepared(t, 0)
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	move, before := f.move(t, 0), f.state(t, 0)
+	if move.Status.Phase != "StartingDisruption" || move.Status.EvictionRequested {
+		t.Fatalf("fixture did not reach durable disruption intent: %+v", move.Status)
+	}
+	w := f.workloads[0]
+	rs, err := f.client.AppsV1().ReplicaSets(w.Namespace.Name).Get(f.ctx, w.ReplicaSet.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := claimVolumes()[0]
+	second.Name, second.PersistentVolumeClaim.ClaimName = "second", "second-claim"
+	rs.Spec.Template.Spec.Volumes = append(rs.Spec.Template.Spec.Volumes, second)
+	if _, err = f.client.AppsV1().ReplicaSets(rs.Namespace).Update(f.ctx, rs, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.client.ClearActions()
+	for range 3 {
+		if err = f.reconciler.ReconcileAll(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waiting, state := f.move(t, 0), f.state(t, 0)
+	if waiting.UID != move.UID || waiting.Status.Phase != "Blocked" || waiting.Status.Reason != "MultiplePVCsUnsupported" ||
+		waiting.Status.EvictionRequested || waiting.Status.CapacityApproved || !reflect.DeepEqual(waiting.Status.Preparation, move.Status.Preparation) {
+		t.Fatalf("unsupported replacement template did not block before disruption: move=%+v source=%+v", waiting.Status, state)
+	}
+	before.Phase = volumeapi.PhaseBlocked
+	if !reflect.DeepEqual(before, state) {
+		t.Fatalf("template-only change modified the live source authority: before=%+v after=%+v", before, state)
+	}
+	original, err := f.client.CoreV1().Pods(w.Consumer.Namespace).Get(f.ctx, w.Consumer.Name, metav1.GetOptions{})
+	if err != nil || original.DeletionTimestamp != nil || len(pvcNames(original.Spec)) != 1 {
+		t.Fatalf("template-only change disrupted or modified the one-PVC original: pod=%+v error=%v", original, err)
+	}
+	assertNoEviction(t, f.client)
+	assertPreparationReserved(t, f, preparationRequestedBytes)
+	placement, err := f.client.CoreV1().Pods(f.reconciler.Namespace).Get(f.ctx, namesFor(move.Name).PlacementPod, metav1.GetOptions{})
+	if err != nil || string(placement.UID) != move.Status.PlacementPodUID {
+		t.Fatalf("template wait replaced the placement reservation: pod=%+v error=%v", placement, err)
+	}
+	singleLifecycleNoDiskWork(t, f)
+}
+
 // Exercise the production Registry and Reconciler. Both controllers desire one
 // replica; a Deployment may nevertheless create a surge Pod in a new ReplicaSet.
 // The extra consumer is created only after StartingDisruption is persisted so

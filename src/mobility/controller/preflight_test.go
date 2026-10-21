@@ -77,6 +77,12 @@ func TestPreflightDefersWithoutLockOrEviction(t *testing.T) {
 			v.PersistentVolumeClaim.ClaimName = "other"
 			p.Spec.Volumes = append(p.Spec.Volumes, v)
 		}},
+		{"template multiple PVC", "MultiplePVCsUnsupported", func(_ *corev1.Pod, rs *appsv1.ReplicaSet, _ *corev1.Node, _ *corev1.PersistentVolume) {
+			v := claimVolumes()[0]
+			v.Name = "other"
+			v.PersistentVolumeClaim.ClaimName = "other"
+			rs.Spec.Template.Spec.Volumes = append(rs.Spec.Template.Spec.Volumes, v)
+		}},
 		{"explicit binding", "ExplicitNodeNameUnsupported", func(_ *corev1.Pod, rs *appsv1.ReplicaSet, _ *corev1.Node, _ *corev1.PersistentVolume) {
 			rs.Spec.Template.Spec.NodeName = "source"
 		}},

@@ -55,7 +55,7 @@ func (r *Reconciler) preflight(ctx context.Context, observed *observation) (stri
 // ShiftPV cannot reproduce on a destination node, checking the live Pod before
 // the controller template.
 func unsupportedConsumerPlacement(pod, template corev1.PodSpec) string {
-	if len(pvcNames(pod)) != 1 {
+	if len(pvcNames(pod)) != 1 || len(pvcNames(template)) != 1 {
 		return "MultiplePVCsUnsupported"
 	}
 	if reason := unsupportedPlacement(pod); reason != "" {
