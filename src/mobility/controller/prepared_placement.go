@@ -70,9 +70,7 @@ func (r *Reconciler) validatePreparedPlacement(ctx context.Context, move volumea
 	if err != nil {
 		return "", false, err
 	}
-	if validatePlacementIdentity(pod, move, names) != nil || !nonPreemptingPlacement(pod) || pod.DeletionTimestamp != nil ||
-		pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded ||
-		pod.Spec.NodeName != move.Status.Preparation.NodeName {
+	if !preparedPlacementMatchesReservation(pod, move, names) {
 		return "PreparedPlacementChanged", false, nil
 	}
 	preparation := move.Status.Preparation
@@ -102,6 +100,12 @@ func (r *Reconciler) validatePreparedPlacement(ctx context.Context, move volumea
 		return "", false, nil
 	}
 	return r.preparedWorkloadFits(ctx, move, observed.PV, pod, consumer)
+}
+
+func preparedPlacementMatchesReservation(pod *corev1.Pod, move volumeapi.Move, names resourceNames) bool {
+	return validatePlacementIdentity(pod, move, names) == nil && nonPreemptingPlacement(pod) && pod.DeletionTimestamp == nil &&
+		pod.Status.Phase != corev1.PodFailed && pod.Status.Phase != corev1.PodSucceeded &&
+		pod.Spec.NodeName == move.Status.Preparation.NodeName
 }
 
 func nonPreemptingPlacement(pod *corev1.Pod) bool {

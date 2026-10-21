@@ -186,10 +186,15 @@ patch하거나 host-side copy로 제품 effect를 대신하면 안 된다.
 
 ```bash
 NODE_EFFECTS_ONLY=1 CLUSTER_NAME=shiftpv-node-focused ./test/e2e/kind/run.sh
+PRESERVED_UNINSTALL_ONLY=1 CLUSTER_NAME=shiftpv-preserved-focused ./test/e2e/kind/run.sh
 VOLUME_DELETE_CLEANUP_ONLY=1 CLUSTER_NAME=shiftpv-delete-focused ./test/e2e/kind/run.sh
 CLEANUP_EXECUTOR_RETRY_ONLY=1 CLUSTER_NAME=shiftpv-cleanup-retry-focused ./test/e2e/kind/run.sh
 MOBILITY_NODE_RESTARTS_ONLY=1 CLUSTER_NAME=shiftpv-mobility-restart-focused ./test/e2e/kind/run.sh
 ```
+
+Preserved uninstall gate는 read-only backing의 실제 retirement 승인·기본 제거 거부·동일 revision rollback 뒤
+명시한 UID의 CR/finalizer/marker를 남긴 제거·재설치를 검증한다. 경로 중복 등록은 거부하고 원본 저장소를
+복원한 뒤 기존 identity release로만 삭제한다. `g2`에도 포함되며, RW 빈 filesystem 교체 감지 시험은 아니다.
 
 Node gate는 상주 Node 생성 receipt, Pod 교체 뒤 데이터 보존, 새 Pod UID의 purge receipt와 fenced cleanup 완료를 확인한다.
 Volume delete gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 유지되고, generation-fenced absence 뒤에만
