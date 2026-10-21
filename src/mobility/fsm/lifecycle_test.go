@@ -65,7 +65,7 @@ func TestPreparedEmptyPhaseCanInitializeItsObservedPlan(t *testing.T) {
 	assertDecision(t, State{}, Observation{}, State{Phase: PhasePending}, ActionProtectMove)
 }
 
-func TestCancellationWinsOnlyBeforeDestinationAuthority(t *testing.T) {
+func TestSourceAuthorityLossBlocksAfterDisruptionIntent(t *testing.T) {
 	for _, phase := range []Phase{PhaseWaitingForUnpublish, PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseWaitingForCapacity} {
 		for _, evidence := range []string{"none", "approval", "disk intent"} {
 			t.Run(string(phase)+"/"+evidence, func(t *testing.T) {
@@ -74,11 +74,7 @@ func TestCancellationWinsOnlyBeforeDestinationAuthority(t *testing.T) {
 				observation.UnsafeReason = "BindingChanged"
 				observation.CapacityApproved = evidence == "approval"
 				observation.DestinationIntentRecorded = evidence == "disk intent"
-				next, action := PhaseBlocked, ActionMarkBlocked
-				if evidence == "none" {
-					next, action = PhaseCanceling, ActionWait
-				}
-				decision := assertDecision(t, State{Phase: phase}, observation, State{Phase: next}, action)
+				decision := assertDecision(t, State{Phase: phase}, observation, State{Phase: PhaseBlocked}, ActionMarkBlocked)
 				if decision.Reason != "BindingChanged" {
 					t.Fatalf("reason=%q", decision.Reason)
 				}
@@ -93,13 +89,13 @@ func TestCancellationWinsOnlyBeforeDestinationAuthority(t *testing.T) {
 	}
 	observation.PreparationChangedReason = ""
 	observation.CapacityBlocked = true
-	assertDecision(t, State{Phase: PhaseWaitingForCapacity}, observation, State{Phase: PhaseCanceling}, ActionWait)
+	assertDecision(t, State{Phase: PhaseWaitingForCapacity}, observation, State{Phase: PhaseWaitingForCapacity}, ActionEnsureCapacity)
 	observation.DestinationUnavailable = true
 	assertDecision(t, State{Phase: PhaseWaitingForCapacity}, observation, State{Phase: PhaseWaitingForCapacity}, ActionWait)
 }
 
 func TestCancellationIntentDoesNotRequireLiveSourceClaimObservation(t *testing.T) {
-	for _, phase := range []Phase{PhasePreparing, PhaseStartingDisruption, PhaseWaitingForCapacity} {
+	for _, phase := range []Phase{PhasePending, PhasePreparing} {
 		t.Run(string(phase), func(t *testing.T) {
 			// An effect-time invalidation fences the Move writer before another
 			// Volume read. Missing live facts cannot authorize settlement.
@@ -244,7 +240,6 @@ func TestLifecycleRejectsIncompatibleStateAxes(t *testing.T) {
 		{State{Phase: PhaseCanceling}, Observation{PreparationReserved: true, SourcePlanRecorded: true}},
 		{State{Phase: PhaseStartingDisruption}, Observation{}},
 		{State{Phase: PhaseCopying, RecoveryPhase: RecoveryQuiescing}, Observation{}},
-		{State{Phase: PhaseCopying}, Observation{SourceAuthorityInvalid: true}},
 		{State{Phase: PhaseBlocked, RecoveryPhase: "Mystery"}, Observation{}},
 	} {
 		if decision, err := Decide(test.state, test.observation); err == nil {

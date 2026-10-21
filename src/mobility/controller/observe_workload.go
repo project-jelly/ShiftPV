@@ -12,6 +12,7 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 )
 
 // observeBinding resolves the PV/PVC pair this volume is still bound to and the
@@ -57,7 +58,7 @@ func (r *Reconciler) observeBinding(ctx context.Context, move volumeapi.Move, re
 	}
 	if namespace.Labels[admissionNamespaceLabel] != "enabled" {
 		result.FSM.UnsafeReason = "AdmissionNotEnabled"
-		result.FSM.PreflightDeferred = preEviction(move)
+		result.FSM.PreflightDeferred = preEviction(move) || move.Status.Phase == string(fsm.PhaseStartingDisruption)
 		return true, nil
 	}
 	return false, nil
@@ -97,6 +98,7 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 	if err != nil {
 		return false, fmt.Errorf("list consumer Pods: %w", err)
 	}
+	result.ConsumersObserved = true
 	ambiguous := false
 	for index := range pods.Items {
 		pod := &pods.Items[index]

@@ -29,7 +29,7 @@ func preparationFixture() (volumeapi.State, volumeapi.Move) {
 }
 
 func TestPreparationReservesExactPoolBeforeAndAfterQuiesce(t *testing.T) {
-	for _, phase := range []string{volumeapi.PhaseReady, volumeapi.PhaseMoving} {
+	for _, phase := range []string{volumeapi.PhaseReady, volumeapi.PhaseMoving, volumeapi.PhaseBlocked} {
 		for _, node := range []string{"node-a", "node-b"} {
 			t.Run(phase+"/"+node, func(t *testing.T) {
 				state, move := preparationFixture()

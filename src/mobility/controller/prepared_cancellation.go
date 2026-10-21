@@ -32,7 +32,7 @@ func (r *Reconciler) observeCancellation(ctx context.Context, move volumeapi.Mov
 	}
 	result.Volume = state
 	locked := state.ActiveMove == move.Name
-	if move.Status.Phase == string(fsm.PhaseCanceling) && !locked && move.Status.SourceCopy != nil || locked && state.Phase == volumeapi.PhaseMoving {
+	if move.Status.Phase == string(fsm.PhaseCanceling) && !locked && move.Status.SourceCopy != nil || locked && (state.Phase == volumeapi.PhaseMoving || state.Phase == volumeapi.PhaseBlocked) {
 		return result, nil
 	}
 	pod, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, result.Names.PlacementPod, metav1.GetOptions{})
@@ -115,12 +115,27 @@ func cancellablePreparation(move volumeapi.Move) error {
 }
 
 func cancellationSource(move volumeapi.Move, state volumeapi.State) error {
+	if state.Phase == volumeapi.PhaseBlocked {
+		// The durable cancellation journal fences stale approval writers before
+		// restoring this exact no-disk source. A live Blocked Move grants no release.
+		if (move.Status.Phase != string(fsm.PhaseCanceling) && move.Status.Phase != string(fsm.PhaseCancelled)) || state.ActiveMove != move.Name {
+			return fmt.Errorf("blocked source restoration requires its cancellation fence")
+		}
+		if err := cancellablePreparation(move); err != nil {
+			return err
+		}
+	} else if state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseMoving {
+		return fmt.Errorf("cancellation requires a Ready or Moving source")
+	}
+	return cancellationSourceIdentity(move, state)
+}
+
+func cancellationSourceIdentity(move volumeapi.Move, state volumeapi.State) error {
 	source := move.Status.SourceCopy
 	if source == nil || source.Validate() != nil || source.Role != volume.RoleServing ||
 		source.VolumeID != move.Spec.VolumeID || source.NodeName != move.Spec.SourceNode ||
 		state.UID != source.VolumeUID || state.OwnerNode != move.Spec.SourceNode ||
-		state.CurrentCopy == nil || *state.CurrentCopy != *source || state.Deleting || state.HasCleanup ||
-		(state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseMoving) {
+		state.CurrentCopy == nil || *state.CurrentCopy != *source || state.Deleting || state.HasCleanup {
 		return fmt.Errorf("cancellation cannot prove the exact authoritative source copy")
 	}
 	return nil

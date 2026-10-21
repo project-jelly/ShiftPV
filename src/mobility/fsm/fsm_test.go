@@ -258,11 +258,7 @@ func TestActionFailuresAndDestinationFailureBlock(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		next := PhaseBlocked
-		if test.phase == PhaseWaitingForDestination {
-			next = PhaseCanceling
-		}
-		if decision.Next.Phase != next || decision.Reason != test.reason {
+		if decision.Next.Phase != PhaseBlocked || decision.Reason != test.reason {
 			t.Errorf("phase %q decision = %#v", test.phase, decision)
 		}
 	}

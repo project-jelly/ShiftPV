@@ -140,13 +140,19 @@ func TestSingleLifecycleSourceChangesBeforeApprovalPreserveServingCopy(t *testin
 	}
 }
 
-func TestSingleLifecycleUnapprovedBlockedResumeOwnerCancelsWithoutRecoveryPrerequisites(t *testing.T) {
-	for _, moving := range []bool{false, true} {
-		t.Run(map[bool]string{false: "Ready source", true: "Moving source without binding or Node"}[moving], func(t *testing.T) {
+func TestSingleLifecycleUnapprovedBlockedResumeOwnerPreservesLiveClaimAndSettlesRetiredWorkload(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		retired bool
+	}{
+		{"Ready source with live binding", false},
+		{"Moving source without binding or Node", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			f := newPreparationRegistryFixture(t, 1)
 			singleLifecycleUntil(t, f, func(move volumeapi.Move, _ volumeapi.State) bool { return move.Status.Preparation != nil })
 			move, source := f.move(t, 0), f.state(t, 0)
-			if moving {
+			if test.retired {
 				next := source
 				next.Phase = volumeapi.PhaseMoving
 				if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, source, next); err != nil {
@@ -174,12 +180,28 @@ func TestSingleLifecycleUnapprovedBlockedResumeOwnerCancelsWithoutRecoveryPrereq
 			move = f.move(t, 0) // Read the requested spec and its new resourceVersion.
 			f.client.ClearActions()
 			if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
-				t.Fatalf("pre-disk cancellation required execution-recovery prerequisites: %v", err)
+				t.Fatalf("unapproved blocked decision required execution-recovery prerequisites: %v", err)
+			}
+			if !test.retired {
+				for range 3 {
+					blocked := f.move(t, 0)
+					if blocked.UID != move.UID || blocked.Status.Phase != "Blocked" || blocked.Status.RecoveryPhase != "" || blocked.Status.CapacityApproved ||
+						!reflect.DeepEqual(blocked.Status.Preparation, move.Status.Preparation) || !reflect.DeepEqual(source, f.state(t, 0)) {
+						t.Fatalf("ResumeOwner released a live blocked workload claim: move=%+v source=%+v", blocked.Status, f.state(t, 0))
+					}
+					assertPreparationReserved(t, f, preparationRequestedBytes)
+					if err := f.reconciler.reconcilePersistedMove(f.ctx, blocked); err != nil {
+						t.Fatal(err)
+					}
+				}
+				assertNoEviction(t, f.client)
+				singleLifecycleNoDiskWork(t, f)
+				return
 			}
 			canceling := f.move(t, 0)
-			if canceling.Status.Phase != "Canceling" || canceling.Status.Reason != "UnapprovedMoveBlocked" || canceling.Status.RecoveryPhase != "" || canceling.Status.CapacityApproved ||
+			if canceling.Status.Phase != "Canceling" || canceling.Status.Reason != "WorkloadRetired" || canceling.Status.RecoveryPhase != "" || canceling.Status.CapacityApproved ||
 				!reflect.DeepEqual(canceling.Status.Preparation, move.Status.Preparation) || !reflect.DeepEqual(source, f.state(t, 0)) {
-				t.Fatalf("ResumeOwner bypassed pre-disk cancellation: move=%+v source=%+v", canceling.Status, f.state(t, 0))
+				t.Fatalf("retired workload bypassed cancellation settlement: move=%+v source=%+v", canceling.Status, f.state(t, 0))
 			}
 			assertPreparationReserved(t, f, preparationRequestedBytes)
 			singleLifecycleUntil(t, f, func(move volumeapi.Move, state volumeapi.State) bool {
@@ -187,7 +209,7 @@ func TestSingleLifecycleUnapprovedBlockedResumeOwnerCancelsWithoutRecoveryPrereq
 			})
 			source.Phase, source.ActiveMove = volumeapi.PhaseReady, ""
 			settled := f.move(t, 0)
-			if !reflect.DeepEqual(source, f.state(t, 0)) || settled.Status.Reason != "UnapprovedMoveBlocked" || settled.Status.RecoveryPhase != "" || settled.Status.CapacityApproved ||
+			if !reflect.DeepEqual(source, f.state(t, 0)) || settled.Status.Reason != "WorkloadRetired" || settled.Status.RecoveryPhase != "" || settled.Status.CapacityApproved ||
 				settled.Status.IncomingCopy != nil || settled.Status.DestinationCopy != nil || settled.Status.CleanupPhase != "" {
 				t.Fatalf("pre-disk settlement changed authority or invented execution evidence: move=%+v source=%+v", settled.Status, f.state(t, 0))
 			}

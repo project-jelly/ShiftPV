@@ -182,11 +182,7 @@ func TestPreflightPDBRecheckedBeforePreparationAndEviction(t *testing.T) {
 				t.Fatal(err)
 			}
 			denied := f.move(t, 0)
-			wantPhase := string(phase)
-			if phase == fsm.PhaseStartingDisruption {
-				wantPhase = string(fsm.PhaseCanceling)
-			}
-			if denied.Status.Phase != wantPhase || denied.Status.Reason != "DisruptionBudgetDenied" {
+			if denied.Status.Phase != string(phase) || denied.Status.Reason != "DisruptionBudgetDenied" {
 				t.Fatalf("budget denial was not preserved: %+v", denied.Status)
 			}
 			if f.state(t, 0).Phase != volumeapi.PhaseReady {
@@ -194,7 +190,7 @@ func TestPreflightPDBRecheckedBeforePreparationAndEviction(t *testing.T) {
 			}
 			assertNoEviction(t, f.client)
 			if phase == fsm.PhaseStartingDisruption && denied.Status.Preparation == nil {
-				t.Fatal("cancellation lost its reserved hold")
+				t.Fatal("budget wait lost its reserved hold")
 			}
 			budget.Status.ObservedGeneration = 2
 			if _, err := f.client.PolicyV1().PodDisruptionBudgets(budget.Namespace).UpdateStatus(f.ctx, budget, metav1.UpdateOptions{}); err != nil {
@@ -220,21 +216,22 @@ func TestPreflightPDBRecheckedBeforePreparationAndEviction(t *testing.T) {
 				assertNoEviction(t, f.client)
 				return
 			}
-			// Once a reserved preparation is cancelled, a recovered PDB must
-			// finish cancellation instead of resurrecting its disruption intent.
+			// The durable disruption intent retains its reservation while the
+			// PDB is stale. A fresh allowed budget resumes the same attempt.
 			for range 6 {
 				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
-				if f.move(t, 0).Status.Phase == string(fsm.PhaseCancelled) && f.state(t, 0).ActiveMove == "" {
+				if f.move(t, 0).Status.Phase == string(fsm.PhaseWaitingForUnpublish) {
 					break
 				}
 			}
-			settled := f.move(t, 0)
-			if settled.Status.Phase != string(fsm.PhaseCancelled) || settled.Status.Preparation != nil || f.state(t, 0).ActiveMove != "" || f.state(t, 0).Phase != volumeapi.PhaseReady {
-				t.Fatalf("unsafe preparation did not cancel safely: %+v", settled.Status)
+			resumed := f.move(t, 0)
+			if resumed.UID != denied.UID || resumed.Status.Phase != string(fsm.PhaseWaitingForUnpublish) || !resumed.Status.EvictionRequested ||
+				resumed.Status.Preparation == nil || f.state(t, 0).ActiveMove != resumed.Name || f.state(t, 0).Phase != volumeapi.PhaseMoving {
+				t.Fatalf("recovered budget did not resume the reserved disruption: %+v", resumed.Status)
 			}
-			assertNoEviction(t, f.client)
+			assertPreparationReserved(t, f, preparationRequestedBytes)
 		})
 	}
 }
@@ -325,10 +322,11 @@ func TestConsumerUIDDistinguishesSameNameReplacement(t *testing.T) {
 	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 		t.Fatal(err)
 	}
-	cancelled := f.move(t, 0)
-	if cancelled.Status.Phase != string(fsm.PhaseCanceling) || cancelled.Status.Reason != "UnexpectedConsumerPlacement" || cancelled.Status.Preparation == nil || f.state(t, 0).Phase != volumeapi.PhaseReady {
-		t.Fatalf("unheld replacement did not cancel the reserved disruption: %+v", cancelled.Status)
+	blocked := f.move(t, 0)
+	if blocked.Status.Phase != string(fsm.PhaseBlocked) || blocked.Status.Reason != "UnexpectedConsumerPlacement" || blocked.Status.Preparation == nil || f.state(t, 0).Phase != volumeapi.PhaseBlocked {
+		t.Fatalf("unheld replacement did not preserve the reserved authority: %+v", blocked.Status)
 	}
+	assertPreparationReserved(t, f, preparationRequestedBytes)
 	assertNoEviction(t, f.client)
 }
 

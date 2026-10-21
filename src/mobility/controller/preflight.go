@@ -251,5 +251,5 @@ func pvcNames(spec corev1.PodSpec) map[string]bool {
 // preEviction limits deferral to preparation before consumer disruption.
 func preEviction(move volumeapi.Move) bool {
 	return !move.Status.EvictionRequested && (move.Status.Phase == "" || move.Status.Phase == string(fsm.PhasePending) ||
-		move.Status.Phase == string(fsm.PhasePreparing) || move.Status.Phase == string(fsm.PhaseStartingDisruption))
+		move.Status.Phase == string(fsm.PhasePreparing))
 }

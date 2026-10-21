@@ -109,14 +109,29 @@ func TestPreparationStartingDisruptionRejectsMultipleReplacements(t *testing.T) 
 				t.Fatal(err)
 			}
 			move = f.move(t, 0)
-			if move.Status.Phase != "Canceling" || move.Status.Preparation == nil || f.state(t, 0).Phase != volumeapi.PhaseReady {
-				t.Fatalf("unsafe consumer set did not retain hold for cancellation: %+v", move.Status)
+			if move.Status.Phase != "StartingDisruption" || move.Status.Reason != "MultipleConsumers" || move.Status.Preparation == nil || f.state(t, 0).Phase != volumeapi.PhaseReady {
+				t.Fatalf("ambiguous consumer set did not retain the reserved disruption: %+v", move.Status)
 			}
+			assertPreparationReserved(t, f, preparationRequestedBytes)
 			for _, action := range f.client.Actions() {
 				if action.GetSubresource() == "eviction" {
 					t.Fatal("a consumer was evicted after the consumer set changed")
 				}
 			}
+			if err := f.client.CoreV1().Pods(w.Namespace.Name).Delete(f.ctx, "z-pinned", metav1.DeleteOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if !originalGone {
+				if err := f.client.CoreV1().Pods(w.Namespace.Name).Delete(f.ctx, w.Consumer.Name, metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			replacement, err := f.client.CoreV1().Pods(w.Namespace.Name).Get(f.ctx, "a-held", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			unpublishDisruptedSource(t, f)
+			assertDisruptedMoveResumes(t, f, move, replacement)
 		})
 	}
 }

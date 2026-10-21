@@ -1,6 +1,6 @@
 module github.com/project-jelly/ShiftPV
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/container-storage-interface/spec v1.13.0

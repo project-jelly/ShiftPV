@@ -29,6 +29,7 @@ func lifecycleFacts(move volumeapi.Move, observed *observation) {
 	facts.DestinationIntentRecorded = !noDestinationEffectIntent(move)
 	facts.CapacityApproved = move.Status.CapacityApproved
 	facts.SourceMoving = observed.Volume.Phase == volumeapi.PhaseMoving
+	facts.SourceBlocked = observed.Volume.Phase == volumeapi.PhaseBlocked
 	facts.ConsumerExists = observed.Consumer != nil
 	facts.ReplacementExists = observed.Replacement != nil
 	facts.ReplacementHeld = observed.Replacement != nil && hasPlacementHold(observed.Replacement) && observed.Replacement.Spec.NodeName == ""
@@ -46,9 +47,9 @@ func preparationLifecycle(move volumeapi.Move) bool {
 	}
 }
 
-// Recovery observations are needed only after preparation can no longer be
-// cancelled. An unapproved Blocked record must first fence its Move writer;
-// missing recovery prerequisites cannot prevent that intent from being saved.
+// Destination recovery requires recorded disk authority. An unapproved Blocked
+// record retains its source claim; exact workload retirement is observed
+// separately before any no-disk cancellation can release that claim.
 func needsRecoveryObservation(move volumeapi.Move) bool {
 	if move.Status.Phase != string(fsm.PhaseBlocked) || !recoveryRequested(move) || move.Status.RecoveryPhase == recoveryRecovered {
 		return false
@@ -112,7 +113,7 @@ func (r *Reconciler) observeLifecycle(ctx context.Context, move volumeapi.Move) 
 		if move.Deleting {
 			observed.FSM.PreparationChangedReason = "MoveDeleting"
 		} else {
-			observed.FSM.PreparationChangedReason, err = r.preparedExecutionChanged(ctx, move, observed)
+			observed.FSM.PreparationChangedReason, observed.FSM.PreparationUnavailable, err = r.preparedExecutionChanged(ctx, move, observed)
 		}
 	}
 	return observed, err
@@ -199,7 +200,11 @@ func (r *Reconciler) requestPreparationCancellation(ctx context.Context, move *v
 	if move.Status.Phase == string(fsm.PhaseCanceling) || move.Status.Phase == string(fsm.PhaseCancelled) {
 		return nil
 	}
-	observed := observation{}
+	state, err := r.Repository.Get(ctx, move.Spec.VolumeID)
+	if err != nil {
+		return err
+	}
+	observed := observation{Volume: state}
 	lifecycleFacts(*move, &observed)
 	observed.FSM.PreparationChangedReason = reason
 	return r.advanceMove(ctx, move, observed)

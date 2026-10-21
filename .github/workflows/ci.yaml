@@ -422,8 +422,8 @@ jobs:
           echo "kind-mobility-e2e groups: ${RESULT}"
           test "${RESULT}" = success
 
-  # The eight restart cases and the cleanup-Job retry tail are independent, so
-  # they run as one shard per job instead of one ~36 minute serialized sweep.
+  # Restart, destination-taint and cleanup retry cases run in independent
+  # shards instead of one serialized sweep.
   # Matrix jobs cannot carry the branch-ruleset check name, which is why the
   # `kind-mobility-node-restart-e2e` aggregator below reports their result.
   kind-mobility-node-restart-shard:
@@ -436,6 +436,8 @@ jobs:
         include:
           - shard: cases-1-2
             cases: source,destination
+          - shard: destination-taint
+            cases: destination-taint
           - shard: cases-3-4
             cases: copying-source,copying-destination
           - shard: cases-5-6

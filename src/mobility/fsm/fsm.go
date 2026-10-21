@@ -76,14 +76,17 @@ type State struct {
 }
 
 type Observation struct {
-	WorkloadRetired            bool
-	SettlementOnly             bool
-	ProtectionPresent          bool
-	SourcePlanRecorded         bool
-	SourceClaimed              bool
-	PreparationReserved        bool
-	PreparationChangedReason   string
+	WorkloadRetired          bool
+	SettlementOnly           bool
+	ProtectionPresent        bool
+	SourcePlanRecorded       bool
+	SourceClaimed            bool
+	PreparationReserved      bool
+	PreparationChangedReason string
+	// PreparationUnavailable distinguishes retryable health/capacity from a changed identity.
+	PreparationUnavailable     bool
 	SourceMoving               bool
+	SourceBlocked              bool
 	PlacementAbsent            bool
 	DestinationIntentRecorded  bool
 	RecoveryRequested          bool
@@ -202,7 +205,7 @@ func ValidateTransition(from, to Phase) error {
 var allowedTransitions = map[Phase][]Phase{
 	PhasePending:                      {PhasePending, PhasePreparing, PhaseBlocked, PhaseCanceling},
 	PhasePreparing:                    {PhasePreparing, PhaseStartingDisruption, PhaseCanceling},
-	PhaseStartingDisruption:           {PhaseStartingDisruption, PhaseWaitingForUnpublish, PhaseCanceling},
+	PhaseStartingDisruption:           {PhaseStartingDisruption, PhaseWaitingForUnpublish, PhaseCanceling, PhaseBlocked},
 	PhaseCanceling:                    {PhaseCanceling, PhaseCancelled},
 	PhaseCancelled:                    {PhaseCancelled},
 	PhaseWaitingForUnpublish:          {PhaseWaitingForUnpublish, PhaseWaitingForReplacement, PhaseBlocked, PhaseCanceling},
@@ -238,7 +241,7 @@ func destinationGuard(current Phase, observation Observation) (Decision, bool, e
 		return decision, true, err
 	}
 	if observation.DestinationBlocked {
-		return blockedWith(observation, "InvalidDestination"), true, nil
+		return blockedWith(current, observation, "InvalidDestination"), true, nil
 	}
 	return Decision{}, false, nil
 }
@@ -268,11 +271,25 @@ func blocked(reason string) Decision {
 }
 
 // blockedWith prefers the observation's own diagnosis over the phase fallback.
-func blockedWith(observation Observation, fallback string) Decision {
-	if beforeExecutionApproval(observation) {
+func blockedWith(current Phase, observation Observation, fallback string) Decision {
+	if beforeExecutionApproval(observation) && !disruptionPossible(current) {
 		return Decision{Next: State{Phase: PhaseCanceling}, Action: ActionWait, Reason: reasonOr(observation.UnsafeReason, fallback)}
 	}
 	return blocked(reasonOr(observation.UnsafeReason, fallback))
+}
+
+// StartingDisruption is a durable intent, not an eviction acknowledgement.
+// Blocked history has no recorded prior phase, so it cannot prove disruption absent.
+func disruptionPossible(phase Phase) bool {
+	return phase != "" && phase != PhasePending && phase != PhasePreparing
+}
+
+func preparationChanged(current Phase, observation Observation) (Decision, error) {
+	if disruptionPossible(current) && observation.PreparationUnavailable && !observation.SourceAuthorityInvalid {
+		return transition(current, current, ActionWait, observation.PreparationChangedReason)
+	}
+	observation.UnsafeReason = observation.PreparationChangedReason
+	return blockedWith(current, observation, "PreparationChanged"), nil
 }
 
 func known(phase Phase) bool {

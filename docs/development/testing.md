@@ -135,7 +135,7 @@ changed binding/owner/Pod UID on retry, and a stored release with a lost respons
 | `mobility/controller`: `preparation_boundary_test.go`, `prepared_execution_test.go`, `prepared_cancellation_test.go` | 실제 Registry/RV CAS + 5Gi에 2Gi 4개 요청, hold 전환·응답 유실·지연 claim/Moving PUT·binding 부재·placement NotFound와 취소 정산 |
 | `e2e/kind/mobility/preparation.sh` (preparation) | 실제 scheduler/API admission + 2개 hold/4개 원본 유지, restart, 2개 완료/2개 원본 유지 |
 | `e2e/kind/mobility/legacy-upgrade.sh` (preparation) | candidate preflight의 active legacy 거절 → old writer/helper image로 정산 → 교체 전 complete·blocker 없음 확인 → Recreate 후 같은 PVC/PV/Volume/Move UID·데이터·history 보존 및 새 legacy actor 미생성 |
-| `e2e/kind/mobility-node-restarts.sh` (source/destination) | 실행 승인 전 노드 장애 → 취소·같은 held Pod 복구; test-owned placement finalizer로 삭제 대기 중 hold 유지와 NotFound 후 정산을 검증. source에 쓴 PVC별 고유 데이터로 재생성 없는 보존 확인 |
+| `e2e/kind/mobility-node-restarts.sh` (source/destination/destination-taint) | 중단 이후 실행 승인 전 노드 장애·목적지 NoSchedule taint에서 같은 Move UID·preparation·activeMove·held Pod·placement UID 유지. 복구 뒤 source cordon을 유지한 채 같은 Move와 Pod로 목적지 Ready·고유 checksum·원본 cleanup 완료 검증 |
 | `mobility/controller`: `approval_recovery_test.go` | 승인 직후 source 장애·원자적 copy 계획·재시작·fresh absence 전 hold 유지; 계획 없는 승인은 추론·scan 없이 보존 |
 | `mobility/history`: `classify_test.go`; `lifecycle/upgrade`: `checker_test.go` | cleanup 없는 prepared 복구의 exact CAS 정산을 읽기 전용으로 승인; legacy·불완전 계획·미해제 hold·cleanup 증거 누락·실행 중 helper는 거절 |
 | `node/executor`: `move_cleanup*_linux_test.go`; `provisioning/nodeexecutor`: Move cleanup tests | source/incoming/serving 실제 purge·동일 Volume RPC/watch 직렬화·권한 변경·receipt 응답 유실·Pod 교체·구버전 capability와 Job binding 경쟁 |
@@ -195,9 +195,10 @@ Node gate는 상주 Node 생성 receipt, Pod 교체 뒤 데이터 보존, 새 Po
 Volume delete gate는 cleanup 완료 전 Volume finalizer와 capacity hold가 유지되고, generation-fenced absence 뒤에만
 삭제와 용량 재사용이 일어나는지 검증한다. Cleanup executor retry gate는 receipt 전 resident Node Pod 교체에서
 같은 operation·target을 보존하고 새 exact Pod UID로 재지정해 수렴하며 cleanup Job이 생기지 않는지 확인한다.
-Mobility restart gate는 owner commit 전후 및
-`CleaningSource`에서 source/destination node가 중단됐다가 돌아온 뒤 현재 transaction이 계속 수렴하는지
-검증한다.
+Mobility restart gate는 중단 이후 실행 승인 전 source/destination node 장애와 목적지 NoSchedule taint에서 취소하지 않고
+예약과 source 권한을 유지하며, 복구 뒤 source uncordon 없이 같은 Move·replacement로 목적지 게시와
+원본 정리까지 수렴하는지 검증한다. 승인 후 source 장애는 기존 `Blocked`·명시적 `ResumeOwner` 복구를
+검증하고, destination 장애와 `CleaningSource` 중단은 현재 transaction의 재개를 검증한다.
 
 ## Multi-Pool qualification
 

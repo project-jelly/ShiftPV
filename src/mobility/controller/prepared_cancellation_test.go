@@ -68,71 +68,124 @@ func TestPreparedCancellationResumesAfterCancelledResponseLossWithoutBinding(t *
 	}
 }
 
-func TestPreparedCancellationFencesDelayedMovingWrite(t *testing.T) {
-	for _, deliverAfterUnlock := range []bool{false, true} {
-		t.Run(map[bool]string{false: "after Cancelled", true: "after unlock"}[deliverAfterUnlock], func(t *testing.T) {
-			f := newPreparationRegistryFixture(t, 1)
-			move := f.untilPrepared(t, 0)
-			previous := move.Status
-			move.Status.Phase = "StartingDisruption"
-			if err := f.reconciler.persistMoveStatus(f.ctx, &move, previous); err != nil {
-				t.Fatal(err)
-			}
-			expected := f.state(t, 0)
-			next := expected
-			next.Phase = volumeapi.PhaseMoving
-			var delayed *unstructured.Unstructured
-			f.dynamic.PrependReactor("update", "shiftpvvolumes", func(action ktesting.Action) (bool, runtime.Object, error) {
-				object := action.(ktesting.UpdateAction).GetObject().(*unstructured.Unstructured)
-				phase, _, _ := unstructured.NestedString(object.Object, "status", "phase")
-				if phase == volumeapi.PhaseMoving && delayed == nil {
-					delayed = object.DeepCopy()
-					return true, nil, context.DeadlineExceeded
-				}
-				return false, nil, nil
-			})
-			if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, expected, next); !errors.Is(err, context.DeadlineExceeded) || delayed == nil {
-				t.Fatalf("did not capture the actual timed-out Moving PUT: %v", err)
-			}
-			if err := f.reconciler.requestPreparationCancellation(f.ctx, &move, "SourceUncordoned"); err != nil {
-				t.Fatal(err)
-			}
-			for range 2 { // placement absence, then durable Cancelled
-				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if f.move(t, 0).Status.Phase != "Cancelled" || f.state(t, 0).ActiveMove != move.Name {
-				t.Fatal("did not reach the crash boundary before unlock")
-			}
-			if deliverAfterUnlock {
-				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := f.commitDynamicUpdate(volumeapi.VolumeResource, delayed); !apierrors.IsConflict(err) {
-					t.Fatalf("late PUT revived the cancelled lock: %v", err)
-				}
-				if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, expected, next); !errors.Is(err, volumeapi.ErrStateConflict) {
-					t.Fatalf("retry revived the cancelled lock: %v", err)
-				}
-			} else {
-				if _, err := f.commitDynamicUpdate(volumeapi.VolumeResource, delayed); err != nil {
-					t.Fatalf("late pre-unlock PUT should still match its Volume RV: %v", err)
-				}
-				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
-					t.Fatal(err)
-				}
-				state := f.state(t, 0)
-				if state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name {
-					t.Fatalf("Cancelled handler did not restore Moving before unlock: %+v", state)
-				}
-			}
-			finishCancellation(t, f)
-			if state := f.state(t, 0); state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || !reflect.DeepEqual(state.CurrentCopy, expected.CurrentCopy) {
-				t.Fatalf("delayed PUT broke source restoration: %+v", state)
+func TestPreparedCancellationFencesDelayedSourceWrites(t *testing.T) {
+	for _, latePhase := range []string{volumeapi.PhaseMoving, volumeapi.PhaseBlocked} {
+		t.Run(latePhase, func(t *testing.T) {
+			for _, deliverAfterUnlock := range []bool{false, true} {
+				t.Run(map[bool]string{false: "after Cancelled", true: "after unlock"}[deliverAfterUnlock], func(t *testing.T) {
+					f := newPreparationRegistryFixture(t, 1)
+					move := f.untilPrepared(t, 0)
+					previous := move.Status
+					move.Status.Phase = "StartingDisruption"
+					if err := f.reconciler.persistMoveStatus(f.ctx, &move, previous); err != nil {
+						t.Fatal(err)
+					}
+					expected := f.state(t, 0)
+					next := expected
+					next.Phase = latePhase
+					var delayed *unstructured.Unstructured
+					f.dynamic.PrependReactor("update", "shiftpvvolumes", func(action ktesting.Action) (bool, runtime.Object, error) {
+						object := action.(ktesting.UpdateAction).GetObject().(*unstructured.Unstructured)
+						phase, _, _ := unstructured.NestedString(object.Object, "status", "phase")
+						if phase == latePhase && delayed == nil {
+							delayed = object.DeepCopy()
+							return true, nil, context.DeadlineExceeded
+						}
+						return false, nil, nil
+					})
+					if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, expected, next); !errors.Is(err, context.DeadlineExceeded) || delayed == nil {
+						t.Fatalf("did not capture the actual timed-out %s PUT: %v", latePhase, err)
+					}
+					// Replay an already admitted cancellation journal. Fresh source
+					// changes after StartingDisruption no longer admit cancellation.
+					previous = move.Status
+					move.Status.Phase = "Canceling"
+					if err := f.reconciler.persistMoveStatus(f.ctx, &move, previous); err != nil {
+						t.Fatal(err)
+					}
+					for range 2 { // placement absence, then durable Cancelled
+						if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if f.move(t, 0).Status.Phase != "Cancelled" || f.state(t, 0).ActiveMove != move.Name {
+						t.Fatal("did not reach the crash boundary before unlock")
+					}
+					if deliverAfterUnlock {
+						if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := f.commitDynamicUpdate(volumeapi.VolumeResource, delayed); !apierrors.IsConflict(err) {
+							t.Fatalf("late PUT revived the cancelled lock: %v", err)
+						}
+						if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, expected, next); !errors.Is(err, volumeapi.ErrStateConflict) {
+							t.Fatalf("retry revived the cancelled lock: %v", err)
+						}
+					} else {
+						if _, err := f.commitDynamicUpdate(volumeapi.VolumeResource, delayed); err != nil {
+							t.Fatalf("late pre-unlock PUT should still match its Volume RV: %v", err)
+						}
+						if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+							t.Fatal(err)
+						}
+						state := f.state(t, 0)
+						if state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name {
+							t.Fatalf("Cancelled handler did not restore %s before unlock: %+v", latePhase, state)
+						}
+					}
+					finishCancellation(t, f)
+					if state := f.state(t, 0); state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || !reflect.DeepEqual(state.CurrentCopy, expected.CurrentCopy) {
+						t.Fatalf("delayed PUT broke source restoration: %+v", state)
+					}
+				})
 			}
 		})
 	}
+}
+
+func TestRetiredBlockedPreparationFencesDelayedCapacityApproval(t *testing.T) {
+	f, move := preparationAtCapacity(t)
+	var delayed *unstructured.Unstructured
+	f.dynamic.PrependReactor("update", "shiftpvmoves", func(action ktesting.Action) (bool, runtime.Object, error) {
+		object := action.(ktesting.UpdateAction).GetObject().(*unstructured.Unstructured)
+		approved, _, _ := unstructured.NestedBool(object.Object, "status", "capacityApproved")
+		if approved && delayed == nil {
+			delayed = object.DeepCopy()
+			return true, nil, context.DeadlineExceeded
+		}
+		return false, nil, nil
+	})
+	if err := f.reconciler.ensureCapacity(f.ctx, &move, observation{DestinationNode: "destination"}); !errors.Is(err, context.DeadlineExceeded) || delayed == nil {
+		t.Fatalf("did not capture the actual timed-out approval PUT: %v", err)
+	}
+	// Simulate the source-block CAS taking effect while the Move phase write
+	// fails. The old approval PUT still has the current Move resourceVersion.
+	source := f.state(t, 0)
+	next := source
+	next.Phase = volumeapi.PhaseBlocked
+	if err := f.registry.CompareAndSetSourceState(f.ctx, move.Spec.VolumeID, source, next); err != nil {
+		t.Fatal(err)
+	}
+	w := f.workloads[0]
+	if err := f.client.CoreV1().PersistentVolumeClaims(w.Claim.Namespace).Delete(f.ctx, w.Claim.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.move(t, 0); got.Status.Phase != "Canceling" || f.state(t, 0).Phase != volumeapi.PhaseBlocked || got.Status.Preparation == nil {
+		t.Fatalf("source restored before the durable cancellation fence: move=%+v source=%+v", got.Status, f.state(t, 0))
+	}
+	assertPreparationReserved(t, f, preparationRequestedBytes)
+	if _, err := f.commitDynamicUpdate(volumeapi.MoveResource, delayed); !apierrors.IsConflict(err) {
+		t.Fatalf("retirement admitted a delayed capacity approval: %v", err)
+	}
+	finishCancellation(t, f)
+	if state := f.state(t, 0); state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || !reflect.DeepEqual(state.CurrentCopy, source.CurrentCopy) {
+		t.Fatalf("fenced cancellation did not restore the exact source: %+v", state)
+	}
+	assertPreparationReserved(t, f, 0)
+	singleLifecycleNoDiskWork(t, f)
 }
 
 func TestPreparedCancellationFencesDelayedInitialClaim(t *testing.T) {

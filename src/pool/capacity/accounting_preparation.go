@@ -19,7 +19,7 @@ func preparationReservation(volumes map[string]volumeapi.State, move volumeapi.M
 		state.OwnerNode != move.Spec.SourceNode || state.CurrentCopy == nil || *state.CurrentCopy != *source {
 		return "", 0, fmt.Errorf("move %q preparation does not match the active volume owner", move.Name)
 	}
-	if state.Deleting || (state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseMoving) ||
+	if state.Deleting || (state.Phase != volumeapi.PhaseReady && state.Phase != volumeapi.PhaseMoving && state.Phase != volumeapi.PhaseBlocked) ||
 		state.CapacityBytes != preparation.ReservedBytes {
 		return "", 0, fmt.Errorf("move %q preparation does not match the volume capacity or lifecycle", move.Name)
 	}
