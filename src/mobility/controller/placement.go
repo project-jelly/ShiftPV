@@ -26,25 +26,31 @@ func (r *Reconciler) ensurePlacement(ctx context.Context, move *volumeapi.Move, 
 	}
 	names := namesFor(move.Name)
 	desired := r.placementPod(*move, observed.Replacement, names)
+	_, err := r.ensurePlacementPod(ctx, *move, desired)
+	return err
+}
+
+func (r *Reconciler) ensurePlacementPod(ctx context.Context, move volumeapi.Move, desired *corev1.Pod) (*corev1.Pod, error) {
+	names := namesFor(move.Name)
 	existing, err := r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.PlacementPod, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, err = r.Client.CoreV1().Pods(r.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+		existing, err = r.Client.CoreV1().Pods(r.Namespace).Create(ctx, desired, metav1.CreateOptions{})
 		if err == nil {
-			return nil
+			return existing, nil
 		}
 		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create placement reservation Pod: %w", err)
+			return nil, fmt.Errorf("create placement reservation Pod: %w", err)
 		}
 		existing, err = r.Client.CoreV1().Pods(r.Namespace).Get(ctx, names.PlacementPod, metav1.GetOptions{})
 		if err != nil {
-			return fmt.Errorf("read concurrent placement reservation Pod: %w", err)
+			return nil, fmt.Errorf("read concurrent placement reservation Pod: %w", err)
 		}
-		return validatePlacementIdentity(existing, *move, names)
+		return existing, validatePlacementIdentity(existing, move, names)
 	}
 	if err != nil {
-		return fmt.Errorf("read placement reservation Pod: %w", err)
+		return nil, fmt.Errorf("read placement reservation Pod: %w", err)
 	}
-	return validatePlacementIdentity(existing, *move, names)
+	return existing, validatePlacementIdentity(existing, move, names)
 }
 
 func (r *Reconciler) placementPod(move volumeapi.Move, replacement *corev1.Pod, names resourceNames) *corev1.Pod {
@@ -55,6 +61,10 @@ func (r *Reconciler) placementPod(move volumeapi.Move, replacement *corev1.Pod, 
 	sort.Strings(candidates)
 	affinity := placementAffinity(replacement.Spec.Affinity, candidates)
 	zero := int64(0)
+	// Admission must agree with the dedicated class for both initial placement
+	// and approved recreation; workload priority never authorizes preemption.
+	priority := int32(0)
+	never := corev1.PreemptNever
 	controller := true
 	blockOwnerDeletion := true
 	return &corev1.Pod{
@@ -75,8 +85,9 @@ func (r *Reconciler) placementPod(move volumeapi.Move, replacement *corev1.Pod, 
 			Affinity:                      affinity,
 			Tolerations:                   append([]corev1.Toleration(nil), replacement.Spec.Tolerations...),
 			SchedulerName:                 replacement.Spec.SchedulerName,
-			PriorityClassName:             replacement.Spec.PriorityClassName,
-			PreemptionPolicy:              replacement.Spec.PreemptionPolicy,
+			PriorityClassName:             r.PlacementPriorityClassName,
+			Priority:                      &priority,
+			PreemptionPolicy:              &never,
 			RuntimeClassName:              replacement.Spec.RuntimeClassName,
 			HostNetwork:                   replacement.Spec.HostNetwork,
 			OS:                            replacement.Spec.OS,
@@ -211,13 +222,24 @@ func (r *Reconciler) deletePlacement(ctx context.Context, move volumeapi.Move) e
 }
 
 func validatePlacementIdentity(pod *corev1.Pod, move volumeapi.Move, names resourceNames) error {
+	if err := validatePlacementOwner(pod, move, names); err != nil {
+		return err
+	}
+	// The UID is an admission snapshot, not execution authority. Once approved,
+	// the FSM may recreate this reservation on the persisted destination.
+	if !move.Status.CapacityApproved && move.Status.PlacementPodUID != "" && string(pod.UID) != move.Status.PlacementPodUID {
+		return fmt.Errorf("placement reservation Pod UID changed")
+	}
+	return nil
+}
+
+func validatePlacementOwner(pod *corev1.Pod, move volumeapi.Move, names resourceNames) error {
 	if pod.Labels["shiftpv.io/move"] != names.Base || pod.Labels["shiftpv.io/role"] != placementRole {
 		return fmt.Errorf("placement reservation Pod %q labels do not match move", pod.Name)
 	}
-	for _, owner := range pod.OwnerReferences {
-		if owner.APIVersion == "shiftpv.io/v1alpha1" && owner.Kind == "ShiftPVMove" && owner.Name == move.Name && string(owner.UID) == move.UID && move.UID != "" {
-			return nil
-		}
+	owner := metav1.GetControllerOf(pod)
+	if owner != nil && owner.APIVersion == "shiftpv.io/v1alpha1" && owner.Kind == "ShiftPVMove" && owner.Name == move.Name && string(owner.UID) == move.UID && move.UID != "" {
+		return nil
 	}
 	return fmt.Errorf("placement reservation Pod %q is not owned by move %q", pod.Name, move.Name)
 }

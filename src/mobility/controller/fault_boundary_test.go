@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -52,11 +54,20 @@ func (r *lostResponseRepository) CompareAndSetState(ctx context.Context, id, pha
 	return err
 }
 
-func (r *lostResponseRepository) SetMoveStatus(ctx context.Context, name, uid string, status volumeapi.MoveStatus) error {
-	err := r.memoryRepository.SetMoveStatus(ctx, name, uid, status)
+func (r *lostResponseRepository) CompareAndSetMoveStatus(ctx context.Context, expected volumeapi.Move, status volumeapi.MoveStatus) (volumeapi.Move, error) {
+	stored, err := r.memoryRepository.CompareAndSetMoveStatus(ctx, expected, status)
 	if err == nil && r.statusResponses > 0 {
 		r.statusResponses--
-		return fmt.Errorf("API timeout after ShiftPVMove status update was accepted")
+		return volumeapi.Move{}, fmt.Errorf("API timeout after ShiftPVMove status update was accepted")
+	}
+	return stored, err
+}
+
+func (r *lostResponseRepository) CompareAndSetSourceState(ctx context.Context, id string, expected, next volumeapi.State) error {
+	err := r.memoryRepository.CompareAndSetSourceState(ctx, id, expected, next)
+	if err == nil && r.stateCASResponses > 0 {
+		r.stateCASResponses--
+		return fmt.Errorf("API timeout after ShiftPVVolume source claim was accepted")
 	}
 	return err
 }
@@ -80,12 +91,13 @@ func TestMoveDiscoveryConvergesAfterCreateResponseLost(t *testing.T) {
 	if err := reconciler.ReconcileAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(inner.moves) != 1 || inner.moves[0].Status.Phase != string(fsm.PhasePending) {
+	if len(inner.moves) != 1 || inner.moves[0].Status.Phase != string(fsm.PhasePreparing) ||
+		inner.moves[0].Spec.ProtocolVersion != volumeapi.MoveProtocolPreparedV1 {
 		t.Fatalf("create retry did not converge without duplication: %#v", inner.moves)
 	}
 }
 
-func TestPendingMoveCancellationConvergesAfterDeleteResponseLost(t *testing.T) {
+func TestLegacyPendingMoveRemainsUnchangedInsteadOfBeingDeleted(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	move := volumeapi.Move{
@@ -100,24 +112,52 @@ func TestPendingMoveCancellationConvergesAfterDeleteResponseLost(t *testing.T) {
 	}
 	repository := &lostResponseRepository{memoryRepository: inner, deleteMoveResponses: 1}
 	client := fake.NewSimpleClientset(readyNode("source", false), readyNode("destination", false))
-	reconciler := newTestReconciler(client, repository)
+	reconciler := newTestReconciler(client, repository, withTestCleanups())
 
-	if err := reconciler.ReconcileAll(ctx); err == nil {
-		t.Fatal("lost obsolete Move delete response was hidden")
-	}
-	if len(inner.moves) != 0 {
-		t.Fatalf("accepted obsolete Move delete was not retained: %#v", inner.moves)
-	}
-	if err := reconciler.ReconcileAll(ctx); err != nil {
-		t.Fatalf("obsolete Move delete retry did not converge: %v", err)
+	for pass := 0; pass < 2; pass++ {
+		if err := reconciler.ReconcileAll(ctx); err == nil {
+			t.Fatal("unsettled legacy Pending history was accepted")
+		}
+		if len(inner.moves) != 1 || !reflect.DeepEqual(inner.moves[0], move) || repository.deleteMoveResponses != 1 {
+			t.Fatalf("legacy Pending history was executed or deleted: %#v", inner.moves)
+		}
 	}
 	state := inner.volumes[volumeID]
 	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != "" || state.OwnerNode != "source" {
-		t.Fatalf("obsolete Move cancellation changed volume authority: %#v", state)
+		t.Fatalf("retaining legacy history changed volume authority: %#v", state)
 	}
 }
 
-func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testing.T) {
+func TestSettledMoveHistoryGCConvergesAfterDeleteResponseLost(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC)
+	move := volumeapi.Move{
+		Name: "move-test", UID: "move-uid", ResourceVersion: "1",
+		Spec:   volumeapi.MoveSpec{ProtocolVersion: volumeapi.MoveProtocolPreparedV1, VolumeID: preflightVolume, SourceNode: "source"},
+		Status: volumeapi.MoveStatus{Phase: "Cancelled", LastTransitionTime: now.Add(-8 * 24 * time.Hour).Format(time.RFC3339Nano)},
+	}
+	inner := &memoryRepository{moves: []volumeapi.Move{move}, volumes: map[string]volumeapi.State{
+		preflightVolume: {Phase: volumeapi.PhaseReady, OwnerNode: "source"},
+	}}
+	repository := &lostResponseRepository{memoryRepository: inner, deleteMoveResponses: 1}
+	client := fake.NewSimpleClientset(readyNode("source", false), readyNode("destination", false))
+	reconciler := newTestReconciler(client, repository, withTestCleanups(), func(r *Reconciler) { r.Now = func() time.Time { return now } })
+	before := inner.volumes[preflightVolume]
+	if err := reconciler.ReconcileAll(ctx); err == nil || repository.deleteMoveResponses != 0 {
+		t.Fatalf("settled metadata delete response loss was not injected: %v", err)
+	}
+	if len(inner.moves) != 0 {
+		t.Fatalf("accepted history deletion was not retained: %#v", inner.moves)
+	}
+	if err := reconciler.ReconcileAll(ctx); err != nil {
+		t.Fatalf("metadata GC retry did not converge: %v", err)
+	}
+	if !reflect.DeepEqual(inner.volumes[preflightVolume], before) {
+		t.Fatal("history GC changed Volume authority")
+	}
+}
+
+func TestCopyResourcesWaitForDurableReplacementAfterStatusResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
 	source, _, _ := testCopyIdentities(volumeID, "source", "destination")
@@ -125,7 +165,11 @@ func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testin
 		Name:   "move-test",
 		UID:    "move-uid",
 		Spec:   volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"},
-		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseWaitingForCapacity), ClaimNamespace: "workload", CandidateNodes: []string{"destination"}, DestinationPoolUID: "destination-pool-uid", CapacityApproved: true, SourceBytes: 1, SourceCopy: &source},
+		Status: volumeapi.MoveStatus{Phase: string(fsm.PhaseCopying), DestinationNode: "destination", CandidateNodes: []string{"destination"}, DestinationPoolUID: "destination-pool-uid", CapacityApproved: true, SourceBytes: 1, SourceCopy: &source},
+	}
+	move = preparedFixtureMove(move)
+	if err := prepareMoveCopyIdentitiesForPool(&move, volumeapi.Pool{Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination"}); err != nil {
+		t.Fatal(err)
 	}
 	inner := &memoryRepository{
 		pools: []volumeapi.Pool{{Name: "source-pool", UID: "source-pool-uid", NodeName: "source", MountPath: "/source-pool"}, {Name: "destination-pool", UID: "destination-pool-uid", NodeName: "destination", MountPath: "/destination-pool"}},
@@ -148,14 +192,17 @@ func TestCopyResourcesWaitForDurableDestinationAfterStatusResponseLost(t *testin
 	}
 
 	if err := reconciler.ensureCopy(ctx, &move, observed); err == nil {
-		t.Fatal("lost destination status response was hidden")
+		t.Fatal("lost replacement status response was hidden")
+	}
+	if len(client.Actions()) != 0 {
+		t.Fatal("replacement CAS response loss started Kubernetes effects before re-observation")
 	}
 	if _, err := client.CoreV1().Secrets("system").Get(ctx, observed.Names.Secret, metav1.GetOptions{}); err == nil {
 		t.Fatal("copy resources started before the destination status write was acknowledged")
 	}
 	persisted := inner.moves[0]
 	if persisted.Status.DestinationNode != "destination" || persisted.Status.CopyJobName != observed.Names.CopyJob || persisted.Status.ReplacementUID != "replacement-uid" {
-		t.Fatalf("accepted destination journal was not retained: %+v", persisted.Status)
+		t.Fatalf("accepted replacement journal or full destination plan was not retained: %+v", persisted.Status)
 	}
 	if err := reconciler.ensureCopy(ctx, &persisted, observed); err != nil {
 		t.Fatal(err)
@@ -254,51 +301,41 @@ func TestMobilityJobsConvergeAfterCreateResponseLost(t *testing.T) {
 	}
 }
 
-func TestVolumeLockConvergesAfterCASResponseLost(t *testing.T) {
+func TestPreparationClaimConvergesAfterCASResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}}
+	move := preparedFixtureMove(volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}})
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
+		UID: move.Status.SourceCopy.VolumeUID, CurrentCopy: move.Status.SourceCopy,
 		Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"},
-	}}, pools: []volumeapi.Pool{{Name: "source-pool", UID: "source-pool-uid", NodeName: "source"}}}
+	}}}
 	repository := &lostResponseRepository{memoryRepository: inner, stateCASResponses: 1}
 	reconciler := &Reconciler{Repository: repository}
 	state, _ := repository.Get(ctx, volumeID)
-	observed := observation{
-		Volume:         state,
-		PV:             &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}},
-		Claim:          &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "workload"}},
-		Consumer:       &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "consumer", Namespace: "workload", UID: "consumer-uid"}},
-		CandidateNodes: []string{"destination"},
+	if err := reconciler.claimPreparationSource(ctx, move, state); err == nil {
+		t.Fatal("lost source claim response was hidden")
 	}
-
-	if err := reconciler.lockVolume(ctx, &move, observed); err == nil {
-		t.Fatal("lost volume lock response was hidden")
+	claimed, err := repository.Get(ctx, volumeID)
+	if err != nil || claimed.Phase != volumeapi.PhaseReady || claimed.OwnerNode != "source" || claimed.ActiveMove != move.Name || len(claimed.PublishedNodes) != 1 {
+		t.Fatalf("accepted source claim changed serving authority: %#v %v", claimed, err)
 	}
-	locked := inner.volumes[volumeID]
-	if locked.Phase != volumeapi.PhaseMoving || locked.OwnerNode != "source" || locked.ActiveMove != move.Name {
-		t.Fatalf("accepted volume lock was not retained: %#v", locked)
-	}
-	if err := reconciler.lockVolume(ctx, &move, observed); err != nil {
-		t.Fatalf("volume lock retry did not converge: %v", err)
-	}
-	if move.Status.ConsumerUID != "consumer-uid" || len(move.Status.CandidateNodes) != 1 {
-		t.Fatalf("move journal was not populated after retry: %+v", move.Status)
+	if err := reconciler.claimPreparationSource(ctx, move, claimed); err != nil {
+		t.Fatalf("fresh source claim retry did not converge: %v", err)
 	}
 }
 
 func TestOwnerCommitConvergesAfterCASResponseLost(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	_, _, destination := testCopyIdentities(volumeID, "source", "destination")
+	source, _, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{
-		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination,
+		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination, SourceCopy: &source, DestinationPoolUID: destination.PoolUID,
 	}}
 	inner := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
-		Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name,
+		UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CurrentCopy: &source,
 	}}}
 	repository := &lostResponseRepository{memoryRepository: inner, stateCASResponses: 1}
-	reconciler := &Reconciler{Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := newTestReconciler(nil, repository)
 	placement := reconciler.placementPod(move, &corev1.Pod{}, namesFor(move.Name))
 	placement.Spec.NodeName = "destination"
 	reconciler.Client = fake.NewSimpleClientset(placement)

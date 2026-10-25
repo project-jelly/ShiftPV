@@ -29,6 +29,16 @@ sudo unshare --mount --propagation private \
   -test.v \
   -test.run '^TestLinuxMountIntegration'
 
+publication_binary="${temp_dir}/publication.test"
+go test -c -o "${publication_binary}" ./src/node/publication
+sudo unshare --mount --propagation private \
+  env \
+  SHIFTPV_LINUX_MOUNT_INTEGRATION=1 \
+  SHIFTPV_PARENT_MOUNT_NAMESPACE="${parent_mount_namespace}" \
+  "${publication_binary}" \
+  -test.v \
+  -test.run '^TestLinuxPublication'
+
 measurement_binary="${temp_dir}/measurement.test"
 go test -c -o "${measurement_binary}" ./src/cmd/volume-helper
 sudo unshare --mount --propagation private \
@@ -43,6 +53,10 @@ sudo unshare --mount --propagation private \
   "${live_capacity_binary}" -test.v -test.run '^TestLinuxLiveCapacity'
 
 node_effects_binary="${temp_dir}/node-effects.test"
-go test -c -o "${node_effects_binary}" ./src/provisioning/nodeexecutor
+go test -c -o "${node_effects_binary}" ./src/node/executor
 sudo unshare --mount --propagation private \
   "${node_effects_binary}" -test.v -test.run '^TestNativeMountedPool'
+
+full_filesystem_binary="${temp_dir}/full-filesystem.test"
+go test -c -o "${full_filesystem_binary}" ./test/integration/full-filesystem
+sudo ./test/integration/full-filesystem/run.sh "${full_filesystem_binary}"

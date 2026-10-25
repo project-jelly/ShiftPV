@@ -14,7 +14,6 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -280,10 +279,18 @@ func TestMoveHelperContainersOmitPoolReadinessBudget(t *testing.T) {
 
 type receiptCleanupOperator struct{}
 
-func (receiptCleanupOperator) Reclaim(ctx context.Context, request cleanupapi.Cleanup, store helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (receiptCleanupOperator) ObserveCompletedCleanup(_ context.Context, current cleanupapi.Cleanup) (bool, error) {
+	err := cleanupapi.ValidateSettled(current)
+	return err == nil, err
+}
+
+func (receiptCleanupOperator) AdvanceReclaim(ctx context.Context, request cleanupapi.Cleanup, store cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
+	if request.Status.Phase == cleanupapi.PhaseVerifying || request.Status.Phase == cleanupapi.PhaseConfirmingAbsence || request.Status.Phase == cleanupapi.PhaseCompleted {
+		return request, true, nil
+	}
 	executor := &cleanupapi.Executor{JobName: request.Name + "-effect", JobUID: "job-uid", PodUID: "pod-uid", NodeName: request.Spec.Target.NodeName}
 	if err := store.UpdateStatus(ctx, request, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: executor}); err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanupapi.Cleanup{}, false, err
 	}
 	receipt := &cleanupapi.Receipt{
 		OperationID: request.Spec.OperationID, ExecutorUID: executor.JobUID,
@@ -291,9 +298,10 @@ func (receiptCleanupOperator) Reclaim(ctx context.Context, request cleanupapi.Cl
 		LocalReceiptDigest: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 	if err := store.UpdateStatus(ctx, request, cleanupapi.Status{Phase: cleanupapi.PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
-		return cleanupapi.Cleanup{}, err
+		return cleanupapi.Cleanup{}, false, err
 	}
-	return store.Get(ctx, request.Spec.Authority)
+	current, err := store.Get(ctx, request.Spec.Authority)
+	return current, err == nil, err
 }
 
 func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) {
@@ -312,7 +320,7 @@ func TestMoveCopyIdentityIsPersistedBeforeJobsAndCommittedExactly(t *testing.T) 
 		moves: []volumeapi.Move{move},
 	}
 	reconciler := &Reconciler{Client: fake.NewSimpleClientset(), Namespace: "system", Repository: repository}
-	if err := reconciler.prepareMoveCopyIdentities(context.Background(), &move); err != nil {
+	if err := prepareMoveCopyIdentitiesForPool(&move, repository.pools[1]); err != nil {
 		t.Fatal(err)
 	}
 	if move.Status.IncomingCopy == nil || move.Status.IncomingCopy.Role != volume.RoleIncoming || move.Status.IncomingCopy.PoolUID != "destination-pool-uid" ||
@@ -353,8 +361,7 @@ func TestMoveCopyIdentityRejectsPoolRecreatedAfterCapacityApproval(t *testing.T)
 		{Name: source.PoolName, UID: source.PoolUID, NodeName: "source", MountPath: "/source"},
 		{Name: "destination-pool", UID: "replacement-pool-uid", NodeName: "destination", MountPath: "/destination"},
 	}}
-	reconciler := &Reconciler{Repository: repository}
-	if err := reconciler.prepareMoveCopyIdentities(context.Background(), &move); err == nil || !strings.Contains(err.Error(), "identity changed") {
+	if err := prepareMoveCopyIdentitiesForPool(&move, repository.pools[1]); err == nil || !strings.Contains(err.Error(), "identity changed") {
 		t.Fatalf("recreated destination Pool was accepted: %v", err)
 	}
 	if move.Status.IncomingCopy != nil || move.Status.DestinationCopy != nil {

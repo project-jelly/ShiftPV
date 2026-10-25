@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 // ensureRollbackScan opens a causal fence only after Retiring has stopped the
@@ -24,7 +25,11 @@ func (r *Reconciler) ensureRollbackScan(ctx context.Context, move *volumeapi.Mov
 	if _, err := rollbackDestinationPool(*move, pools); err != nil {
 		return false, err
 	}
-	generation, err := r.Repository.RequestPoolScan(ctx, *move.Status.IncomingCopy)
+	return r.openRollbackScan(ctx, move, *move.Status.IncomingCopy)
+}
+
+func (r *Reconciler) openRollbackScan(ctx context.Context, move *volumeapi.Move, target volume.CopyIdentity) (bool, error) {
+	generation, err := r.Repository.RequestPoolScan(ctx, target)
 	if err != nil {
 		return false, err
 	}

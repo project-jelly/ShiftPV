@@ -86,7 +86,7 @@ install_shiftpv() {
 }
 
 assert_shiftpv_release_removed() {
-	local namespaced cluster_scoped deadline
+	local namespaced cluster_scoped capacities deadline
 	deadline=$((SECONDS + 60))
 	while true; do
 		namespaced=$(kubectl -n shiftpv-system get \
@@ -94,10 +94,12 @@ assert_shiftpv_release_removed() {
 			-l app.kubernetes.io/instance=shiftpv \
 			-o name)
 		cluster_scoped=$(kubectl get \
-			clusterroles,clusterrolebindings,storageclasses,csidrivers \
+			clusterroles,clusterrolebindings,storageclasses,csidrivers,validatingadmissionpolicies,validatingadmissionpolicybindings \
 			-l app.kubernetes.io/instance=shiftpv \
 			-o name)
-		if [[ -z "${namespaced}" && -z "${cluster_scoped}" ]]; then
+		capacities=$(kubectl -n shiftpv-system get csistoragecapacities \
+			-l csi.storage.k8s.io/drivername=csi.shiftpv.io -o name)
+		if [[ -z "${namespaced}" && -z "${cluster_scoped}" && -z "${capacities}" ]]; then
 			break
 		fi
 		if ((SECONDS >= deadline)); then
@@ -106,9 +108,9 @@ assert_shiftpv_release_removed() {
 		sleep 1
 	done
 
-	if [[ -n "${namespaced}" || -n "${cluster_scoped}" ]]; then
+	if [[ -n "${namespaced}" || -n "${cluster_scoped}" || -n "${capacities}" ]]; then
 		echo "Helm uninstall left ShiftPV release resources:" >&2
-		printf '%s\n%s\n' "${namespaced}" "${cluster_scoped}" | sed '/^$/d' >&2
+		printf '%s\n%s\n%s\n' "${namespaced}" "${cluster_scoped}" "${capacities}" | sed '/^$/d' >&2
 		exit 1
 	fi
 	for resource in \
@@ -147,9 +149,9 @@ run_mobility_node_restarts() {
 		"${ROOT_DIR}/test/e2e/kind/mobility-node-restarts.sh"
 }
 
-run_pool_capacity() {
+wait_for_lifecycle_webhook() {
 	# Pod readiness can precede the API server's webhook endpoint refresh.
-	# Exercise the read-only admission path before starting this focused case.
+	# Exercise the read-only admission path before any focused case starts.
 	local attempt ready=0
 	for ((attempt = 0; attempt < 30; attempt++)); do
 		if kubectl delete shiftpvpool worker-b --dry-run=server >/dev/null 2>&1; then
@@ -162,7 +164,15 @@ run_pool_capacity() {
 		echo "Pool admission webhook did not become reachable" >&2
 		return 1
 	fi
+}
+
+run_pool_capacity() {
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/pool-capacity.sh"
+}
+
+run_capacity_tracking() {
+	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
+		bash "${ROOT_DIR}/test/e2e/kind/capacity-tracking.sh"
 }
 
 run_directory_pool() {
@@ -183,16 +193,32 @@ run_volume_delete_cleanup() {
 	CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/volume-delete-cleanup.sh"
 }
 
-run_cleanup_job_retry() {
+run_cleanup_executor_retry() {
 	CLUSTER_NAME="${CLUSTER_NAME}" WORK_DIR="${WORK_DIR}" \
 		WORKER_A_POOL="${WORKER_A_POOL}" WORKER_B_POOL="${WORKER_B_POOL}" \
-		"${ROOT_DIR}/test/e2e/kind/cleanup-job-retry.sh"
+		"${ROOT_DIR}/test/e2e/kind/cleanup-executor-retry.sh"
 }
 
+run_preserved_retired_uninstall() (
+	# Keep mount restoration and scenario variables inside this subshell.
+	# shellcheck source=test/e2e/kind/lifecycle/preserved-retired-pool.sh
+	source "${ROOT_DIR}/test/e2e/kind/lifecycle/preserved-retired-pool.sh"
+)
+
 install_shiftpv true
+wait_for_lifecycle_webhook
+
+if [[ "${PRESERVED_UNINSTALL_ONLY:-0}" == "1" ]]; then
+	run_preserved_retired_uninstall
+	echo "ShiftPV focused preserved retired Pool uninstall E2E passed"
+	exit 0
+fi
 
 if [[ "${NODE_EFFECTS_ONLY:-0}" == "1" ]]; then
+ CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/pool-retirement.sh"
  CLUSTER_NAME="${CLUSTER_NAME}" "${ROOT_DIR}/test/e2e/kind/node-executor.sh"
+ CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/creation-retirement.sh"
+ CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/delayed-pv-handoff.sh"
  echo "ShiftPV focused resident Node E2E passed"
  exit 0
 fi
@@ -200,6 +226,14 @@ fi
 if [[ "${POOL_CAPACITY_ONLY:-0}" == "1" ]]; then
 	run_pool_capacity
 	echo "ShiftPV focused Pool capacity E2E passed"
+	exit 0
+fi
+
+if [[ "${CAPACITY_TRACKING_ONLY:-0}" == "1" ]]; then
+	run_capacity_tracking
+	helm uninstall shiftpv --namespace shiftpv-system --wait --timeout=2m
+	assert_shiftpv_release_removed
+	echo "ShiftPV focused capacity tracking E2E passed"
 	exit 0
 fi
 
@@ -215,16 +249,16 @@ if [[ "${VOLUME_DELETE_CLEANUP_ONLY:-0}" == "1" ]]; then
 	exit 0
 fi
 
-if [[ "${CLEANUP_JOB_RETRY_ONLY:-0}" == "1" ]]; then
-	run_cleanup_job_retry
-	echo "ShiftPV focused cleanup Job retry E2E passed"
+if [[ "${CLEANUP_EXECUTOR_RETRY_ONLY:-0}" == "1" ]]; then
+	run_cleanup_executor_retry
+	echo "ShiftPV focused cleanup executor retry E2E passed"
 	exit 0
 fi
 
 if [[ "${MOBILITY_NODE_RESTARTS_ONLY:-0}" == "1" ]]; then
 	run_mobility_node_restarts
 	if [[ "${MOBILITY_NODE_RESTART_CASE:-all}" == all ]]; then
-		run_cleanup_job_retry
+		run_cleanup_executor_retry
 	fi
 	echo "ShiftPV focused mobility node-container restart E2E passed"
 	exit 0
@@ -237,7 +271,7 @@ fi
 # included, and only reuses orderings the focused entry points already prove:
 #
 #   g1  directory-pool (262 s) + metrics (10 s) + retain-reclaim (~70 s)
-#       + pool-capacity (138 s)
+#       + pool-capacity (138 s) + capacity-tracking
 #       The metrics assertions count the CSI calls, the observed Copying move
 #       and the settled reserved-byte gauge that directory-pool produces, and
 #       require exactly the two base Pools, so those two stay adjacent and in
@@ -287,6 +321,7 @@ fi
 if group_selected g1; then
 	run_retain_reclaim
 	run_pool_capacity
+	run_capacity_tracking
 fi
 if group_selected g3; then
 	run_orphan_preservation
@@ -300,6 +335,7 @@ fi
 
 if group_selected g2; then
 	run_volume_delete_cleanup
+	run_preserved_retired_uninstall
 
 	# Lifecycle admission is read-only. A direct dry-run DELETE must not mint an
 	# uninstall permit even when no storage dependency exists.
@@ -503,14 +539,23 @@ if group_selected g2; then
 	kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/shiftpv-coexistence --timeout=2m
 	COEXISTENCE_PV=$(kubectl get pvc shiftpv-coexistence -o jsonpath='{.spec.volumeName}')
 	COEXISTENCE_DRIVER=$(kubectl get "pv/${COEXISTENCE_PV}" -o jsonpath='{.spec.csi.driver}')
+	COEXISTENCE_VOLUME=$(kubectl get "pv/${COEXISTENCE_PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 	if [[ "${COEXISTENCE_DRIVER}" != "csi.shiftpv.io" ]]; then
 		echo "explicit ShiftPV PVC used unexpected driver: ${COEXISTENCE_DRIVER}" >&2
+		exit 1
+	fi
+	if [[ -z "${COEXISTENCE_VOLUME}" ]]; then
+		echo "explicit ShiftPV PV has no volume handle: ${COEXISTENCE_PV}" >&2
 		exit 1
 	fi
 	kubectl exec shiftpv-coexistence -- grep -Fx 'ShiftPV StorageClass coexistence' /data/payload
 
 	kubectl delete pod shiftpv-coexistence --wait=true
 	kubectl delete pvc shiftpv-coexistence --wait=true
+	# Settle this fixture's cleanup before overmounting the fault Pool; the
+	# shiftpv-e2e baseline remains retained.
+	kubectl wait --for=delete "pv/${COEXISTENCE_PV}" --timeout=5m
+	kubectl wait --for=delete "shiftpvvolume/${COEXISTENCE_VOLUME}" --timeout=2m
 	CLUSTER_NAME="${CLUSTER_NAME}" WORKER_B_POOL="${WORKER_B_POOL}" \
 	  "${ROOT_DIR}/test/e2e/kind/filesystem-faults.sh"
 fi

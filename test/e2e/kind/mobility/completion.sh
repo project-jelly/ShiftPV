@@ -26,6 +26,9 @@ kubectl -n "${NAMESPACE}" rollout status deployment/wffc --timeout=180s
 PV=$(kubectl -n "${NAMESPACE}" get pvc/wffc -o jsonpath='{.spec.volumeName}')
 VOLUME=$(kubectl get "pv/${PV}" -o jsonpath='{.spec.csi.volumeHandle}')
 SOURCE=$(kubectl get "shiftpvvolume/${VOLUME}" -o jsonpath='{.status.ownerNode}')
+# Write unique source content after startup so an empty destination cannot pass.
+# shellcheck disable=SC2016
+kubectl -n "${NAMESPACE}" exec deployment/wffc -- sh -ec 'printf "%s\n" "$1" > /data/payload; sync' sh "completion-${VOLUME}"
 CHECKSUM=$(pod_sha256 "${NAMESPACE}" deployment/wffc /data/payload)
 kubectl patch "pv/${PV}" --type=merge -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
 
@@ -87,10 +90,15 @@ docker exec "${SOURCE}" test ! -e "${SOURCE_POOL}/volumes/${VOLUME}"
 SOURCE_COPY=$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.status.sourceCopy.copyID}')
 test -n "${SOURCE_COPY}"
 docker exec "${SOURCE}" test ! -e "${SOURCE_POOL}/.shiftpv/retired/${SOURCE_COPY}"
-CLEANUP_JOB=$(cleanup_job_name "shiftpvmove/${MOVE}")
-test -n "${CLEANUP_JOB}"
+JOURNAL=$(kubectl get "shiftpvmove/${MOVE}" -o json)
+jq -e '.status.cleanup.status.executor.kind == "Node"' <<<"${JOURNAL}" >/dev/null
+NODE_POD=$(jq -er '.status.cleanup.status.executor.podName' <<<"${JOURNAL}")
+NODE_UID=$(jq -er '.status.cleanup.status.executor.podUID' <<<"${JOURNAL}")
 assert_cleanup_journal "shiftpvmove/${MOVE}" MoveSource "${VOLUME}" "${SOURCE_COPY}" ShiftPVMove
-kubectl -n shiftpv-system delete "job/${CLEANUP_JOB}" --wait=true --timeout=120s
+assert_no_cleanup_job "${MOVE}"
+test "$(kubectl -n shiftpv-system get "pod/${NODE_POD}" -o jsonpath='{.metadata.uid}')" = "${NODE_UID}"
+kubectl -n shiftpv-system delete "pod/${NODE_POD}" --wait=true --timeout=120s
+kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=180s
 
 # Normal CSI deletion races with the still-rejected terminal journal.
 kubectl delete namespace "${NAMESPACE}" --wait=true --timeout=180s
@@ -103,10 +111,6 @@ test "$(kubectl get "shiftpvmove/${MOVE}" -o jsonpath='{.status.phase}')" = Comp
 kubectl delete validatingadmissionpolicybinding "${POLICY}"
 kubectl delete validatingadmissionpolicy "${POLICY}"
 kubectl wait "shiftpvmove/${MOVE}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=120s
-JOBS=$(kubectl -n shiftpv-system get jobs -o name)
-if grep -Fxq "job.batch/${CLEANUP_JOB}" <<<"${JOBS}"; then
-	echo 'completion recreated source cleanup work' >&2
-	exit 1
-fi
+assert_no_cleanup_job "${MOVE}"
 assert_cleanup_journal "shiftpvmove/${MOVE}" MoveSource "${VOLUME}" "${SOURCE_COPY}" ShiftPVMove
-echo "completion journal recovery E2E passed: move=${MOVE} volume=${VOLUME} checksum=${CHECKSUM}; CSI deletion, Job removal and controller restart"
+echo "completion journal recovery E2E passed: move=${MOVE} volume=${VOLUME} checksum=${CHECKSUM}; CSI deletion, Node Pod replacement and controller restart"

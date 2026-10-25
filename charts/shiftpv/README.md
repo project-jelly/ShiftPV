@@ -34,7 +34,43 @@ Nodes over authenticated gRPC; older Nodes retain the API/helper read path.
 Deletion waits up to 5 seconds for its existing causal absence proof before
 returning a retry. No existing Pool or StorageClass settings need changing.
 
+## Scheduler capacity tracking
+
+이 기능을 지원하는 CRD·Controller·Node를 모두 갱신한 뒤 다음 설정을 켠다. 기본값은 비활성화다.
+구버전 Node 또는 CRD에 가용량 관측 필드가 없으면 해당 Pool의 게시 용량은 0이다.
+
+```yaml
+capacityTracking:
+  enabled: true
+  pollInterval: 1m
+```
+
+이 설정은 provisioner의 `CSIStorageCapacity` 게시와 scheduler의 용량 검사를 함께 켠다.
+최초 정보가 게시될 때까지 신규 PVC는 잠시 Pending일 수 있다. 기존 PV/PVC의 데이터나
+StorageClass 설정은 바뀌지 않는다. `pollInterval`은 양의 정수와 `s`, `m`, `h` 단위를 사용한다.
+짧은 간격은 조회와 Kubernetes API 부하를 늘린다. Node의 정기 관측 주기는 별도이며,
+GetCapacity가 추가 filesystem probe를 실행하지는 않는다.
+
+정보는 노드·StorageClass별로 게시하며 같은 Pool group을 가리키는 class들은 같은 공간을 공유한다.
+`capacity`는 사용 가능한 독립 Pool 여유의 합계, `maximumVolumeSize`는 한 Pool에서 수용할 수 있는
+최대 PVC 크기다. 한 PVC를 여러 Pool에 나누지 않으며 실제 생성은 기존 admission에서 다시 검증한다.
+관측 오류 때 provisioner가 이전 값을 유지할 수 있으므로 이 정보는 용량 예약을 보장하지 않는다.
+
+```bash
+kubectl -n shiftpv-system get csistoragecapacities \
+  -l csi.storage.k8s.io/drivername=csi.shiftpv.io -o yaml
+```
+
+소유자는 Controller Deployment이므로 Pod 교체 후에도 정보를 유지하고 Deployment 삭제 시 정리한다.
+`GetCapacity`를 지원하지 않는 이미지로 되돌리기 전에 현재 Chart에서 `capacityTracking.enabled=false`를
+적용해 scheduler 검사와 게시를 먼저 끈다. 이미 게시된 객체는 Deployment가 남아 있으면 유지될 수 있다.
+[upstream 설정 계약](https://github.com/kubernetes-csi/external-provisioner/blob/v6.3.0/README.md#capacity-support)을 따른다.
+
 ## Resident volume effects
+
+Node ServiceAccount는 Controller·helper와 분리한다. Node는 Kubernetes가 검증한 Pod-bound token으로
+자기 Pod의 capability·RPC annotation만 변경할 수 있다. 다른 Pod, 실행 사양, label과 finalizer 변경은
+ValidatingAdmissionPolicy가 거부한다. 외부 관리 ServiceAccount에도 같은 정책을 적용한다.
 
 새 Volume 생성과 삭제는 상주 Node가 실행한다. Controller가 Pod UID를 durable intent에 기록하고,
 Node receipt를 확인한 뒤 Ready 전환 또는 absence 검증을 진행한다. 기존 helper 작업과 Move는 기존 경로를 따른다.
@@ -127,12 +163,22 @@ spec:
 
 ## Multiple Pools on one node
 
-한 Pool은 한 filesystem 용량 단위를 소유한다. 같은 node의 여러 Pool은 모두
+한 Pool은 한 filesystem 용량 단위를 소유한다. 같은 node에서 함께 사용하는 Pool은 모두
 `spec.capacityPolicy: FixedBlock`이어야 하며, Ready 전에 실제 backing 영역이
 서로 겹치지 않는지 확인한다. 기존 directory Pool도 지원하는 filesystem 위에
 있으면 이 필드를 추가할 수 있다. 전환은 inventory가 healthy·complete이고 진행 중인
 Move가 없는 상태에서 수행한다. 검증을 켠 뒤에는 정책을 제거하거나 바꿀 수 없다.
 새 CRD를 먼저 적용한 뒤 controller/node/helper 이미지를 함께 갱신한다.
+
+Node는 설정·backing·쓰기 검사와 complete inventory를 확인한 뒤
+`status.registrationApproved: true`를 기록한다. 승인 이력은 이후 검사 실패에도 유지한다.
+설정 누락, 경로 중복 또는 backing 중복으로 거부된 신규 후보는 기존 승인 Pool의
+Ready를 내리지 않는다. 승인된 Pool의 backing이 바뀌거나 증거가 없어지면 해당 Pool과
+같은 node의 승인 Pool 신규 배치를 보류한다. 정상 Pool의 자기 backing 검증·inventory와 기존 copy
+사용·정리는 계속한다. 함께 등록한 후보끼리 충돌하면 모두 거부한다.
+승인 직전 등록 목록과 backing을 다시 확인하며 외부 mount 변경을 원자적으로 막지는 않는다.
+승인된 Pool의 `capacity.limit` 오류는 해당 Pool의 신규 배치를 막지만 backing 검증과
+정리용 inventory는 계속 수행한다. 한도는 양수의 정수 바이트로 정확히 변환 가능해야 한다.
 
 다음은 **이미 준비하고 마운트한** 독립 thick LV 두 개를 등록하는 예다.
 ShiftPV가 LV, filesystem 또는 mount를 만들지 않는다.
@@ -168,6 +214,8 @@ spec:
 `fast`와 `bulk` 그룹을 선택하는 StorageClass로 용도를 나눈다. 두 Pool의 그룹을
 같게 설정하면 한 StorageClass에서 요청량을 수용할 수 있는 Pool 하나를 선택한다.
 한 PVC는 선택된 Pool 하나에 고정되며 두 filesystem에 걸쳐 분할되지 않는다.
+선택된 node와 그룹 안에서 Pool 이름 순서로 용량 조건을 만족하는 첫 Pool을 사용한다.
+남은 용량의 균등 분산이나 round-robin은 수행하지 않는다.
 자동 cold move는 같은 그룹의 다른 node로만 진행한다. 같은 node 안의 Pool 간 이동과
 그룹 간 수동 이동은 후속 기능이다.
 
@@ -188,8 +236,9 @@ Node는 sysfs와 device-mapper table에서 backing 구간을 확인한다. 같�
 변경하려면 신규 배치를 중단하고 Volume·Move·cleanup을 정상 종료한 뒤 Pool을 삭제한다.
 삭제 완료 후 backing을 변경하고 새 Pool로 등록한다.
 
-`CapacityIndependent=True`와 `status.capacityUnit`, generation과 fresh·complete inventory를
-함께 확인한다. 증거가 없거나 backing이 변경되면 Ready가 내려가고 신규 배치를 보류한다.
+신규 배치에는 `CapacityBackingVerified=True`, `CapacityIndependent=True`, `status.capacityUnit`,
+generation과 fresh·complete inventory를 함께 확인한다. `Ready=False/CapacityPeerUnproven`이어도
+자기 backing이 정상인 Pool의 기존 작업은 가능하다. 자기 backing 유실·변경은 해당 작업도 차단한다.
 최초 capacity identity는 status 갱신으로 교체하거나 지우지 않는다. `capacity.limit`는
 논리 예약 한도이며 hard quota가 아니다. 외부 사용량은 filesystem 여유에서 차감된다.
 측정 검증은 [StorageClass contract](../../docs/spec/storage-class.md#measurement-verification),
@@ -303,26 +352,71 @@ kubectl wait --for=delete shiftpvvolume/<volume-id> --timeout=10m
 
 ## Planned mobility
 
+The chart installs `<fullname>-placement`, a value-0, non-default PriorityClass
+with `preemptionPolicy: Never`. Preparation reservations use this class instead
+of the workload's priority, so they wait for free resources without preempting
+other Pods. Higher-priority workloads may therefore wait longer for preparation.
+Without Helm, provision the same class contract and pass its name using
+`--mobility-placement-priority-class` (default `shiftpv-placement`). Apply CRDs
+first, then upgrade the chart and controller together: older controller binaries
+do not accept this flag, so an old image override under the new chart is not a
+CRD-only upgrade.
+
 Settled terminal `ShiftPVMove` metadata is retained for seven days by default
 and then removed with a UID precondition. Configure whole-hour retention with
 `mobility.journalRetention`. This policy never deletes copy data and never
 removes unresolved, active, or finalizer-protected journals.
 
-Mobility admission을 사용할 workload namespace만 opt in한다.
+Mobility admission을 사용할 workload namespace는 PVC 생성 전에 opt in한다.
 
 ```bash
 kubectl label namespace my-workload shiftpv.io/admission=enabled
 ```
 
+### Existing PV topology
+
+Chart upgrade나 namespace opt-in은 기존 PV의 `spec.nodeAffinity`를 변경하지 않는다.
+생성 당시 mobility가 꺼져 있었거나 그룹에 node가 하나뿐이었다면 단일 node topology는 정상이다.
+
+```bash
+kubectl --context <context> get pv -o jsonpath='{range .items[?(@.spec.csi.driver=="csi.shiftpv.io")]}{.metadata.name}{"\t"}{.spec.claimRef.namespace}{"/"}{.spec.claimRef.name}{"\t"}{.spec.storageClassName}{"\t"}{.spec.nodeAffinity.required.nodeSelectorTerms}{"\n"}{end}'
+kubectl --context <context> get namespaces -l shiftpv.io/admission=enabled
+kubectl --context <context> get shiftpvpools -o yaml
+```
+
+보정 대상은 **생성 당시 mobility가 활성화되어 있었고, 그때 등록된 같은 그룹의 node가
+용량 한도 오류로 topology에서 빠졌다고 확인된 PV**다. 현재 namespace label이나 Pool 목록만으로
+과거 의도를 판정하지 않는다. StorageClass·사용자 affinity 제약과 현재 owner node를 보존한다.
+
+Kubernetes의 [MutablePVNodeAffinity](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#updates-to-node-affinity)
+기능이 활성화된 환경에서만 기존 PV topology를 수정할 수 있다. 보정 patch는 PV UID와
+resourceVersion을 `test`하는 JSON Patch로 만들고 `kubectl patch --dry-run=server`로 먼저 검증한다.
+허용된 node 범위만 복구하고 PVC/PV/volume handle identity가 유지됐는지 확인한다.
+`field is immutable`이면 보정을 중단하고, 필요 시 새 PVC로 데이터를 이전하는 절차를 별도로 수립한다.
+
+### Move preflight
+
+`mobility.operationTimeout`은 copy/promote Job별 제한 시간이며 기본값은 `5m`이다.
+대용량·저속 디스크는 예를 들어 `--set mobility.operationTimeout=30m`으로 늘린다.
+Pod 시작·재시도 시간도 포함하며 새 Job에만 적용한다. 진행 중인 Job의 기한은 유지된다.
+기존 values에 이 항목이 없어도 Controller의 기본값 `5m`을 사용한다.
+
 계획 이동 전 다음을 확인한다.
 
-- source와 destination node/Pool이 Ready이고 inventory가 fresh·complete다.
+- 두 node가 Ready이고 source의 자기 backing·inventory가 정상이며 destination은 신규 할당 가능하다.
 - workload selector, required affinity, taint/toleration이 destination을 허용한다.
 - PDB가 consumer 중단과 replacement scheduling을 허용한다.
 - Volume이 Ready이고 active Move나 deletionTimestamp가 없다.
 - source data backup 또는 workload 수준 복구 절차가 준비돼 있다.
 
-Source cordon 뒤 Controller가 cold move를 시작한다. 진행은 parent resource만으로 판정한다.
+Source cordon 뒤 Controller가 목적지 배치와 논리 용량을 먼저 예약한다. 예약을 받지 못한
+Volume의 원본 Pod는 계속 실행된다. `StartingDisruption`을 저장한 뒤 원본을 중단하고, 실제
+여유 공간을 확인해 복사 실행을 승인한다. 준비 예약은 디스크 quota가 아니므로 외부 writer의
+공간 사용까지 막지는 않는다.
+
+운영 순서는 **cordon → 이동·cleanup 완료와 destination Pod Ready 확인 → drain**이다.
+먼저 drain하면 source consumer가 사라져 자동 이동을 시작하지 못할 수 있다.
+진행은 parent resource로 판정한다.
 
 ```bash
 kubectl get shiftpvvolumes
@@ -333,6 +427,7 @@ kubectl get shiftpvpools -o yaml
 
 | 판정 | 의미 |
 |---|---|
+| `Preparing` / `Canceling` | 원본 권한 유지; 예약 준비 또는 디스크 승인 전 취소 정산 |
 | commit 전 대기/실패 | source owner와 data를 보존하고 resume 또는 abort |
 | owner CAS 확인 | commit 완료; destination만 authoritative |
 | destination 실제 publish 확인 | `publishedNodes`와 destination Pool inventory의 actual mount proof가 모두 맞으면 source cleanup을 시작할 수 있음 |
@@ -341,6 +436,10 @@ kubectl get shiftpvpools -o yaml
 
 Node outage 중에는 관련 journal/finalizer를 제거하지 않는다. Node가 같은 identity로 돌아오면 동일
 transaction을 재개한다. 영구 authoritative disk/node 손실은 제품 복구 범위 밖이다.
+
+새 `prepared-v1` Move의 실행 승인 뒤 `Blocked` 복구는 [복구 절차](../../docs/spec/volume-mobility.md#operator-procedure)를
+따른다. PV/PVC와 workload를 보존하고 실패 전제조건을 복구한 뒤 `spec.recovery=ResumeOwner`를
+요청한다. PVC 재생성은 UID를 바꾸므로 원래 binding의 복구가 되지 않는다.
 
 ## GC and review
 
@@ -375,11 +474,13 @@ metrics:
 ```
 
 기본 Alert는 metrics snapshot 실패·staleness, invalid Pool accounting, invalid/truncated inventory,
-cleanup `NeedsReview`, orphan/missing/unsafe copy observation, 그리고 회수 판단을 기다리는 `Released`
-PersistentVolume을 알린다. Dashboard는 이 신호와 Pool
+cleanup `NeedsReview`, orphan/missing/unsafe copy observation, 회수 판단을 기다리는 `Released` PV,
+active Move `Blocked`, Pool NotReady와 지속적인 CSI 서버 오류를 알린다. Dashboard는 이 신호와 Pool
 capacity, Volume/Move phase, mobility deferral, CSI 오류·latency를 함께 보여 준다. 복구/삭제 판단은
 반드시 CR journal과 현재 node evidence로 다시 확인한다.
 [Metrics contract](../../docs/spec/metrics.md)에 bounded-cardinality 규칙이 있다.
+
+Move·Pool·CSI 경보의 조건과 대응은 [Metrics runbooks](../../docs/spec/metrics.md#shiftpvmoveblocked)를 따른다.
 
 ## 알림 대응
 
@@ -390,8 +491,8 @@ authority가 아니며, ShiftPV는 이 신호만으로 data를 삭제하거나 f
 
 `severity`는 두 단계다. `ShiftPVObservationFailed`와 `ShiftPVObservationStale`은 controller나 node의
 관측 자체가 멈췄다는 뜻이므로 `critical`이다. 이때는 나머지 metric이 최신이 아니고, 다른 alert가
-조용하다는 사실도 근거가 되지 못한다. 나머지 다섯 alert는 관측이 살아 있는 상태에서 운영자 판단을
-요구하는 review/inventory/reclaim 신호이므로 `warning`이며, ShiftPV가 data를 보존한 채 멈춰 기다린다.
+조용하다는 사실도 근거가 되지 못한다. 나머지 alert는 용량·review·inventory·reclaim 상태에 대한
+운영자 확인을 요구하는 `warning`이다.
 
 ### ShiftPVObservationFailed
 
@@ -536,6 +637,34 @@ Pool 삭제는 신규 allocation과 destination selection을 먼저 막는다. F
 Node 또는 API가 unavailable이면 기다린다. Unknown orphan이 있으면 자동 삭제하지 않으므로 운영자가
 데이터와 identity를 해결하기 전까지 Pool 삭제도 완료되지 않는다.
 
+승인된 Pool의 mount가 유실되면 `IdentityReleased=False/PoolStorageRestorationRequired`로 기다린다.
+같은 경로에 빈 directory나 다른 디스크를 준비하는 것은 복구가 아니다. 원래 filesystem·mount·backing
+identity를 복원한 뒤, 삭제 요청 이후의 empty inventory와 controller 승인이 확인되면 등록 해제가 재개된다.
+`kubectl get shiftpvpool <name> -o yaml`에서 UID, 조건, inventory를 확인한다.
+원래 디스크를 복원할 수 없다면 데이터 부재를 추측해 finalizer나 `.shiftpv` marker를 제거하지 않는다.
+
+### Unavailable Pool registration retirement
+
+원래 디스크를 복원할 수 없고 논리 참조를 모두 정산했다면 등록을 중단할 수 있다.
+Controller·Node를 함께 갱신한 뒤 정확한 UID로 요청한다.
+
+```bash
+pool_name=bulk-node-a
+pool_uid=$(kubectl get shiftpvpool "${pool_name}" -o jsonpath='{.metadata.uid}')
+kubectl annotate shiftpvpool "${pool_name}" "shiftpv.io/retire-registration=${pool_uid}" --overwrite
+kubectl wait shiftpvpool/"${pool_name}" \
+  --for=jsonpath='{.metadata.annotations.shiftpv\.io/registration-retired}'="${pool_uid}" --timeout=180s
+```
+
+요청 즉시 신규 배치를 막는다. 현재 owner·초기 예약·PV·Move hold/cleanup·실행 중인 helper가 남거나
+조회가 실패하면 승인을 보류한다. 아직 Pool에 묶이지 않은 요청과 이동 후보 노드는 예약으로 세지 않는다.
+승인 뒤에는 정상 peer가 이 Pool의 가용성을 기다리지 않는다. 중단된 Pool은 용량을 배정하지 않으며
+`shiftpv_pool_registration_retired=1`로 구분한다. 요청 annotation을 지워도 승인된 중단은 유지된다.
+
+기존 Pool CR·최종 제거 보호·경로 예약·마커·데이터는 남는다. 중단은 물리적 빈 상태나 identity release를
+증명하지 않는다. 완전 삭제는 원래 저장소 복원 후 기존 삭제 절차를 따라야 하며, 남은 볼륨의 손실 복구를
+제공하지 않는다. `registration-retired`는 Controller 전용 승인 값이므로 직접 설정하지 않는다.
+
 ## Uninstall
 
 정상 uninstall은 먼저 provisioning을 quiesce하고 fresh inventory를 요청한 뒤 dependency를 검사한다.
@@ -548,9 +677,67 @@ Node 또는 API가 unavailable이면 기다린다. Unknown orphan이 있으면 �
 - stale, invalid, incomplete Pool observation
 - Kubernetes API read failure
 
+먼저 새 작업 유입을 멈추고 [읽기 전용 사전 검사](../../docs/development/versioning.md#전환-사전-검사)의
+`upgrade-check`로 미정산 작업을 확인한다. 이 검사의 SAFE는 uninstall 허가가 아니며, 기존 PVC/PV도
+모두 이관·정리해야 한다. 실제 제거 가능 여부는 아래 pre-delete guard가 검사한다.
+
 ```bash
 helm uninstall shiftpv --namespace shiftpv-system
 ```
+
+### 거부된 Helm uninstall 복구
+
+Dependency 때문에 guard가 실패하면 해당 uninstall attempt의 quiesce를 자동 취소한다. Helm release는
+`uninstalling`으로 남아 다음 upgrade가 `has no deployed releases`로 실패할 수 있다. 아래는 기본
+release·namespace 기준이며, 사용자 지정 이름은 실제 설치값으로 바꾼다.
+
+1. Guard 로그의 blocker와 취소 오류를 확인하고, permit ConfigMap이 `NotFound`인지 확인한다.
+   남아 있다면 `state`, `attempt`, `expiresAt`을 확인한다. 진행 중인 다른 제거 시도가 없는 상태에서
+   만료(발급 후 5분)를 기다린다. 조회 실패·취소 실패를 해제로 간주하거나 ConfigMap을 수동 삭제하지 않는다.
+
+   ```bash
+   kubectl -n shiftpv-system logs job/shiftpv-uninstall-guard
+   kubectl -n shiftpv-system get configmap shiftpv-uninstall-permit -o yaml
+   helm history shiftpv --namespace shiftpv-system
+   ```
+
+2. History에서 현재 설치와 같은 chart·이미지·Pool 선언을 가진 마지막 성공 revision을 고른다.
+   해당 revision의 values를 확인한 뒤 rollback한다. 저장소 프로토콜이 바뀌는 과거 버전은 선택하지 않는다.
+
+   ```bash
+   successful_revision='<확인한 revision>'
+   helm get values shiftpv --namespace shiftpv-system --revision "${successful_revision}" --all
+   helm rollback shiftpv "${successful_revision}" --namespace shiftpv-system --wait --timeout=5m
+   helm status shiftpv --namespace shiftpv-system
+   kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
+   kubectl -n shiftpv-system rollout status daemonset/shiftpv-node --timeout=5m
+   ```
+
+   Chart에는 rollback hook이 없다. Rollback은 release·리소스를 복원하고, quiesce 해제는 앞 단계의
+   취소·만료 후 Controller가 관측한다. 호환되는 성공 revision이 없으면 임의 downgrade로 복구하지 않는다.
+3. Release가 `deployed`이고 기존 workload가 Ready인지 확인한다. 기존 PVC의 실제 읽기·쓰기를 확인하고,
+   같은 StorageClass의 별도 시험 PVC와 consumer Pod로 신규 provisioning·읽기·쓰기를 검증한다.
+   기존 PVC I/O만으로는 신규 provisioning fence 해제를 확인할 수 없다. 시험 리소스를 정리한 뒤 작업 유입을 재개한다.
+
+### 중단된 Pool을 보존하는 uninstall
+
+영구 소실 Pool의 **등록 중단 승인을 받은 뒤** Driver만 제거하려면 정확한 Pool UID를 지정한다.
+다음 값을 기존 설치와 같은 chart·이미지 버전의 `helm upgrade`에 반영한 뒤 `helm uninstall`한다.
+`helm uninstall`은 values를 받지 않으므로 삭제 전에 release 값으로 저장해야 한다.
+
+```yaml
+lifecycle:
+  preserveRetiredPoolUIDs:
+    - <registration-retired 승인을 받은 Pool UID>
+```
+
+기본값은 `[]`다. Guard CLI는 반복 `--preserve-retired-pool=<UID>`를 받는다. 이름·교체 UID·미승인
+Pool은 거부하며, 전체 PVC/PV/Volume/Move/hold/cleanup 및 현재 helper Pod·nonterminal Job이 없어야 한다.
+조회 실패도 거부한다. 다른 정상 Pool에는 기존 fresh inventory 조건이 계속 적용된다.
+
+선택한 Pool CR·finalizer·경로 예약·마커·데이터는 그대로 남는다. Terminating CR도 완전 삭제하지 않는다.
+물리적 빈 상태를 증명한 것이 아니므로 CRD/finalizer를 지워서 정리하지 않는다. 재설치도 같은 기록을
+유지하며, 완전 삭제는 원본 저장소를 복원한 뒤 기존 Pool 삭제 절차로 진행한다.
 
 Emergency `--no-hooks`와 admission 제거는 보증을 우회한다. Metadata와 host data를 자동 정리하지 않으며,
 동일 installation identity와 Pool 선언을 복원하기 전에는 workload를 재개하지 않는다.

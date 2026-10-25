@@ -3,12 +3,14 @@
 package ownership
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -16,6 +18,64 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
+
+var temporaryMarkerName = regexp.MustCompile(`^pending-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// removeAbandonedPlacementMarkers runs only under identity.lock after checking
+// pool.json. All marker writers hold that lock through rename, so a generated
+// temporary that remains here cannot belong to an active writer. Its content
+// may be partial; it never grants authority and is not a placement receipt.
+func (s *Store) removeAbandonedPlacementMarkers(ctx context.Context) (result error) {
+	fd, err := unix.Openat(int(s.placements.Fd()), ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(fd), "shiftpv-placement-temporaries")
+	defer directory.Close()
+	changed := false
+	defer func() {
+		if changed {
+			result = errors.Join(result, s.placements.Sync())
+		}
+	}()
+	for {
+		names, readErr := directory.Readdirnames(128)
+		for _, name := range names {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !temporaryMarkerName.MatchString(name) {
+				continue
+			}
+			if err := s.removeAbandonedPlacementMarker(name); err != nil {
+				return err
+			}
+			changed = true
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+func (s *Store) removeAbandonedPlacementMarker(name string) error {
+	file, err := openMarker(s.placements, name, unix.O_RDONLY, 0)
+	if err != nil {
+		return errors.Join(ErrNeedsReview, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Mode() != 0600 || info.Size() > 8192 {
+		return ErrNeedsReview
+	}
+	return unix.Unlinkat(int(s.placements.Fd()), name, 0)
+}
 
 func (s *Store) ensureMarker(name string, value any) error {
 	return s.ensureMarkerAt(s.control, name, value)

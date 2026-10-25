@@ -2,13 +2,16 @@ package controller
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 
@@ -22,7 +25,7 @@ func TestMoveDiagnosticsTrackTransitionsWithoutPollingDrift(t *testing.T) {
 	second := first.Add(time.Minute)
 	now := first
 	recorder := record.NewFakeRecorder(10)
-	move := volumeapi.Move{Name: "move", UID: "uid", Status: volumeapi.MoveStatus{}}
+	move := preparedFixtureMove(volumeapi.Move{Name: "move", UID: "uid", Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}})
 	repo := &memoryRepository{moves: []volumeapi.Move{move}}
 	r := &Reconciler{Repository: repo, Now: func() time.Time { return now }, Recorder: recorder}
 
@@ -59,85 +62,207 @@ func TestMoveDiagnosticsTrackTransitionsWithoutPollingDrift(t *testing.T) {
 	}
 
 	previous = move.Status
-	move.Status.Phase = string(fsm.PhaseLocking)
+	move.Status.Phase = string(fsm.PhasePreparing)
 	move.Status.Reason = ""
-	move.Status.Message = mobilityMessage(fsm.PhaseLocking, "")
+	move.Status.Message = mobilityMessage(fsm.PhasePreparing, "")
 	if err := r.persistMoveStatus(ctx, &move, previous); err != nil {
 		t.Fatal(err)
 	}
 	if move.Status.LastTransitionTime != second.Format(time.RFC3339Nano) || move.Status.LastProgressTime != second.Format(time.RFC3339Nano) {
 		t.Fatalf("phase transition did not advance timestamps: %+v", move.Status)
 	}
-	assertEventContains(t, recorder, "Normal MobilityLocking automatic retry")
+	assertEventContains(t, recorder, "Normal MobilityPreparing automatic retry")
 }
 
 func TestMoveDiagnosticsRecordAndClearTransientObservationFailure(t *testing.T) {
-	ctx := context.Background()
-	move := volumeapi.Move{Name: "move", UID: "uid", Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}}
-	repo := &memoryRepository{
-		volumes: map[string]volumeapi.State{preflightVolume: {Phase: volumeapi.PhaseReady, OwnerNode: "source", PublishedNodes: []string{"source"}}},
-		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
-		moves:   []volumeapi.Move{move},
-	}
-	client := fake.NewSimpleClientset(mobilityObjects(preflightVolume)...)
-	client.PrependReactor("get", "replicasets", func(ktesting.Action) (bool, runtime.Object, error) {
-		return true, nil, fmt.Errorf("API timeout")
-	})
-	r := newTestReconciler(client, repo, func(r *Reconciler) {
-		r.Now = func() time.Time { return time.Date(2026, 9, 4, 2, 0, 0, 0, time.UTC) }
-	})
-	if err := r.ReconcileAll(ctx); err == nil {
-		t.Fatal("observation failure was hidden")
-	}
-	failed := repo.moves[0].Status
-	if failed.Phase != string(fsm.PhasePending) || failed.Reason != "ObservationFailed" || !strings.Contains(failed.Message, "API timeout") || failed.LastProgressTime == "" {
-		t.Fatalf("failure diagnostic=%+v", failed)
-	}
-
-	r.Client = fake.NewSimpleClientset(mobilityObjects(preflightVolume)...)
-	r.Now = func() time.Time { return time.Date(2026, 9, 4, 2, 1, 0, 0, time.UTC) }
-	if err := r.ReconcileAll(ctx); err != nil {
+	f, move := preparationAtCapacity(t)
+	next := move.Status
+	next.Phase = string(fsm.PhaseWaitingForUnpublish)
+	move, err := f.registry.CompareAndSetMoveStatus(f.ctx, move, next)
+	if err != nil {
 		t.Fatal(err)
 	}
-	recovered := repo.moves[0].Status
-	if recovered.Phase != string(fsm.PhaseLocking) || recovered.Reason != "" || strings.Contains(recovered.Message, "API timeout") {
+	source := f.state(t, 0)
+	temporary := errors.New("API timeout")
+	unavailable := true
+	f.client.PrependReactor("get", "nodes", func(ktesting.Action) (bool, runtime.Object, error) {
+		if unavailable {
+			return true, nil, temporary
+		}
+		return false, nil, nil
+	})
+	f.reconciler.Now = func() time.Time { return time.Date(2026, 9, 4, 2, 0, 0, 0, time.UTC) }
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); !errors.Is(err, temporary) {
+		t.Fatalf("observation failure cause was hidden: %v", err)
+	}
+	failed := f.move(t, 0).Status
+	if failed.Phase != string(fsm.PhaseWaitingForUnpublish) || failed.Reason != "ObservationFailed" || !strings.Contains(failed.Message, "API timeout") || failed.LastProgressTime == "" {
+		t.Fatalf("failure diagnostic=%+v", failed)
+	}
+	if !reflect.DeepEqual(source, f.state(t, 0)) || !reflect.DeepEqual(move.Status.Preparation, failed.Preparation) {
+		t.Fatal("observation error changed source authority or its hold")
+	}
+	unavailable = false
+	f.reconciler.Now = func() time.Time { return time.Date(2026, 9, 4, 2, 1, 0, 0, time.UTC) }
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	recovered := f.move(t, 0).Status
+	if recovered.Phase != string(fsm.PhaseWaitingForReplacement) || recovered.Reason != "" || strings.Contains(recovered.Message, "API timeout") {
 		t.Fatalf("stale transient diagnostic=%+v", recovered)
 	}
 }
 
 func TestMoveDiagnosticsRecordAndClearTransientActionFailure(t *testing.T) {
-	ctx := context.Background()
-	move := volumeapi.Move{Name: "move", UID: "uid", Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}, Status: volumeapi.MoveStatus{
-		Phase: string(fsm.PhaseEvicting), ConsumerName: "consumer", ConsumerUID: "consumer-uid",
-	}}
-	repo := &memoryRepository{
-		volumes: map[string]volumeapi.State{preflightVolume: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, PublishedNodes: []string{"source"}}},
-		pools:   []volumeapi.Pool{{Name: "source", NodeName: "source", MountPath: "/pool"}, {Name: "destination", NodeName: "destination", MountPath: "/pool"}},
-		moves:   []volumeapi.Move{move},
-	}
-	client := fake.NewSimpleClientset(mobilityObjects(preflightVolume)...)
-	client.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
-		if action.GetSubresource() != "eviction" {
-			return false, nil, nil
+	f, move := preparationAtCapacity(t)
+	singleLifecycleReplacement(t, f)
+	// Convert the existing logical hold and reobserve its approved plan before
+	// reaching the actual Copying effect; do not seed a partial legacy plan.
+	for range 2 {
+		if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+			t.Fatal(err)
 		}
-		return true, nil, fmt.Errorf("API timeout")
-	})
-	r := newTestReconciler(client, repo)
-	if err := r.ReconcileAll(ctx); err == nil {
-		t.Fatal("action failure was hidden")
 	}
-	failed := repo.moves[0].Status
-	if failed.Phase != string(fsm.PhaseEvicting) || failed.Reason != "ActionFailed" || !strings.Contains(failed.Message, "API timeout") || failed.EvictionRequested {
-		t.Fatalf("action failure diagnostic=%+v", failed)
+	move = f.move(t, 0)
+	if move.Status.Phase != string(fsm.PhaseCopying) || !move.Status.CapacityApproved {
+		t.Fatal("fixture did not reach approved Copying")
 	}
-
-	r.Client = fake.NewSimpleClientset(mobilityObjects(preflightVolume)...)
-	if err := r.ReconcileAll(ctx); err != nil {
+	server, err := f.client.CoreV1().Pods(f.reconciler.Namespace).Get(f.ctx, namesFor(move.Name).SourcePod, metav1.GetOptions{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	recovered := repo.moves[0].Status
-	if recovered.Phase != string(fsm.PhaseEvicting) || recovered.Reason != "" || !recovered.EvictionRequested || strings.Contains(recovered.Message, "API timeout") {
+	server.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	if _, err := f.client.CoreV1().Pods(server.Namespace).UpdateStatus(f.ctx, server, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	temporary := errors.New("API timeout")
+	unavailable := true
+	f.client.PrependReactor("create", "jobs", func(ktesting.Action) (bool, runtime.Object, error) {
+		if unavailable {
+			return true, nil, temporary
+		}
+		return false, nil, nil
+	})
+	source := f.state(t, 0)
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); !errors.Is(err, temporary) {
+		t.Fatalf("action failure cause was hidden: %v", err)
+	}
+	failed := f.move(t, 0).Status
+	if failed.Phase != string(fsm.PhaseCopying) || failed.Reason != "ActionFailed" || !strings.Contains(failed.Message, "API timeout") || failed.CopyJobName != namesFor(move.Name).CopyJob {
+		t.Fatalf("action failure diagnostic=%+v", failed)
+	}
+	if _, err := f.client.BatchV1().Jobs(f.reconciler.Namespace).Get(f.ctx, failed.CopyJobName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("failed Job acquisition produced an executor: %v", err)
+	}
+	if !reflect.DeepEqual(source, f.state(t, 0)) || !failed.CapacityApproved || !reflect.DeepEqual(move.Status.IncomingCopy, failed.IncomingCopy) || !reflect.DeepEqual(move.Status.DestinationCopy, failed.DestinationCopy) {
+		t.Fatal("failed executor acquisition changed approved authority")
+	}
+	unavailable = false
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	recovered := f.move(t, 0).Status
+	if recovered.Phase != string(fsm.PhaseCopying) || recovered.Reason != "" || recovered.CopyJobName != namesFor(move.Name).CopyJob || strings.Contains(recovered.Message, "API timeout") {
 		t.Fatalf("stale action diagnostic=%+v", recovered)
+	}
+	job, err := f.client.BatchV1().Jobs(f.reconciler.Namespace).Get(f.ctx, recovered.CopyJobName, metav1.GetOptions{})
+	if err != nil || (metav1.GetControllerOf(job) == nil || string(metav1.GetControllerOf(job).UID) != move.UID || metav1.GetControllerOf(job).Name != move.Name) {
+		t.Fatalf("retry did not acquire the exact copy Job: %v", err)
+	}
+}
+
+func TestPreparedPreflightAPIFailurePreservesAuthorityBeforeFreshRetry(t *testing.T) {
+	for _, phase := range []fsm.Phase{fsm.PhasePending, fsm.PhaseStartingDisruption} {
+		t.Run(string(phase), func(t *testing.T) {
+			f := newPreparationRegistryFixture(t, 1)
+			if phase == fsm.PhaseStartingDisruption {
+				move := f.untilPrepared(t, 0)
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
+					t.Fatal(err)
+				}
+			}
+			move, source := f.move(t, 0), f.state(t, 0)
+			if move.Status.Phase != string(phase) {
+				t.Fatal("fixture phase mismatch")
+			}
+			temporary := errors.New("preflight API timeout")
+			unavailable := true
+			f.client.PrependReactor("get", "replicasets", func(ktesting.Action) (bool, runtime.Object, error) {
+				if unavailable {
+					return true, nil, temporary
+				}
+				return false, nil, nil
+			})
+			f.client.ClearActions()
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, move); !errors.Is(err, temporary) {
+				t.Fatalf("original preflight cause was hidden: %v", err)
+			}
+			if !reflect.DeepEqual(move, f.move(t, 0)) || !reflect.DeepEqual(source, f.state(t, 0)) {
+				t.Fatal("preparation observation failure changed plan, hold, source, status or resourceVersion")
+			}
+			assertNoEviction(t, f.client)
+			unavailable = false
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+				t.Fatal(err)
+			}
+			resumed := f.move(t, 0)
+			wantPhase := string(fsm.PhasePreparing)
+			if phase == fsm.PhaseStartingDisruption {
+				wantPhase = string(fsm.PhaseWaitingForUnpublish)
+			}
+			if resumed.Status.Phase != wantPhase || resumed.Status.Reason != "" {
+				t.Fatalf("fresh retry did not resume: %+v", resumed.Status)
+			}
+			if phase == fsm.PhasePending {
+				assertNoEviction(t, f.client)
+			}
+			if phase == fsm.PhaseStartingDisruption && (!resumed.Status.EvictionRequested || !reflect.DeepEqual(move.Status.Preparation, resumed.Status.Preparation)) {
+				t.Fatal("fresh retry lost its exact prepared eviction authority")
+			}
+		})
+	}
+}
+
+// A failed eviction can follow the accepted Ready -> Moving fence. Preserve
+// the stored StartingDisruption intent and retry from fresh source evidence;
+// recording a diagnostic must not fabricate a phase transition after the error.
+func TestPreparedEvictionFailureKeepsDurableDisruptionIntentForRetry(t *testing.T) {
+	f := newPreparationRegistryFixture(t, 1)
+	move := f.untilPrepared(t, 0)
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
+		t.Fatal(err)
+	}
+	move, source := f.move(t, 0), f.state(t, 0)
+	temporary := errors.New("eviction API timeout")
+	unavailable := true
+	f.client.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		if unavailable && action.GetSubresource() == "eviction" {
+			return true, nil, temporary
+		}
+		return false, nil, nil
+	})
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); !errors.Is(err, temporary) {
+		t.Fatalf("eviction failure cause was hidden: %v", err)
+	}
+	if !reflect.DeepEqual(move, f.move(t, 0)) {
+		t.Fatal("failed eviction changed the durable intent, hold, status or resourceVersion")
+	}
+	fenced := f.state(t, 0)
+	if fenced.Phase != volumeapi.PhaseMoving {
+		t.Fatal("eviction did not preserve the accepted publication fence")
+	}
+	fenced.Phase = source.Phase
+	if !reflect.DeepEqual(source, fenced) {
+		t.Fatal("failed eviction changed source ownership, copy, claim or publication evidence")
+	}
+	singleLifecycleNoDiskWork(t, f)
+	unavailable = false
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+		t.Fatal(err)
+	}
+	resumed := f.move(t, 0)
+	if resumed.Status.Phase != string(fsm.PhaseWaitingForUnpublish) || !resumed.Status.EvictionRequested || !reflect.DeepEqual(move.Status.Preparation, resumed.Status.Preparation) || f.state(t, 0).Phase != volumeapi.PhaseMoving {
+		t.Fatalf("fresh retry did not resume the same fenced disruption: %+v", resumed.Status)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -21,6 +22,7 @@ func TestCleanupReadinessDoesNotRequirePlacementInventory(t *testing.T) {
 		change func(*unstructured.Unstructured)
 		want   error
 	}{
+		{name: "sibling scan pending", change: func(p *unstructured.Unstructured) { p.SetGeneration(2) }},
 		{name: "invalid inventory", change: func(p *unstructured.Unstructured) {
 			_ = unstructured.SetNestedField(p.Object, false, "status", "inventory", "valid")
 		}},
@@ -160,7 +162,7 @@ func TestDiscoveryRequiresExactDaemonSetAndCapability(t *testing.T) {
 		name   string
 		change func(*corev1.Pod)
 	}{
-		{"old node", func(p *corev1.Pod) { delete(p.Annotations, capabilityAnnotation) }},
+		{"old node", func(p *corev1.Pod) { delete(p.Annotations, volumeapi.NodeEffectsAnnotation) }},
 		{"owner", func(p *corev1.Pod) { p.OwnerReferences[0].UID = "other-ds" }},
 		{"namespace account", func(p *corev1.Pod) { p.Spec.ServiceAccountName = "other" }},
 		{"not ready", func(p *corev1.Pod) { p.Status.Conditions = nil }},
@@ -267,7 +269,7 @@ func TestCleanupRebindingCannotChangeBackendOrReceipt(t *testing.T) {
 	}
 }
 
-func TestLegacyAndUnsupportedNodeChooseHelperBeforeBinding(t *testing.T) {
+func TestCreationLegacyPodOrMissingCapabilityPreservesIntent(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprint(existing), func(t *testing.T) {
 			client, _, _, kube, state := fixture(t)
@@ -277,16 +279,23 @@ func TestLegacyAndUnsupportedNodeChooseHelperBeforeBinding(t *testing.T) {
 				_, _ = kube.CoreV1().Pods("shiftpv").Create(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("shiftpv-create-%x", sum[:16]), Namespace: "shiftpv", UID: "helper-uid"}}, metav1.CreateOptions{})
 			} else {
 				pod, _ := kube.CoreV1().Pods("shiftpv").Get(ctx, "node-a", metav1.GetOptions{})
-				delete(pod.Annotations, capabilityAnnotation)
+				delete(pod.Annotations, volumeapi.NodeEffectsAnnotation)
 				_, _ = kube.CoreV1().Pods("shiftpv").Update(ctx, pod, metav1.UpdateOptions{})
 			}
-			legacy, err := client.prepareCreation(ctx, state, *state.CurrentCopy)
-			if err != nil || !legacy {
-				t.Fatalf("helper routing=%v err=%v", legacy, err)
+			kube.ClearActions()
+			err := client.CreateCopy(ctx, *state.CurrentCopy)
+			var retryable interface{ Retryable() bool }
+			if err == nil || !errors.As(err, &retryable) || !retryable.Retryable() || existing && !errors.Is(err, ErrLegacyExecution) {
+				t.Fatalf("missing capability or legacy helper did not block safely: %v", err)
 			}
 			current, _ := client.Volumes.Get(ctx, testID)
-			if current.CreationExecutor != nil || current.Phase != volumeapi.PhasePending {
-				t.Fatal("helper path changed durable backend")
+			if !reflect.DeepEqual(current, state) {
+				t.Fatalf("blocked creation changed its durable intent: before=%+v after=%+v", state, current)
+			}
+			for _, action := range kube.Actions() {
+				if action.GetVerb() != "get" && action.GetVerb() != "list" {
+					t.Fatalf("blocked creation changed a helper: %#v", action)
+				}
 			}
 		})
 	}

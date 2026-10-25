@@ -12,11 +12,17 @@ k() {
 # reports, so a stage can only ever reach the two identities the preflight
 # approved.
 ssh_node() {
+	(exec_ssh_node "$@")
+}
+
+# Only background owners call this directly: exec makes their $! the actual
+# SSH process. Foreground callers use ssh_node so their script can continue.
+exec_ssh_node() {
 	local role=$1
 	shift
 	case "${role}" in
-	source) ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${SOURCE_SSH_TARGET}" "$@" ;;
-	destination) ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" "${DESTINATION_SSH_TARGET}" "$@" ;;
+	source) exec ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "${SOURCE_SSH_TARGET}" "$@" ;;
+	destination) exec ssh -o BatchMode=yes -o ConnectTimeout="${SSH_CONNECT_TIMEOUT}" -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "${DESTINATION_SSH_TARGET}" "$@" ;;
 	*)
 		echo "unknown ssh node role: ${role}" >&2
 		return 1
@@ -54,6 +60,8 @@ require_real_node_commands() {
 # because each stage names its own run directory.
 apply_real_node_defaults() {
 	SYSTEM_NAMESPACE=${SYSTEM_NAMESPACE:-shiftpv-system}
+	CONTROLLER_DEPLOYMENT=${CONTROLLER_DEPLOYMENT:-shiftpv-controller}
+	NODE_DAEMONSET=${NODE_DAEMONSET:-shiftpv-node}
 	STORAGE_CLASS=${STORAGE_CLASS:-shiftpv}
 	SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-5}
 	WORKLOAD_IMAGE=${WORKLOAD_IMAGE:-busybox:1.37@sha256:7a3ebe5bfd1a4a19797d20b0c0bb39d44393e9a03fd852c0865b0f540d868df0}
@@ -244,4 +252,92 @@ assert_no_unsettled_moves() {
 		echo "unsettled Move journals remain: ${unsettled}" >&2
 		return 1
 	fi
+}
+
+soak_result_marker() {
+	local iterations=$1 elapsed=$2 controller_every=$3 cleanup_every=$4 controller_count=$5 cleanup_count=$6
+	if ((iterations >= 100 && elapsed >= 43200 && controller_every == 10 && cleanup_every == 20 &&
+		controller_count == iterations / 10 && cleanup_count == iterations / 20)); then
+		printf 'REAL_NODE_SOAK_OK\n'
+	else
+		printf 'REAL_NODE_SOAK_SMOKE_OK\n'
+	fi
+}
+
+install_soak_traps() {
+	trap restore_soak_environment EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
+
+restore_soak_environment() {
+	local result_code=$? restore_failed=0
+	trap - ERR EXIT INT TERM
+	set +e
+	if ! release_cleanup_lock; then
+		restore_failed=1
+		echo 'cleanup lock did not release; inspect its bounded holder' >&2
+	fi
+	if ! release_soak_cleanup; then
+		restore_failed=1
+		echo 'cleanup admission policy did not release; inspect retained evidence' >&2
+	fi
+	if [[ ${SOAK_STARTED:-0} == 1 ]]; then
+		local node
+		for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
+			if ! k uncordon "${node}" >/dev/null 2>&1; then
+				restore_failed=1
+				warn_uncordon_needed "${node}" "uncordon failed for ${node}"
+			fi
+		done
+	fi
+	if ! capture_evidence final; then restore_failed=1; fi
+	if [[ ${SOAK_RESULT_READY:-0} == 1 ]]; then
+		# Logs are best effort, but final API evidence is required for success.
+		if ! k get shiftpvpools,shiftpvvolumes,shiftpvmoves -o json >"${ARTIFACT_DIR}/final-state.json"; then restore_failed=1; fi
+	fi
+	if ((result_code == 0 && restore_failed)); then result_code=1; fi
+	if ((result_code != 0)); then
+		echo "soak failed; remaining test resources and evidence were preserved in ${ARTIFACT_DIR}" >&2
+	elif [[ ${SOAK_RESULT_READY:-0} == 1 ]]; then
+		# shellcheck disable=SC2153,SC2154 # soak.sh sets these results before EXIT.
+		printf '%s context=%s iterations=%d elapsedSeconds=%d controllerFaults=%d cleanupFaults=%d artifacts=%s\n' \
+			"${result_marker}" "${KUBECTL_CONTEXT}" "${ITERATIONS}" "${elapsed_seconds}" "${controller_faults}" "${cleanup_faults}" "${ARTIFACT_DIR}"
+	fi
+	exit "${result_code}"
+}
+
+soak_controller_pod() {
+	local deployment_uid=$1 deployment pod rs_name rs
+	deployment=$(k -n "${SYSTEM_NAMESPACE}" get "deployment/${CONTROLLER_DEPLOYMENT}" -o json) || return
+	jq -e --arg uid "${deployment_uid}" --arg image "${EXPECTED_CONTROLLER_IMAGE}" '
+		.metadata.uid == $uid and .metadata.deletionTimestamp == null and .spec.replicas == 1 and
+		any(.spec.template.spec.containers[]?; .name == "shiftpv-controller" and .image == $image)' <<<"${deployment}" >/dev/null || return
+	pod=$(k -n "${SYSTEM_NAMESPACE}" get pod -l app.kubernetes.io/component=controller -o json | jq -ec --arg image "${EXPECTED_CONTROLLER_IMAGE}" '
+		[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running") |
+		 select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) |
+		 select(any(.spec.containers[]?; .name == "shiftpv-controller" and .image == $image))] |
+		 select(length == 1) | .[0]') || return
+	rs_name=$(jq -er '[.metadata.ownerReferences[]? | select(.controller == true)] |
+		select(length == 1 and .[0].apiVersion == "apps/v1" and .[0].kind == "ReplicaSet") | .[0].name' <<<"${pod}") || return
+	rs=$(k -n "${SYSTEM_NAMESPACE}" get "replicaset/${rs_name}" -o json) || return
+	jq -e --arg uid "${deployment_uid}" --arg name "${CONTROLLER_DEPLOYMENT}" --argjson pod "${pod}" '
+		.metadata.uid == ([$pod.metadata.ownerReferences[]? | select(.controller == true)][0].uid) and
+		any(.metadata.ownerReferences[]?; .controller == true and .apiVersion == "apps/v1" and
+		    .kind == "Deployment" and .name == $name and .uid == $uid)' <<<"${rs}" >/dev/null || return
+	printf '%s\n' "${pod}"
+}
+
+restart_soak_controller() {
+	local deployment_uid pod name uid replacement
+	deployment_uid=$(k -n "${SYSTEM_NAMESPACE}" get "deployment/${CONTROLLER_DEPLOYMENT}" -o jsonpath='{.metadata.uid}') || return
+	test -n "${deployment_uid}" || return 1
+	pod=$(soak_controller_pod "${deployment_uid}") || return
+	read -r name uid < <(jq -er '[.metadata.name,.metadata.uid] | @tsv' <<<"${pod}") || return
+	printf '%s\n' "${pod}" >"${ARTIFACT_DIR}/${uid}-controller-before.json"
+	delete_soak_pod "${SYSTEM_NAMESPACE}" "${name}" "${uid}" || return
+	k -n "${SYSTEM_NAMESPACE}" rollout status "deployment/${CONTROLLER_DEPLOYMENT}" --timeout=300s || return
+	replacement=$(soak_controller_pod "${deployment_uid}") || return
+	jq -e --arg uid "${uid}" '.metadata.uid != $uid' <<<"${replacement}" >/dev/null || return
+	printf '%s\n' "${replacement}" >"${ARTIFACT_DIR}/${uid}-controller-after.json"
 }

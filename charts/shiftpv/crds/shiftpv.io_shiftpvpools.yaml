@@ -34,6 +34,8 @@ spec:
           type: object
           required: [spec]
           x-kubernetes-validations:
+            - rule: '!has(oldSelf.status) || !has(oldSelf.status.registrationApproved) || !oldSelf.status.registrationApproved || (has(self.status) && has(self.status.registrationApproved) && self.status.registrationApproved)'
+              message: registration approval cannot be removed
             - rule: '!has(oldSelf.status) || !has(oldSelf.status.capacityUnit) || (has(self.status) && has(self.status.capacityUnit) && self.status.capacityUnit == oldSelf.status.capacityUnit)'
               message: recorded capacityUnit cannot be changed or removed
           properties:
@@ -90,6 +92,9 @@ spec:
                     limit:
                       type: string
                       minLength: 1
+                      x-kubernetes-validations:
+                        - rule: "isQuantity(self) && quantity(self).isInteger() && quantity(self).asInteger() > 0"
+                          message: capacity.limit must be an exact positive int64 byte count
                 scanEpoch:
                   description: Monotonic causal inventory request. Incrementing it advances metadata.generation and requires a new complete node observation.
                   type: integer
@@ -98,6 +103,9 @@ spec:
             status:
               type: object
               properties:
+                registrationApproved:
+                  description: Successful registration history; retained when later probes fail.
+                  type: boolean
                 observedGeneration:
                   type: integer
                   format: int64
@@ -105,6 +113,14 @@ spec:
                   type: string
                   format: date-time
                 filesystemTotalBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                filesystemAvailableBytes:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                filesystemAvailableInodes:
                   type: integer
                   format: int64
                   minimum: 0
@@ -185,6 +201,8 @@ spec:
                       type: boolean
                     truncated:
                       type: boolean
+                    reason:
+                      type: string
                     message:
                       type: string
                     copies:

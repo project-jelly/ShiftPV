@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,8 +20,69 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
+	"github.com/project-jelly/ShiftPV/src/node/publication"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
+
+func TestPublicationErrorPreservesConflictMeaning(t *testing.T) {
+	conflict := apierrors.NewConflict(schema.GroupResource{Resource: "shiftpvvolumes"}, "volume", errors.New("object has been modified"))
+	for name, test := range map[string]struct {
+		err  error
+		want codes.Code
+	}{
+		"API conflict":         {conflict, codes.Unavailable},
+		"wrapped API conflict": {fmt.Errorf("record publication: %w", conflict), codes.Unavailable},
+		"state conflict":       {volumeapi.ErrStateConflict, codes.FailedPrecondition},
+		"identity conflict":    {ownership.ErrIdentity, codes.FailedPrecondition},
+		"needs review":         {ownership.ErrNeedsReview, codes.FailedPrecondition},
+		"observation retry":    {publication.ErrObservationRetry, codes.Unavailable},
+		"storage busy":         {ownership.ErrBusy, codes.Unavailable},
+		"other":                {errors.New("mount failed"), codes.Internal},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := status.Code(publicationError("publish", test.err, true)); got != test.want {
+				t.Fatalf("code=%s want=%s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestNodePublicationRetriesAPIConflict(t *testing.T) {
+	for _, publish := range []bool{true, false} {
+		name := "unpublish"
+		if publish {
+			name = "publish"
+		}
+		t.Run(name, func(t *testing.T) {
+			binder := &fakeBinder{}
+			service := configuredService(t, binder)
+			registry := service.Volumes.(*fakeVolumeRegistry)
+			registry.setErr = apierrors.NewConflict(schema.GroupResource{Resource: "shiftpvvolumes"}, "volume", errors.New("object has been modified"))
+			call := func() error {
+				if publish {
+					_, err := service.NodePublishVolume(context.Background(), validPublishRequest())
+					return err
+				}
+				request := validPublishRequest()
+				_, err := service.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{VolumeId: request.VolumeId, TargetPath: request.TargetPath})
+				return err
+			}
+			if err := call(); status.Code(err) != codes.Unavailable {
+				t.Fatalf("API conflict code=%s error=%v", status.Code(err), err)
+			}
+			if publish && binder.publishedSource != "" {
+				t.Fatal("mounted before publication intent succeeded")
+			}
+			registry.setErr = nil
+			if err := call(); err != nil {
+				t.Fatal(err)
+			}
+			if registry.published != publish {
+				t.Fatalf("publication=%t want=%t", registry.published, publish)
+			}
+		})
+	}
+}
 
 type fakePoolRegistry struct {
 	pool volumeapi.Pool
@@ -50,8 +112,11 @@ type poolsByIdentity map[string]volumeapi.Pool
 
 func (p poolsByIdentity) PoolForIdentity(_ context.Context, name, uid, node string) (volumeapi.Pool, error) {
 	pool, found := p[name]
-	if !found || pool.UID != uid || pool.NodeName != node {
+	if !found {
 		return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
+	}
+	if pool.UID != uid || pool.NodeName != node {
+		return volumeapi.Pool{}, volumeapi.ErrPoolIdentityChanged
 	}
 	return pool, nil
 }

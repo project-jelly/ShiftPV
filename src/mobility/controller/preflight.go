@@ -55,7 +55,8 @@ func (r *Reconciler) preflight(ctx context.Context, observed *observation) (stri
 // ShiftPV cannot reproduce on a destination node, checking the live Pod before
 // the controller template.
 func unsupportedConsumerPlacement(pod, template corev1.PodSpec) string {
-	if len(pvcNames(pod)) != 1 {
+	// StatefulSets may generate their single PVC outside the raw Pod template.
+	if len(pvcNames(pod)) != 1 || len(pvcNames(template)) > 1 {
 		return "MultiplePVCsUnsupported"
 	}
 	if reason := unsupportedPlacement(pod); reason != "" {
@@ -248,11 +249,8 @@ func pvcNames(spec corev1.PodSpec) map[string]bool {
 	return names
 }
 
-// preEviction reports whether the Move has not yet disturbed the consumer, so a
-// diagnosis may still defer instead of blocking. fsm.Decide applies a related,
-// deliberately stricter window from its own Observation (no empty phase, and
-// EvictionRequested only matters in Evicting); do not unify them blindly.
+// preEviction limits deferral to preparation before consumer disruption.
 func preEviction(move volumeapi.Move) bool {
 	return !move.Status.EvictionRequested && (move.Status.Phase == "" || move.Status.Phase == string(fsm.PhasePending) ||
-		move.Status.Phase == string(fsm.PhaseLocking) || move.Status.Phase == string(fsm.PhaseEvicting))
+		move.Status.Phase == string(fsm.PhasePreparing))
 }

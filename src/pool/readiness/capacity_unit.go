@@ -1,6 +1,7 @@
 package readiness
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 	mountutils "k8s.io/mount-utils"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/project-jelly/ShiftPV/src/pool/capacityunit"
+	"github.com/project-jelly/ShiftPV/src/pool/registration"
 )
 
 type AllocationInspector interface {
@@ -88,14 +89,29 @@ func capacityFailure(reason string, err error) Check {
 
 // VerifyHostPool checks the mount and live backing with the node's host access.
 func VerifyHostPool(hostRoot string, pool volumeapi.Pool) error {
-	path, err := hostPath(hostRoot, pool.MountPath)
+	return NewProbe(hostRoot).VerifyPool(pool)
+}
+
+// VerifyPool requires current allocation approval as well as live backing.
+func (p *Probe) VerifyPool(pool volumeapi.Pool) error {
+	if err := verifyCapacityObservation(pool); err != nil {
+		return err
+	}
+	return p.VerifyBacking(pool)
+}
+
+// VerifyBacking checks the anchored filesystem and block allocation without
+// requiring a new admission observation after an unrelated scanEpoch change.
+// It does not authorize allocation or prove that a deleted copy is absent.
+func (p *Probe) VerifyBacking(pool volumeapi.Pool) error {
+	path, err := hostPath(p.HostRoot, pool.MountPath)
 	if err != nil {
 		return err
 	}
-	if err := VerifyMountedPath(path, pool); err != nil {
+	if err := p.verifyMountedPath(path, pool); err != nil {
 		return err
 	}
-	return NewProbe(hostRoot).VerifyCapacityUnit(pool)
+	return p.VerifyCapacityUnit(pool)
 }
 
 func (p *Probe) VerifyCapacityUnit(pool volumeapi.Pool) error {
@@ -112,70 +128,104 @@ func (p *Probe) VerifyCapacityUnit(pool volumeapi.Pool) error {
 	return nil
 }
 
-// capacityIsolation inspects all local backing allocations before any writable
-// probe or inventory scan. Unsupported peers never become additional capacity.
-func (r *Reconciler) capacityIsolation(pools []volumeapi.Pool) map[string]allocationObservation {
-	local := []volumeapi.Pool{}
-	for _, p := range pools {
-		if p.NodeName == r.NodeName {
-			local = append(local, p)
-		}
-	}
-	results := make(map[string]allocationObservation, len(local))
-	inspector, configured := r.Inspector.(AllocationInspector)
-	for _, p := range local {
-		if p.CapacityPolicy == "" && (len(local) == 1 || p.DeletionTimestamp != nil) {
+// capacityIsolation collects read-only evidence before any write or inventory.
+func (r *Reconciler) capacityIsolation(ctx context.Context, pools []volumeapi.Pool, heldUID string) map[string]allocationObservation {
+	results := make(map[string]allocationObservation)
+	allocations := []registration.Allocation{}
+	var peers []volumeapi.Pool
+	for _, pool := range pools {
+		if pool.NodeName != r.NodeName {
 			continue
 		}
-		if p.CapacityPolicy != volumeapi.PoolCapacityPolicyFixedBlock {
-			results[p.UID] = allocationObservation{check: capacityFailure("CapacityIsolationRequired", fmt.Errorf("multiple Pools on one node require capacityPolicy FixedBlock"))}
-		} else if !configured {
-			results[p.UID] = allocationObservation{check: capacityFailure("CapacityInspectorUnavailable", fmt.Errorf("block allocation inspector is unavailable"))}
+		if heldUID != "" && pool.UID == heldUID {
+			// Keep this call inside its current worker until the host really
+			// returns. A nested goroutine must not outlive the UID execution gate.
+			results[pool.UID] = r.capacityObservation(ctx, pool, heldUID)
 		} else {
-			unit, check := inspector.InspectCapacityUnit(p)
-			results[p.UID] = allocationObservation{unit: unit, check: check}
+			peers = append(peers, pool)
 		}
 	}
-	for i, p := range local {
-		for _, peer := range local[i+1:] {
-			if p.DeletionTimestamp == nil && peer.DeletionTimestamp == nil {
-				compareAllocations(p, peer, results)
-			}
+	work := parallelPoolWork(ctx, peers, func(ctx context.Context, pool volumeapi.Pool) poolWorkResult {
+		return poolWorkResult{allocation: r.capacityObservation(ctx, pool, "")}
+	})
+	for uid, result := range work {
+		results[uid] = result.allocation
+	}
+	for _, pool := range pools {
+		if pool.NodeName != r.NodeName {
+			continue
 		}
+		observed := results[pool.UID]
+		observed.independent = observed.backing
+		results[pool.UID] = observed
+		allocations = append(allocations, registration.Allocation{
+			UID: pool.UID, NodeName: pool.NodeName, MountPath: pool.MountPath,
+			Policy: pool.CapacityPolicy, Approved: pool.RegistrationApproved(), Deleting: pool.DeletionTimestamp != nil,
+			Retired: pool.RegistrationRetired(),
+			Unit:    observed.unit, Evidence: observed.backing,
+		})
+	}
+	for _, target := range allocations {
+		observed := results[target.UID]
+		if observed.independent.Reason != "" && !observed.independent.OK {
+			continue
+		}
+		check := registration.Independent(target, allocations)
+		if target.Policy != "" || !check.OK {
+			observed.independent = check
+		}
+		results[target.UID] = observed
 	}
 	return results
 }
 
+func (r *Reconciler) capacityObservation(ctx context.Context, pool volumeapi.Pool, heldUID string) allocationObservation {
+	if pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
+		return allocationObservation{backing: Check{Known: true, Reason: "PoolRegistrationRetired", Message: "registration is retired; storage and identity remain preserved"}}
+	}
+	if check := pool.BackingConfigurationCheck(); !check.OK {
+		return allocationObservation{backing: check}
+	}
+	if pool.CapacityPolicy != volumeapi.PoolCapacityPolicyFixedBlock {
+		return allocationObservation{}
+	}
+	if err := ctx.Err(); err != nil {
+		return allocationObservation{backing: Check{Reason: "CapacityObservationUnavailable", Message: err.Error()}}
+	}
+	run := func(context.Context) poolWorkResult {
+		unit, check := r.Inspector.InspectCapacityUnit(pool)
+		return poolWorkResult{allocation: allocationObservation{unit: unit, backing: check}}
+	}
+	// Approval rechecks run inside this Pool's existing worker. Inspect its own
+	// backing inline; peers still use their bounded independent workers.
+	if heldUID != "" && heldUID == pool.UID {
+		return run(ctx).allocation
+	}
+	work := r.poolWork(ctx, pool, run)
+	if work.err != nil {
+		return allocationObservation{backing: Check{Reason: "CapacityObservationUnavailable", Message: work.err.Error()}}
+	}
+	return work.allocation
+}
+
 type allocationObservation struct {
-	unit  *volumeapi.PoolCapacityUnit
-	check Check
+	unit        *volumeapi.PoolCapacityUnit
+	backing     Check
+	independent Check
 }
 
-func compareAllocations(left, right volumeapi.Pool, results map[string]allocationObservation) {
-	a, b := results[left.UID], results[right.UID]
-	leftUnit, rightUnit := a.unit, b.unit
-	reason, message := "", ""
-	if volumeapi.PoolPathsOverlap(left.MountPath, right.MountPath) {
-		reason, message = "CapacityPathsOverlap", "Pool paths overlap or are nested"
-	} else if leftUnit == nil || rightUnit == nil {
-		reason, message = "CapacityPeerUnproven", "a registered peer has no fixed capacity evidence"
-	} else if overlap, err := capacityunit.Overlap(leftUnit.Extents, rightUnit.Extents); err != nil || overlap {
-		reason, message = "CapacityBackingOverlap", "registered Pools have overlapping or unproven backing allocations"
+func verifyCapacityObservation(pool volumeapi.Pool) error {
+	if pool.CapacityPolicy != volumeapi.PoolCapacityPolicyFixedBlock {
+		return nil
 	}
-	if reason == "" {
-		return
+	condition := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionCapacityIndependent)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != pool.Generation {
+		return fmt.Errorf("Pool capacity allocation lacks a current successful observation")
 	}
-	for _, p := range []volumeapi.Pool{left, right} {
-		observed := results[p.UID]
-		if !observed.check.OK && observed.check.Reason != "" && reason == "CapacityPeerUnproven" {
-			continue
-		}
-		observed.check = Check{Known: true, Reason: reason, Message: message}
-		results[p.UID] = observed
-	}
+	return nil
 }
 
-func verifyCapacityMountedPath(path string, pool volumeapi.Pool) error {
+func (p *Probe) verifyCapacityMountedPath(path string, pool volumeapi.Pool) error {
 	if pool.CapacityPolicy == "" {
 		return nil
 	}
@@ -185,21 +235,17 @@ func verifyCapacityMountedPath(path string, pool volumeapi.Pool) error {
 	if err := pool.Status.CapacityUnit.Validate(); err != nil {
 		return err
 	}
-	condition := meta.FindStatusCondition(pool.Status.Conditions, volumeapi.PoolConditionCapacityIndependent)
-	if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != pool.Generation {
-		return fmt.Errorf("Pool capacity allocation lacks a current successful observation")
-	}
 	if !filepath.IsAbs(path) || filepath.Clean(path) == "/" {
 		return fmt.Errorf("Pool root must be an absolute non-root path")
 	}
-	if err := inspectDirectory(path); err != nil {
+	if err := p.inspect(path); err != nil {
 		return err
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil || resolved != filepath.Clean(path) {
 		return fmt.Errorf("fixed capacity Pool path must have no symlink components")
 	}
-	entry, err := NewProbe("/").capacityMount(filepath.Clean(path))
+	entry, err := p.capacityMount(filepath.Clean(path))
 	if err != nil {
 		return err
 	}

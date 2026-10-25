@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -13,57 +12,78 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
-	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 const (
-	admissionNamespaceLabel     = admission.MobilityNamespaceLabel
-	placementHoldName           = admission.PlacementHold
-	placementAnnotationKey      = admission.PlacementKey
-	DefaultMoveJournalRetention = 7 * 24 * time.Hour
+	admissionNamespaceLabel           = admission.MobilityNamespaceLabel
+	placementHoldName                 = admission.PlacementHold
+	placementAnnotationKey            = admission.PlacementKey
+	DefaultMoveJournalRetention       = 7 * 24 * time.Hour
+	DefaultPlacementPriorityClassName = "shiftpv-placement"
+	DefaultReconcileTimeout           = 30 * time.Second
+	DefaultOperationTimeout           = 5 * time.Minute
 )
 
 type Repository interface {
 	ListVolumes(context.Context) (map[string]volumeapi.State, error)
 	Get(context.Context, string) (volumeapi.State, error)
 	CompareAndSetState(context.Context, string, string, string, string, volumeapi.State) error
+	CompareAndSetSourceState(context.Context, string, volumeapi.State, volumeapi.State) error
 	RequestPoolScan(context.Context, volume.CopyIdentity) (int64, error)
 	Pools(context.Context) ([]volumeapi.Pool, error)
 	ObservePools(context.Context) (volumeapi.PoolSnapshot, error)
 	ReadyPools(context.Context) ([]volumeapi.Pool, error)
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	ReadyPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
+	InventoryPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	CreateMove(context.Context, string, volumeapi.MoveSpec) (volumeapi.Move, error)
 	AddMoveFinalizer(context.Context, string, string) error
 	RemoveMoveFinalizer(context.Context, string, string) error
 	DeleteMove(context.Context, string, string) error
 	ListMoves(context.Context) ([]volumeapi.Move, error)
-	SetMoveStatus(context.Context, string, string, volumeapi.MoveStatus) error
+	GetMove(context.Context, string) (volumeapi.Move, error)
+	CompareAndSetMoveStatus(context.Context, volumeapi.Move, volumeapi.MoveStatus) (volumeapi.Move, error)
+	RecordSourceUsage(context.Context, volumeapi.Move, volume.CopyIdentity, int64) (volumeapi.Move, error)
 }
 
 type CapacityProbe interface {
 	StatFSForPool(context.Context, volumeapi.Pool) (poolcapacity.Filesystem, error)
-	VolumeUsageForCopy(context.Context, volume.CopyIdentity) (int64, error)
+}
+
+type SourceUsage interface {
+	AdvanceSourceUsage(context.Context, volumeapi.Move, volume.CopyIdentity) (int64, bool, error)
+	FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error)
+}
+
+type HistoryInspector interface {
+	MovesSettled(context.Context, []volumeapi.Move, map[string]cleanupapi.Cleanup) error
 }
 
 type Reconciler struct {
-	Client             kubernetes.Interface
-	Repository         Repository
-	CapacityProbe      CapacityProbe
-	PoolLocks          *poolcapacity.Locker
-	Namespace          string
-	HelperImage        string
-	ServiceAccountName string
-	Cleanups           *cleanupapi.Store
-	CleanupOperator    interface {
-		Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error)
+	HistoryInspector           HistoryInspector
+	Client                     kubernetes.Interface
+	Repository                 Repository
+	CapacityProbe              CapacityProbe
+	SourceUsage                SourceUsage
+	PoolLocks                  *poolcapacity.Locker
+	Namespace                  string
+	HelperImage                string
+	PlacementPriorityClassName string
+	ServiceAccountName         string
+	Cleanups                   *cleanupapi.Store
+	CleanupOperator            interface {
+		AdvanceReclaim(context.Context, cleanupapi.Cleanup, cleanupapi.Journal) (cleanupapi.Cleanup, bool, error)
+		ObserveCompletedCleanup(context.Context, cleanupapi.Cleanup) (bool, error)
 	}
-	Interval                time.Duration
+	Interval time.Duration
+	// ReconcileTimeout bounds one Volume pass; non-positive values use DefaultReconcileTimeout.
+	ReconcileTimeout time.Duration
+	// OperationTimeout bounds newly created copy/promote Jobs; zero uses the default.
+	OperationTimeout        time.Duration
 	MoveJournalRetention    time.Duration
 	PoolReadinessStaleAfter time.Duration
 	Now                     func() time.Time
@@ -76,76 +96,48 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	interval := r.Interval
-	if interval <= 0 {
-		interval = 2 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		if err := r.ReconcileAll(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			klog.Errorf("reconcile ShiftPV mobility: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-r.Wake:
-		case <-ticker.C:
-		}
-	}
+	return r.runVolumes(ctx)
 }
 
 func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	if err := r.validate(); err != nil {
 		return err
 	}
-	if err := r.discoverMoves(ctx); err != nil {
-		return err
+	return r.reconcileVolumePass(ctx)
+}
+
+func (r *Reconciler) reconcilePersistedMove(ctx context.Context, move volumeapi.Move) error {
+	if legacyMoveProtocol(move) {
+		if err := r.validateSettledMoves(ctx, []volumeapi.Move{move}); err != nil {
+			return fmt.Errorf("retain legacy Move without execution: %w", err)
+		}
+		return r.retireMoveHistory(ctx, move)
 	}
-	moves, err := r.Repository.ListMoves(ctx)
-	if err != nil {
-		return err
+	if !supportedMoveProtocol(move) {
+		return fmt.Errorf("retain unsupported protocol %q", move.Spec.ProtocolVersion)
 	}
-	var reconcileErrors []error
-	for _, move := range moves {
-		phase := fsm.Phase(move.Status.Phase)
-		if phase == fsm.PhaseBlocked && move.Spec.Recovery == "ResumeOwner" && move.Status.RecoveryPhase != recoveryRecovered {
-			if err := r.reconcileRecovery(ctx, move); err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("recover move %s: %w", move.Name, err))
-			}
-			continue
-		}
-		if phase == fsm.PhaseSucceeded || (phase == fsm.PhaseBlocked && move.Status.RecoveryPhase == recoveryRecovered) {
-			// A terminal Move whose embedded journal is still working owns an
-			// unfinished destructive operation. Finish it here instead of
-			// parking it for journal GC, then re-observe before the terminal
-			// path releases the finalizer this journal still depends on.
-			if moveCleanupPending(move) {
-				if err := r.settleTerminalCleanup(ctx, move); err != nil {
-					reconcileErrors = append(reconcileErrors, fmt.Errorf("settle cleanup for terminal move %s: %w", move.Name, err))
-				}
-				continue
-			}
-			if !volumeapi.MoveCleanupSettled(move) {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("retain terminal move %s: cleanup and capacity are not settled", move.Name))
-				continue
-			}
-			if err := r.reconcileTerminalMove(ctx, move); err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("reconcile terminal move %s: %w", move.Name, err))
-			}
-			continue
-		}
-		if phase == fsm.PhaseBlocked {
-			continue
-		}
-		if err := r.reconcileMove(ctx, move); err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("move %s: %w", move.Name, err))
-		}
-	}
-	return errors.Join(reconcileErrors...)
+	return r.reconcileMove(ctx, move)
+}
+
+func legacyMoveProtocol(move volumeapi.Move) bool {
+	return move.Spec.ProtocolVersion == "" && move.Status.Preparation == nil
+}
+
+func supportedMoveProtocol(move volumeapi.Move) bool {
+	return move.Spec.ProtocolVersion == volumeapi.MoveProtocolPreparedV1
 }
 
 func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.Move) error {
+	if err := r.observeTerminalCleanupHistory(ctx, move); err != nil {
+		return err
+	}
+	if done, err := r.finalizeSourceUsage(ctx, move); err != nil || !done {
+		return err
+	}
+	return r.retireMoveHistory(ctx, move)
+}
+
+func (r *Reconciler) retireMoveHistory(ctx context.Context, move volumeapi.Move) error {
 	if slices.Contains(move.Finalizers, volumeapi.MoveProtectionFinalizer) {
 		return r.Repository.RemoveMoveFinalizer(ctx, move.Name, move.UID)
 	}
@@ -181,7 +173,7 @@ func (r *Reconciler) reconcileTerminalMove(ctx context.Context, move volumeapi.M
 }
 
 func (r *Reconciler) validate() error {
-	if r == nil || r.Client == nil || r.Repository == nil || r.Namespace == "" || r.HelperImage == "" {
+	if r == nil || r.Client == nil || r.Repository == nil || r.SourceUsage == nil || r.Namespace == "" || r.HelperImage == "" {
 		return fmt.Errorf("mobility reconciler is not configured")
 	}
 	return nil

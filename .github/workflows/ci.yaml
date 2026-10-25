@@ -114,6 +114,13 @@ jobs:
       - name: Verify entrypoint
         run: docker run --rm "shiftpv-${{ matrix.component }}:ci" --help
 
+      - name: Qualify rsync filesystem primitives
+        if: matrix.component == 'controller'
+        timeout-minutes: 6
+        run: |
+          image_id=$(docker image inspect --format '{{.Id}}' shiftpv-controller:ci)
+          ./test/model/filesystem-primitives.sh "${image_id}"
+
       - name: Verify image boundary
         env:
           COMPONENT: ${{ matrix.component }}
@@ -125,6 +132,16 @@ jobs:
             docker run --rm --entrypoint /bin/sh "shiftpv-node:ci" \
               -ec "test -x /shiftpv-node && test ! -e /shiftpv-controller && test ! -e /shiftpv-uninstall-guard && test ! -e /shiftpv-volume-helper"
           fi
+
+      - name: Upload rsync qualification evidence
+        if: always() && matrix.component == 'controller'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rsync-qualification
+          path: .tmp/rsync-qualification/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
 
   candidate-image:
     name: candidate-${{ matrix.component }}
@@ -201,6 +218,46 @@ jobs:
           fi
           echo "candidate=${IMAGE}:${{ steps.candidate.outputs.tag }}@${DIGEST}" >>"${GITHUB_STEP_SUMMARY}"
 
+  kubernetes-primitives:
+    name: kubernetes-primitives
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CLUSTER_NAME: shiftpv-primitives-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pinned Kubernetes tools
+        uses: ./.github/actions/install-k8s-tools
+        with:
+          helm: "false"
+
+      - name: Verify CRD upgrades and Kubernetes API contracts
+        run: make v04-kubernetes-primitives
+
+      - name: Verify stale cancellation and non-preempting recreation
+        run: bash test/regression/run-native.sh
+
+      - name: Upload native boundary regression evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: boundary-regressions
+          path: .tmp/boundary-regressions/native
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Delete isolated kind cluster
+        if: always()
+        run: kind delete cluster --name "${CLUSTER_NAME}"
+
   linux-mount:
     name: linux-mount
     runs-on: ubuntu-24.04
@@ -251,6 +308,32 @@ jobs:
           NODE_EFFECTS_ONLY: ${{ matrix.group == 'node-rpc' && '1' || '0' }}
         run: ./test/e2e/kind/run.sh
 
+      - name: Upload delayed PV handoff evidence
+        if: always() && matrix.group == 'node-rpc'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: delayed-pv-handoff
+          path: .tmp/delayed-pv-handoff
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload preserved retirement evidence
+        if: always() && matrix.group == 'g2'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preserved-retirement
+          path: .tmp/preserved-uninstall
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload read-only Unpublish evidence
+        if: always() && matrix.group == 'g2'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: readonly-unpublish
+          path: .tmp/readonly-unpublish
+          retention-days: 14
+
       - name: Export failure diagnostics
         if: failure() || cancelled()
         uses: ./.github/actions/kind-teardown
@@ -269,7 +352,7 @@ jobs:
   kind-e2e:
     name: kind-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: kind-e2e-group
     if: always()
     steps:
@@ -292,7 +375,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [g1, g2, g3]
+        group: [g1, g2, g3, preparation, node-cleanup, retirement]
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
       KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.group }}-kubeconfig
@@ -312,6 +395,14 @@ jobs:
           KIND_MOBILITY_GROUP: ${{ matrix.group }}
         run: ./test/e2e/kind/mobility/run.sh
 
+      - name: Upload workload retirement evidence
+        if: always() && matrix.group == 'retirement'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: workload-retirement
+          path: .tmp/workload-retirement
+          retention-days: 14
+
       - name: Export failure diagnostics
         if: failure()
         uses: ./.github/actions/kind-teardown
@@ -329,7 +420,7 @@ jobs:
   kind-mobility-e2e:
     name: kind-mobility-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: kind-mobility-e2e-group
     if: always()
     steps:
@@ -340,8 +431,8 @@ jobs:
           echo "kind-mobility-e2e groups: ${RESULT}"
           test "${RESULT}" = success
 
-  # The eight restart cases and the cleanup-Job retry tail are independent, so
-  # they run as one shard per job instead of one ~36 minute serialized sweep.
+  # Restart, destination-taint and cleanup retry cases run in independent
+  # shards instead of one serialized sweep.
   # Matrix jobs cannot carry the branch-ruleset check name, which is why the
   # `kind-mobility-node-restart-e2e` aggregator below reports their result.
   kind-mobility-node-restart-shard:
@@ -354,13 +445,15 @@ jobs:
         include:
           - shard: cases-1-2
             cases: source,destination
+          - shard: destination-taint
+            cases: destination-taint
           - shard: cases-3-4
             cases: copying-source,copying-destination
           - shard: cases-5-6
             cases: promoting-destination,committed-destination
           - shard: cases-7-8
             cases: cleaning-source,cleaning-destination
-          - shard: cleanup-job-retry
+          - shard: cleanup-executor-retry
             cases: ""
     env:
       E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.shard }}-kubeconfig
@@ -380,7 +473,7 @@ jobs:
           KEEP_CLUSTER: "1"
           MOBILITY_NODE_RESTARTS_ONLY: ${{ matrix.cases != '' && '1' || '0' }}
           MOBILITY_NODE_RESTART_CASE: ${{ matrix.cases }}
-          CLEANUP_JOB_RETRY_ONLY: ${{ matrix.cases == '' && '1' || '0' }}
+          CLEANUP_EXECUTOR_RETRY_ONLY: ${{ matrix.cases == '' && '1' || '0' }}
         run: ./test/e2e/kind/run.sh
 
       - name: Export failure diagnostics
@@ -400,7 +493,7 @@ jobs:
   kind-mobility-node-restart-e2e:
     name: kind-mobility-node-restart-e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     needs: kind-mobility-node-restart-shard
     if: always()
     steps:
@@ -411,14 +504,19 @@ jobs:
           echo "node-restart shards: ${SHARD_RESULT}"
           test "${SHARD_RESULT}" = success
 
-  kind-upgrade-e2e:
-    name: kind-upgrade-e2e
+  kind-upgrade-scenario:
+    name: kind-upgrade-e2e (${{ matrix.scenario }})
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [ready, creation-recovery, move-recovery]
     env:
-      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
-      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-kubeconfig
-      CLUSTER_NAME: shiftpv-upgrade-e2e
+      E2E_KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.scenario }}-kubeconfig
+      KUBECONFIG: /tmp/shiftpv-${{ github.run_id }}-${{ github.job }}-${{ matrix.scenario }}-kubeconfig
+      CLUSTER_NAME: shiftpv-upgrade-e2e-${{ matrix.scenario }}
+      UPGRADE_SCENARIO: ${{ matrix.scenario }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -433,18 +531,48 @@ jobs:
           KEEP_CLUSTER: "1"
         run: ./test/e2e/kind/upgrade/run.sh
 
+      - name: Upload native creation recovery evidence
+        if: always() && matrix.scenario == 'creation-recovery'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-creation-recovery
+          path: .tmp/creation-recovery
+          retention-days: 14
+
+      - name: Upload native Move recovery evidence
+        if: always() && matrix.scenario == 'move-recovery'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-move-recovery
+          path: .tmp/move-recovery
+          retention-days: 14
+
       - name: Export failure diagnostics
         if: failure() || cancelled()
         uses: ./.github/actions/kind-teardown
         with:
           cluster-name: ${{ env.CLUSTER_NAME }}
           diagnostics-dir: .tmp/ci-upgrade-diagnostics
-          artifact-name: kind-upgrade-e2e-diagnostics
+          artifact-name: kind-upgrade-e2e-${{ matrix.scenario }}-diagnostics
           resource-kinds: nodes,pods,pvc,pv,storageclass,csinode
 
       - name: Delete kind cluster
         if: always()
         run: kind delete cluster --name "${CLUSTER_NAME}" || true
+
+  kind-upgrade-e2e:
+    name: kind-upgrade-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: kind-upgrade-scenario
+    if: always()
+    steps:
+      - name: Report upgrade scenario result
+        env:
+          RESULT: ${{ needs.kind-upgrade-scenario.result }}
+        run: |
+          echo "upgrade scenarios: ${RESULT}"
+          test "${RESULT}" = success
 
   kind-argocd-e2e:
     name: kind-argocd-e2e

@@ -74,3 +74,24 @@ func TestReservedBytesForPoolRejectsUnidentifiedHold(t *testing.T) {
 		t.Fatalf("unidentified Move hold was accepted: %v", err)
 	}
 }
+
+func TestInitialReservationTransfersToCurrentOwner(t *testing.T) {
+	state := volumeapi.State{
+		UID: "volume-uid", RequestName: "pvc", InitialNode: "node-a", CapacityBytes: 64,
+		Finalizers:  []string{volumeapi.VolumeProtectionFinalizer},
+		InitialPool: &volumeapi.PoolReference{Name: "pool-a", UID: "pool-a-uid"},
+	}
+	assert := func(a, b int64) {
+		t.Helper()
+		for pool, want := range map[string]int64{"pool-a-uid": a, "pool-b-uid": b} {
+			got, err := ReservedBytesForPool(map[string]volumeapi.State{"volume": state}, nil, pool)
+			if err != nil || got != want {
+				t.Fatalf("pool=%s reserved=%d want=%d err=%v", pool, got, want, err)
+			}
+		}
+	}
+	assert(64, 0)
+	state.Phase, state.OwnerNode = volumeapi.PhaseReady, "node-b"
+	state.CurrentCopy = &volume.CopyIdentity{PoolUID: "pool-b-uid", NodeName: "node-b"}
+	assert(0, 64) // Historical InitialPool must not retain a second owner hold.
+}

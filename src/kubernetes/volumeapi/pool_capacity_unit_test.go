@@ -144,3 +144,61 @@ func TestPeerCapacityProbeMustBeCurrentForPlacement(t *testing.T) {
 		t.Fatalf("stale peer anchor accepted: %v %s", ready, reason)
 	}
 }
+
+func TestCandidateDoesNotBlockPlacementOrExactIdentity(t *testing.T) {
+	for _, scenario := range []string{"legacy", "fixed unproven", "invalid limit", "invalid group"} {
+		t.Run(scenario, func(t *testing.T) {
+			a, b := pool("a", "node"), pool("b", "node")
+			a.SetUID("a-uid")
+			b.SetUID("b-uid")
+			enableFixedCapacity(t, a, "8:1", 0)
+			b.Object["status"] = map[string]any{}
+			_ = unstructured.SetNestedField(b.Object, "/mnt/b", "spec", "mountPath")
+			switch scenario {
+			case "fixed unproven":
+				_ = unstructured.SetNestedField(b.Object, PoolCapacityPolicyFixedBlock, "spec", "capacityPolicy")
+			case "invalid limit":
+				_ = unstructured.SetNestedField(b.Object, "-1Gi", "spec", "capacity", "limit")
+			case "invalid group":
+				_ = unstructured.SetNestedField(b.Object, "Invalid", "spec", "poolGroup")
+			}
+			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{PoolResource: "ShiftPVPoolList"}, a, b)
+			registry := &Registry{Client: client, Now: func() time.Time { return time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC) }}
+			ready, err := registry.ReadyPools(context.Background())
+			if err != nil || len(ready) != 1 || ready[0].UID != "a-uid" {
+				t.Fatalf("candidate poisoned placement: %v %v", ready, err)
+			}
+			if _, err := registry.ReadyPoolForIdentity(context.Background(), "a", "a-uid", "node"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := registry.ReadyPoolForIdentity(context.Background(), "b", "b-uid", "node"); !errors.Is(err, ErrPoolNotReady) {
+				t.Fatalf("candidate admitted: %v", err)
+			}
+		})
+	}
+}
+
+func TestPoolStatusRejectsLostApprovalAndStaleGeneration(t *testing.T) {
+	object := pool("a", "node")
+	object.SetUID("a-uid")
+	_ = unstructured.SetNestedField(object.Object, true, "status", "registrationApproved")
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), object)
+	registry := &Registry{Client: client}
+	parsed, err := poolFrom(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared := parsed.Status
+	cleared.RegistrationApproved = false
+	if err := registry.SetPoolStatus(context.Background(), "a", "a-uid", "node", cleared); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("approval cleared: %v", err)
+	}
+	stale := parsed.Status
+	stale.ObservedGeneration++
+	if err := registry.SetPoolStatus(context.Background(), "a", "a-uid", "node", stale); !errors.Is(err, ErrStateConflict) {
+		t.Fatalf("stale observation accepted: %v", err)
+	}
+	if err := registry.SetPoolStatus(context.Background(), "a", "a-uid", "node", parsed.Status); err != nil {
+		t.Fatal(err)
+	}
+}

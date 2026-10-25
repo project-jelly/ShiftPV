@@ -46,42 +46,6 @@ type Runner struct {
 	ObserveStep             func(string, time.Duration)
 }
 
-func (r *Runner) CreateCopy(ctx context.Context, identity volume.CopyIdentity) error {
-	defer r.observeStep("create_helper")()
-	if err := identity.Validate(); err != nil {
-		return err
-	}
-	operationID, err := volumeapi.CreationOperationID(identity.VolumeUID)
-	if err != nil {
-		return err
-	}
-	_, err = r.runCreation(ctx, identity, operationID, []string{
-		"/shiftpv-volume-helper", "create",
-		"--operation-id=" + operationID,
-		"--installation-id=" + identity.InstallationID,
-		"--pool-name=" + identity.PoolName,
-		"--pool-uid=" + identity.PoolUID,
-		"--volume-id=" + identity.VolumeID,
-		"--volume-uid=" + identity.VolumeUID,
-		"--copy-id=" + identity.CopyID,
-		"--node-name=" + identity.NodeName,
-	})
-	return err
-}
-
-// FinalizeCreate removes only the exact, successfully terminated helper after
-// the controller has made the volume Ready. Absence is the settled state.
-func (r *Runner) FinalizeCreate(ctx context.Context, identity volume.CopyIdentity) error {
-	if err := identity.Validate(); err != nil {
-		return err
-	}
-	operationID, err := volumeapi.CreationOperationID(identity.VolumeUID)
-	if err != nil {
-		return err
-	}
-	return r.finalizeCreation(ctx, identity, operationID)
-}
-
 func (r *Runner) StatFS(ctx context.Context, nodeName string) (poolcapacity.Filesystem, error) {
 	if r.Pools == nil || nodeName == "" {
 		return poolcapacity.Filesystem{}, fmt.Errorf("ShiftPVPool registry is required")
@@ -176,9 +140,21 @@ func (r *Runner) volumeUsageAt(ctx context.Context, pool volumeapi.Pool, volumeI
 }
 
 func (r *Runner) runMeasurement(ctx context.Context, pool volumeapi.Pool, action, volumeID string, copy *volume.CopyIdentity) (string, error) {
-	evidence, err := poolcapacity.MeasurementEvidence(pool)
+	command, err := r.measurementCommand(pool, action, volumeID, copy)
 	if err != nil {
 		return "", err
+	}
+	label := volumeID
+	if label == "" {
+		label = "pool-capacity"
+	}
+	return r.runForResultAtPath(ctx, pool.NodeName, label, pool.MountPath, command, action == "usage")
+}
+
+func (r *Runner) measurementCommand(pool volumeapi.Pool, action, volumeID string, copy *volume.CopyIdentity) ([]string, error) {
+	evidence, err := poolcapacity.MeasurementEvidence(pool)
+	if err != nil {
+		return nil, err
 	}
 	command := []string{"/shiftpv-volume-helper", action,
 		"--pool-name=" + pool.Name, "--pool-uid=" + pool.UID, "--node-name=" + pool.NodeName,
@@ -189,18 +165,14 @@ func (r *Runner) runMeasurement(ctx context.Context, pool volumeapi.Pool, action
 	if copy != nil {
 		encoded, err := json.Marshal(copy)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		command = append(command, "--copy-identity="+string(encoded))
 	}
-	label := volumeID
-	if label == "" {
-		label = "pool-capacity"
-	}
-	return r.runForResultAtPath(ctx, pool.NodeName, label, pool.MountPath, command)
+	return command, nil
 }
 
-func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string) (string, error) {
+func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poolRoot string, command []string, readOnly bool) (string, error) {
 	if nodeName == "" {
 		return "", fmt.Errorf("node name is required")
 	}
@@ -216,7 +188,10 @@ func (r *Runner) runForResultAtPath(ctx context.Context, nodeName, volumeID, poo
 
 	desired := r.helperPod(nodeName, volumeID, poolRoot, command)
 	desired.Spec.AutomountServiceAccountToken = boolPtr(true)
-	desired.Spec.Containers[0].VolumeMounts[0].ReadOnly = true
+	// Capacity must see the host's mount access mode. A forced read-only bind
+	// would make every allocation probe appear read-only, including healthy Pools.
+	// Usage of an existing copy keeps its read-only bind.
+	desired.Spec.Containers[0].VolumeMounts[0].ReadOnly = readOnly
 	pods := r.Client.CoreV1().Pods(r.Namespace)
 	pod, err := pods.Create(ctx, desired, metav1.CreateOptions{})
 	if err != nil {
@@ -349,17 +324,6 @@ func (r *Runner) helperPod(nodeName, volumeID, poolRoot string, command []string
 			}},
 		},
 	}
-}
-
-func (r *Runner) poolRootForIdentity(ctx context.Context, identity volume.CopyIdentity) (string, error) {
-	if r.Pools == nil {
-		return "", fmt.Errorf("ShiftPVPool registry is required")
-	}
-	pool, err := r.Pools.PoolForIdentity(ctx, identity.PoolName, identity.PoolUID, identity.NodeName)
-	if err != nil {
-		return "", fmt.Errorf("resolve ShiftPVPool %q for copy: %w", identity.PoolName, err)
-	}
-	return pool.MountPath, nil
 }
 
 func classifyKubernetesAPIError(err error) error {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -33,14 +34,19 @@ type PoolRegistry interface {
 	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 }
 
+type PoolVerifier interface {
+	VerifyBacking(volumeapi.Pool) error
+}
+
 type Service struct {
 	csi.UnimplementedNodeServer
-	NodeName   string
-	HostRoot   string
-	Pools      PoolRegistry
-	TargetRoot string
-	Binder     Binder
-	Volumes    VolumeRegistry
+	NodeName     string
+	HostRoot     string
+	Pools        PoolRegistry
+	TargetRoot   string
+	Binder       Binder
+	Volumes      VolumeRegistry
+	PoolVerifier PoolVerifier
 
 	publicationLocksOnce sync.Once
 	publicationLocks     keymutex.KeyMutex
@@ -87,6 +93,9 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	}
 	pool, poolRoot, err := s.poolRoot(ctx, copy)
 	if err != nil {
+		if errors.Is(err, volumeapi.ErrPoolIdentityChanged) {
+			return nil, status.Errorf(codes.FailedPrecondition, "resolve node pool: %v", err)
+		}
 		return nil, status.Errorf(codes.Unavailable, "resolve node pool: %v", err)
 	}
 	if !publication.CopyMatchesPool(copy, pool) {
@@ -96,7 +105,7 @@ func (s *Service) NodePublishVolume(ctx context.Context, req *csi.NodePublishVol
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := s.publisher().Publish(ctx, publication.PublishRequest{
+	if err := s.publisher(s.poolRoot).Publish(ctx, publication.PublishRequest{
 		VolumeID:   req.GetVolumeId(),
 		TargetPath: req.GetTargetPath(),
 		Source:     source,
@@ -136,7 +145,7 @@ func (s *Service) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublis
 	if !reconcile {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
-	enteredLock, err := s.publisher().Unpublish(ctx, publication.UnpublishRequest{
+	enteredLock, err := s.publisher(s.poolRoot).Unpublish(ctx, publication.UnpublishRequest{
 		VolumeID: req.GetVolumeId(),
 		Source:   target.source,
 		PoolRoot: target.poolRoot,
@@ -205,22 +214,22 @@ func publicationError(op string, err error, enteredLock bool) error {
 	if !enteredLock {
 		return status.Errorf(codes.Unavailable, "reconcile publication after %s: %v", op, err)
 	}
-	if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) {
-		return status.Errorf(codes.FailedPrecondition, "%s identified volume: %v", op, err)
-	}
-	if errors.Is(err, publication.ErrObservationRetry) || errors.Is(err, ownership.ErrBusy) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+	if errors.Is(err, publication.ErrObservationRetry) || errors.Is(err, ownership.ErrBusy) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || apierrors.IsConflict(err) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
 		return status.Errorf(codes.Unavailable, "%s identified volume: %v", op, err)
+	}
+	if errors.Is(err, volumeapi.ErrStateConflict) || errors.Is(err, ownership.ErrIdentity) || errors.Is(err, ownership.ErrNeedsReview) || errors.Is(err, syscall.EROFS) {
+		return status.Errorf(codes.FailedPrecondition, "%s identified volume: %v", op, err)
 	}
 	return status.Errorf(codes.Internal, "%s identified volume: %v", op, err)
 }
 
-func (s *Service) publisher() publication.Publisher {
+func (s *Service) publisher(pools publication.PoolResolver) publication.Publisher {
 	return publication.Publisher{
 		NodeName:   s.NodeName,
 		TargetRoot: s.TargetRoot,
 		Binder:     s.Binder,
 		Volumes:    s.Volumes,
-		Pools:      s.poolRoot,
+		Pools:      pools,
 	}
 }
 
@@ -255,6 +264,8 @@ func (s *Service) lockPublication(volumeID string) func() {
 	return func() { _ = s.publicationLocks.UnlockKey(volumeID) }
 }
 
+// Publication uses an existing, identified copy. New allocation eligibility and
+// unrelated scan requests do not replace its live backing and owner checks.
 func (s *Service) poolRoot(ctx context.Context, copy volume.CopyIdentity) (volumeapi.Pool, string, error) {
 	if copy.NodeName != s.NodeName {
 		return volumeapi.Pool{}, "", fmt.Errorf("copy node does not match this node: %w", volumeapi.ErrStateConflict)
@@ -272,10 +283,17 @@ func (s *Service) poolRoot(ctx context.Context, copy volume.CopyIdentity) (volum
 		return volumeapi.Pool{}, "", fmt.Errorf("host root %q must be absolute", s.HostRoot)
 	}
 	root := filepath.Join(hostRoot, strings.TrimPrefix(mountPath, string(filepath.Separator)))
-	if err := readiness.VerifyHostPool(hostRoot, pool); err != nil {
+	if err := s.poolVerifier().VerifyBacking(pool); err != nil {
 		return volumeapi.Pool{}, "", err
 	}
 	return pool, root, nil
+}
+
+func (s *Service) poolVerifier() PoolVerifier {
+	if s.PoolVerifier != nil {
+		return s.PoolVerifier
+	}
+	return readiness.NewProbe(s.HostRoot)
 }
 
 func validateCapability(capability *csi.VolumeCapability) error {

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,6 +97,79 @@ func (m *mutableVolumeRepository) observeEmpty(at time.Time) {
 	defer m.mu.Unlock()
 	m.pools[0].Status.Inventory.ObservedAt = metav1.NewTime(at.UTC())
 	m.pools[0].Status.Inventory.Copies = nil
+}
+
+func identityReleaseChecker() (*uninstallcheck.Checker, *fake.Clientset, *mutableVolumeRepository) {
+	now := metav1.Now()
+	repository := &mutableVolumeRepository{pools: []volumeapi.Pool{{
+		Name: "lost", UID: "lost-uid", NodeName: "node", Generation: 1, DeletionTimestamp: &now,
+		Status: volumeapi.PoolStatus{ObservedGeneration: 1,
+			Inventory: &volumeapi.PoolInventory{ObservedAt: now, Valid: true},
+			Conditions: []metav1.Condition{{Type: volumeapi.PoolConditionIdentityReleased, Status: metav1.ConditionFalse,
+				ObservedGeneration: 1, Reason: "PoolStorageRestorationRequired"}},
+		},
+	}}}
+	client := fake.NewClientset()
+	checker := &uninstallcheck.Checker{Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassNames: []string{"shiftpv"}}
+	return checker, client, repository
+}
+
+func TestCheckAfterQuiesceDoesNotInventBlockersBeforeFirstObservation(t *testing.T) {
+	checker, client, _ := identityReleaseChecker()
+	failure := errors.New("first API observation failed")
+	client.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, failure
+	})
+	_, err := checkAfterQuiesce(context.Background(), checker, time.Time{})
+	if !errors.Is(err, failure) || strings.Contains(err.Error(), "last observed blockers") || strings.Contains(err.Error(), "PoolStorageRestorationRequired") {
+		t.Fatalf("first failure fabricated a prior observation: %v", err)
+	}
+}
+
+func TestCheckAfterQuiesceRetainsObservedBlockersWhenAPIFails(t *testing.T) {
+	checker, client, _ := identityReleaseChecker()
+	failure := errors.New("later API observation failed")
+	calls := 0
+	client.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		calls++
+		if calls == 1 {
+			return false, nil, nil
+		}
+		return true, nil, failure
+	})
+	_, err := checkAfterQuiesce(context.Background(), checker, time.Time{})
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "last observed blockers:") || !strings.Contains(err.Error(), "ShiftPVPoolIdentity lost: PoolStorageRestorationRequired") {
+		t.Fatalf("later API failure lost its prior observation: %v", err)
+	}
+}
+
+func TestCheckAfterQuiesceRetainsObservedBlockersAtDeadline(t *testing.T) {
+	checker, _, _ := identityReleaseChecker()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := checkAfterQuiesce(ctx, checker, time.Time{})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "last observed blockers:") || !strings.Contains(err.Error(), "ShiftPVPoolIdentity lost: PoolStorageRestorationRequired") {
+		t.Fatalf("deadline lost its prior observation: %v", err)
+	}
+}
+
+func TestCheckAfterQuiesceAcceptsFreshReleaseAfterPriorBlocker(t *testing.T) {
+	checker, client, repository := identityReleaseChecker()
+	calls := 0
+	client.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		calls++
+		if calls == 2 {
+			repository.mu.Lock()
+			repository.pools[0].Status.Conditions[0].Status = metav1.ConditionTrue
+			repository.pools[0].Status.Conditions[0].Reason = "PoolIdentityReleased"
+			repository.mu.Unlock()
+		}
+		return false, nil, nil
+	})
+	report, err := checkAfterQuiesce(context.Background(), checker, time.Time{})
+	if err != nil || !report.Safe() || calls != 2 {
+		t.Fatalf("prior blocker prevented a fresh safe observation: report=%+v calls=%d err=%v", report, calls, err)
+	}
 }
 
 func TestRunCompletesQuiescedTeardown(t *testing.T) {
@@ -291,4 +366,52 @@ func uninstallClient() *fake.Clientset {
 		OwnerReferences: []metav1.OwnerReference{{APIVersion: storagev1.SchemeGroupVersion.String(), Kind: "CSIDriver", Name: driver.Name, UID: driver.UID}},
 	}}
 	return fake.NewSimpleClientset(driver, validation)
+}
+
+// The quiesce, checker, protection release, webhook teardown and permit execute
+// together. An applied grant with a lost reply must remain retryable without
+// releasing either the ordinary or Terminating retired Pool tombstone.
+func TestRunPreservesRetiredPoolAcrossGrantResponseLoss(t *testing.T) {
+	for _, terminating := range []bool{false, true} {
+		t.Run(fmt.Sprint("terminating=", terminating), func(t *testing.T) {
+			client := uninstallClient()
+			store := &uninstallcheck.PermitStore{Client: client, Namespace: "shiftpv-system", Name: "shiftpv-uninstall-permit", CSIDriver: uninstallcheck.DriverName}
+			gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			go func() { _ = gate.Run(ctx) }()
+			pool := volumeapi.Pool{Name: "lost", UID: "lost-uid", NodeName: "node", MountPath: "/mnt/lost", RetirementApproval: "lost-uid", Finalizers: []string{volumeapi.PoolProtectionFinalizer}, Status: volumeapi.PoolStatus{RegistrationApproved: true}}
+			if terminating {
+				at := metav1.Now()
+				pool.DeletionTimestamp = &at
+			}
+			repository := &mutableVolumeRepository{pools: []volumeapi.Pool{pool}}
+			checker := &uninstallcheck.Checker{Client: client, Volumes: repository, Cleanups: emptyCleanupRepository{}, StorageClassNames: []string{"shiftpv"}, Namespace: "shiftpv-system", PreserveRetiredPoolUIDs: []string{pool.UID}}
+			var lost atomic.Bool
+			client.PrependReactor("update", "configmaps", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				state := action.(k8stesting.UpdateAction).GetObject().(*corev1.ConfigMap)
+				if state.Data["state"] != "granted" || !lost.CompareAndSwap(false, true) {
+					return false, nil, nil
+				}
+				if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("configmaps"), state.DeepCopy(), state.Namespace); err != nil {
+					return true, nil, err
+				}
+				return true, nil, fmt.Errorf("injected applied grant response loss")
+			})
+			if err := run(ctx, checker, store, "shiftpv-lifecycle"); err == nil || !strings.Contains(err.Error(), "injected applied grant response loss") {
+				t.Fatalf("first run=%v", err)
+			}
+			if err := run(ctx, checker, store, "shiftpv-lifecycle"); err != nil {
+				t.Fatalf("retry=%v", err)
+			}
+			if granted, err := store.Granted(context.Background()); err != nil || !granted {
+				t.Fatalf("grant=%v,%v", granted, err)
+			}
+			repository.mu.Lock()
+			defer repository.mu.Unlock()
+			if len(repository.removed) != 0 || len(repository.pools) != 1 || repository.pools[0].UID != pool.UID || len(repository.pools[0].Finalizers) != 1 || repository.pools[0].Finalizers[0] != volumeapi.PoolProtectionFinalizer {
+				t.Fatalf("retired Pool tombstone changed: removed=%v pools=%+v", repository.removed, repository.pools)
+			}
+		})
+	}
 }

@@ -46,32 +46,49 @@ func TestContainerSecurityContextRequiresRunAsUserKey(t *testing.T) {
 }
 
 type renderedObject struct {
-	Kind     string `json:"kind"`
-	Metadata struct {
+	Kind             string `json:"kind"`
+	Value            *int32 `json:"value"`
+	GlobalDefault    *bool  `json:"globalDefault"`
+	PreemptionPolicy string `json:"preemptionPolicy"`
+	Metadata         struct {
 		Name        string            `json:"name"`
 		Namespace   string            `json:"namespace"`
 		Labels      map[string]string `json:"labels"`
 		Annotations map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Rules []struct {
-		APIGroups []string `json:"apiGroups"`
-		Resources []string `json:"resources"`
-		Verbs     []string `json:"verbs"`
+		APIGroups     []string `json:"apiGroups"`
+		Resources     []string `json:"resources"`
+		Verbs         []string `json:"verbs"`
+		ResourceNames []string `json:"resourceNames"`
 	} `json:"rules"`
 	Subjects []struct {
 		Kind      string `json:"kind"`
 		Name      string `json:"name"`
 		Namespace string `json:"namespace"`
 	} `json:"subjects"`
+	RoleRef struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+	} `json:"roleRef"`
 	Spec struct {
-		Template struct {
+		StorageCapacity *bool `json:"storageCapacity"`
+		Template        struct {
 			Spec struct {
 				ServiceAccountName string `json:"serviceAccountName"`
 				Containers         []struct {
-					Name         string   `json:"name"`
-					Image        string   `json:"image"`
-					Command      []string `json:"command"`
-					Args         []string `json:"args"`
+					Name    string   `json:"name"`
+					Image   string   `json:"image"`
+					Command []string `json:"command"`
+					Args    []string `json:"args"`
+					Env     []struct {
+						Name      string `json:"name"`
+						ValueFrom struct {
+							FieldRef struct {
+								FieldPath string `json:"fieldPath"`
+							} `json:"fieldRef"`
+						} `json:"valueFrom"`
+					} `json:"env"`
 					VolumeMounts []struct {
 						Name             string `json:"name"`
 						MountPath        string `json:"mountPath"`
@@ -377,9 +394,9 @@ func TestChartRender(t *testing.T) {
 				wantArg(t, "helper service account wiring", args, "--helper-service-account="+helperName)
 				wantArg(t, "controller service account wiring", args, "--controller-service-account="+fullname+"-controller")
 				c.wantObject(t, "helper service account is created", "ServiceAccount", helperName)
-				wantRule(t, "helper may only write volume and move status",
+				wantRule(t, "helper reads exact storage authority",
 					c.wantObject(t, "helper cluster role", "ClusterRole", helperName),
-					"shiftpvvolumes/status", "shiftpvmoves/status")
+					"shiftpvpools", "shiftpvvolumes", "shiftpvmoves")
 				c.wantNoResource(t, "the retired cleanup CRD is gone", "shiftpvcleanups")
 				guard := c.wantObject(t, "uninstall guard job", "Job", guardJob)
 				wantAnnotation(t, "helm uninstall hook", guard, "helm.sh/hook", "pre-delete")
@@ -403,12 +420,12 @@ func TestChartRender(t *testing.T) {
 			},
 		},
 		{
-			name: "separate create and move helper images",
+			name: "separate measurement and move helper images",
 			args: []string{"--set", "controller.image.repository=controller,controller.image.tag=test," +
 				"helperPod.image=create-helper:test,mobility.helperImage=move-helper:test"},
 			assert: func(t *testing.T, c chart) {
 				args := c.controllerArgs(t)
-				wantArg(t, "create helper image", args, "--helper-image=create-helper:test")
+				wantArg(t, "measurement helper image", args, "--helper-image=create-helper:test")
 				wantArg(t, "move helper image", args, "--mobility-helper-image=move-helper:test")
 			},
 		},

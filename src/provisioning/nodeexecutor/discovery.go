@@ -11,16 +11,24 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const capabilityAnnotation = "shiftpv.io/node-effects"
-
 // Discovery trusts the configured DaemonSet incarnation, rather than a label
-// or a node name alone. Missing old Nodes select the helper before binding.
+// or a node name alone. Missing capabilities grant no executor identity.
 type Discovery struct {
 	Client               kubernetes.Interface
 	Namespace, DaemonSet string
 }
 
 func (d Discovery) Find(ctx context.Context, node string) (*volumeapi.NodeExecutor, error) {
+	return d.find(ctx, node, false)
+}
+
+// FindMoveCleanup requires the additional Move journal recovery capability.
+// The original v1 effect advertisement alone only covers Volume operations.
+func (d Discovery) FindMoveCleanup(ctx context.Context, node string) (*volumeapi.NodeExecutor, error) {
+	return d.find(ctx, node, true)
+}
+
+func (d Discovery) find(ctx context.Context, node string, moveCleanup bool) (*volumeapi.NodeExecutor, error) {
 	if d.DaemonSet == "" {
 		return nil, nil
 	}
@@ -37,7 +45,8 @@ func (d Discovery) Find(ctx context.Context, node string) (*volumeapi.NodeExecut
 	}
 	var result *volumeapi.NodeExecutor
 	for _, pod := range pods.Items {
-		if pod.Spec.NodeName != node || !ownedExecutor(pod, ds) {
+		if pod.Spec.NodeName != node || !ownedExecutor(pod, ds) ||
+			(moveCleanup && pod.Annotations[volumeapi.NodeMoveCleanupAnnotation] != "v1") {
 			continue
 		}
 		if result != nil {
@@ -52,7 +61,7 @@ func ownedExecutor(pod corev1.Pod, ds *appsv1.DaemonSet) bool {
 	return readyExecutorPod(pod) && pod.Namespace == ds.Namespace && pod.Spec.ServiceAccountName == ds.Spec.Template.Spec.ServiceAccountName && owner != nil && owner.APIVersion == "apps/v1" && owner.Kind == "DaemonSet" && owner.Name == ds.Name && owner.UID == ds.UID
 }
 func readyExecutorPod(pod corev1.Pod) bool {
-	if pod.UID == "" || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Annotations[capabilityAnnotation] != "v1" {
+	if pod.UID == "" || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Annotations[volumeapi.NodeEffectsAnnotation] != "v1" {
 		return false
 	}
 	for _, condition := range pod.Status.Conditions {

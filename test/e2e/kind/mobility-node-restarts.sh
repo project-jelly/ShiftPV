@@ -19,12 +19,54 @@ SOURCE_NODE="${CLUSTER_NAME}-worker"
 DESTINATION_NODE="${CLUSTER_NAME}-worker2"
 SOURCE_MOUNT=$(pool_mount_for_node "${SOURCE_NODE}")
 DESTINATION_MOUNT=$(pool_mount_for_node "${DESTINATION_NODE}")
+CONTROLLER_TOLERATIONS=""
+DESTINATION_TAINT_KEY=e2e.shiftpv.io/mobility-destination
+DESTINATION_TAINT_VALUE=""
+
+allow_controller_on_cordoned_source() {
+	CONTROLLER_TOLERATIONS=$(kubectl -n shiftpv-system get deployment/shiftpv-controller -o json | jq -c '.spec.template.spec.tolerations // null')
+	kubectl -n shiftpv-system patch deployment/shiftpv-controller --type merge -p "$(jq -nc \
+		--argjson tolerations "${CONTROLLER_TOLERATIONS}" \
+		'{spec:{template:{spec:{tolerations:(($tolerations // []) + [{key:"node.kubernetes.io/unschedulable",operator:"Exists",effect:"NoSchedule"}])}}}}')"
+}
+
+release_destination_test_taint() {
+	[[ -n "${DESTINATION_TAINT_VALUE}" ]] || return 0
+	local node patch
+	for _ in {1..5}; do
+		node=$(kubectl get "node/${DESTINATION_NODE}" -o json) || return 1
+		patch=$(jq -c --arg key "${DESTINATION_TAINT_KEY}" --arg value "${DESTINATION_TAINT_VALUE}" '
+			(.spec.taints // []) as $taints |
+			if any($taints[]; .key == $key and .value == $value and .effect == "NoSchedule") then
+			  [{op:"test",path:"/metadata/uid",value:.metadata.uid},
+			   {op:"test",path:"/metadata/resourceVersion",value:.metadata.resourceVersion},
+			   {op:"replace",path:"/spec/taints",value:
+			    ($taints | map(select(.key != $key or .value != $value or .effect != "NoSchedule")))}]
+			else [] end' <<<"${node}") || return 1
+		if [[ "${patch}" == '[]' ]] || kubectl patch "node/${DESTINATION_NODE}" --type json -p "${patch}"; then
+			DESTINATION_TAINT_VALUE=""
+			return
+		fi
+	done
+	echo 'could not remove exact destination test taint' >&2
+	return 1
+}
+
+restore_controller_tolerations() {
+	if [[ -n "${CONTROLLER_TOLERATIONS}" ]]; then
+		kubectl -n shiftpv-system patch deployment/shiftpv-controller --type merge \
+			-p "$(jq -nc --argjson tolerations "${CONTROLLER_TOLERATIONS}" '{spec:{template:{spec:{tolerations:$tolerations}}}}')"
+		CONTROLLER_TOLERATIONS=""
+	fi
+}
 restore_cluster() {
 	for node in "${SOURCE_NODE}" "${DESTINATION_NODE}"; do
 		docker start "${node}" >/dev/null 2>&1 || true
 	done
+	release_destination_test_taint >/dev/null 2>&1 || true
 	kubectl uncordon "${SOURCE_NODE}" >/dev/null 2>&1 || true
 	kubectl uncordon "${DESTINATION_NODE}" >/dev/null 2>&1 || true
+	restore_controller_tolerations >/dev/null 2>&1 || true
 	kubectl -n shiftpv-system scale deployment/shiftpv-controller --replicas=1 >/dev/null 2>&1 || true
 }
 trap restore_cluster EXIT
@@ -68,7 +110,12 @@ create_source_workload() {
 	VOLUME_ID=$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
 	SOURCE_POD=$(kubectl -n "${namespace}" get pod -l "app=${namespace}" -o jsonpath='{.items[0].metadata.name}')
 	test "$(kubectl -n "${namespace}" get "pod/${SOURCE_POD}" -o jsonpath='{.spec.nodeName}')" = "${SOURCE_NODE}"
+	# The replacement template cannot recreate this per-PVC data after data loss.
+	printf 'ShiftPV durable payload pvc=%s volume=%s\n' "${PVC_UID}" "${VOLUME_ID}" \
+		| kubectl -n "${namespace}" exec -i "${SOURCE_POD}" -- sh -ec 'cat > /data/payload; sync'
 	SOURCE_CHECKSUM=$(pod_sha256 "${namespace}" "${SOURCE_POD}" /data/payload)
+	SOURCE_VOLUME_UID=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
+	SOURCE_COPY=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o json | jq -c '.status.currentCopy')
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 	kubectl uncordon "${DESTINATION_NODE}"
 }
@@ -93,9 +140,10 @@ pause_before_copy() {
 		phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
 		if [[ "${phase}" == WaitingForDestination ]]; then
 			controller_down
+			phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')
 			break
 		fi
-		if [[ "${phase}" == Blocked || "${phase}" == Succeeded ]]; then
+		if [[ "${phase}" == Blocked || "${phase}" == Succeeded || "${phase}" == Cancelled ]]; then
 			echo "Move reached terminal phase before node fault injection: ${phase}" >&2
 			return 1
 		fi
@@ -122,6 +170,15 @@ pause_before_copy() {
 			if [[ -n "${placement}" ]]; then
 				placement_node=$(kubectl -n shiftpv-system get "pod/${placement}" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
 				if [[ -z "${replacement_node}" && "${replacement_hold}" == "shiftpv.io/placement-hold" && "${placement_node}" == "${DESTINATION_NODE}" ]]; then
+					REPLACEMENT_POD=${replacement}
+					REPLACEMENT_UID=$(kubectl -n "${TEST_NAMESPACE}" get "pod/${replacement}" -o jsonpath='{.metadata.uid}')
+					PLACEMENT_POD=${placement}
+					PLACEMENT_UID=$(kubectl -n shiftpv-system get "pod/${placement}" -o jsonpath='{.metadata.uid}')
+					MOVE_UID=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.metadata.uid}')
+					PREPARATION=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o json | jq -c '.status.preparation')
+					test "${PREPARATION}" != null
+					assert_no_execution_approval
+					kubectl -n shiftpv-system wait "pod/${placement}" --for=condition=Ready --timeout=60s
 					return
 				fi
 			fi
@@ -140,9 +197,10 @@ pause_at_phase() {
 			controller_down
 			phase=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')
 			test "${phase}" = "${expected_phase}"
+			test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.capacityApproved}')" = true
 			return
 		fi
-		if [[ "${phase}" == Blocked || "${phase}" == Succeeded ]]; then
+		if [[ "${phase}" == Blocked || "${phase}" == Succeeded || "${phase}" == Cancelled ]]; then
 			echo "Move reached terminal phase before ${expected_phase} node fault injection: ${phase}" >&2
 			return 1
 		fi
@@ -231,6 +289,78 @@ recover_source() {
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')" = ""
+}
+
+assert_no_execution_approval() {
+	kubectl get "shiftpvmove/${MOVE_NAME}" -o json | jq -e --arg uid "${MOVE_UID}" '
+		.metadata.uid == $uid and .spec.protocolVersion == "prepared-v1" and
+		.status.capacityApproved != true and .status.incomingCopy == null and .status.destinationCopy == null and
+		(.status.copyOperationID // "") == "" and (.status.promotionOperationID // "") == "" and
+		(.status.copyJobName // "") == "" and (.status.promotionJobName // "") == "" and
+		.status.cleanup == null and (.status.rollbackRequiredGeneration // 0) == 0' >/dev/null
+	kubectl get jobs -A -o json | jq -e --arg uid "${MOVE_UID}" \
+		'all(.items[]; all(.metadata.ownerReferences[]?; .uid != $uid))' >/dev/null
+	assert_node_absent "${DESTINATION_NODE}" "${DESTINATION_MOUNT}/volumes/${VOLUME_ID}"
+}
+
+assert_preparation_source() {
+	kubectl get "shiftpvvolume/${VOLUME_ID}" -o json | jq -e \
+		--arg uid "${SOURCE_VOLUME_UID}" --arg node "${SOURCE_NODE}" \
+		--arg move "${MOVE_NAME}" --argjson copy "${SOURCE_COPY}" '
+		.metadata.uid == $uid and .status.phase == "Moving" and .status.ownerNode == $node and
+		.status.currentCopy == $copy and .status.activeMove == $move' >/dev/null
+	assert_node_file "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}/payload"
+}
+
+assert_preparation_wait() {
+	local reason=$1 deadline
+	kubectl wait "shiftpvmove/${MOVE_NAME}" --for=jsonpath='{.status.reason}'="${reason}" --timeout=180s
+	# Observe more than two reconciliation intervals with the fault still active.
+	# No cancellation, new Move, or replacement recreation may hide the gap.
+	deadline=$((SECONDS + 25))
+	while ((SECONDS < deadline)); do
+		kubectl get "shiftpvmove/${MOVE_NAME}" -o json | jq -e \
+			--arg uid "${MOVE_UID}" --arg reason "${reason}" --argjson preparation "${PREPARATION}" '
+			.metadata.uid == $uid and .status.phase == "WaitingForDestination" and
+			.status.reason == $reason and .status.preparation == $preparation' >/dev/null
+		assert_no_execution_approval
+		assert_preparation_source
+		test "$(kubectl get "node/${SOURCE_NODE}" -o jsonpath='{.spec.unschedulable}')" = true
+		kubectl -n "${TEST_NAMESPACE}" get "pod/${REPLACEMENT_POD}" -o json | jq -e --arg uid "${REPLACEMENT_UID}" '
+			.metadata.uid == $uid and .metadata.deletionTimestamp == null and (.spec.nodeName // "") == "" and
+			any(.spec.schedulingGates[]?; .name == "shiftpv.io/placement-hold")' >/dev/null
+		kubectl -n shiftpv-system get "pod/${PLACEMENT_POD}" -o json | jq -e \
+			--arg uid "${PLACEMENT_UID}" --arg move "${MOVE_UID}" --arg node "${DESTINATION_NODE}" '
+			.metadata.uid == $uid and .metadata.deletionTimestamp == null and .spec.nodeName == $node and
+			any(.metadata.ownerReferences[]?; .kind == "ShiftPVMove" and .uid == $move)' >/dev/null
+		sleep 2
+	done
+}
+
+finish_pre_copy_move() {
+	local namespace=$1 restarted_node=${2:-}
+	# Freeze the writer while the node returns so the original bytes and exact
+	# held identities can be checked before any resumed copy or source cleanup.
+	controller_down
+	if [[ -n "${restarted_node}" ]]; then start_node "${restarted_node}"; fi
+	release_destination_test_taint
+	test "$(node_sha256 "${SOURCE_NODE}" "${SOURCE_MOUNT}/volumes/${VOLUME_ID}/payload")" = "${SOURCE_CHECKSUM}"
+	test "$(kubectl get "node/${SOURCE_NODE}" -o jsonpath='{.spec.unschedulable}')" = true
+	assert_preparation_source
+	kubectl get "shiftpvmove/${MOVE_NAME}" -o json | jq -e --arg uid "${MOVE_UID}" --argjson preparation "${PREPARATION}" '
+		.metadata.uid == $uid and .status.phase == "WaitingForDestination" and .status.preparation == $preparation' >/dev/null
+	controller_up
+	finish_destination_move "${namespace}"
+	kubectl -n "${namespace}" wait "pod/${REPLACEMENT_POD}" --for=condition=Ready --timeout=180s
+	kubectl -n "${namespace}" get "pod/${REPLACEMENT_POD}" -o json | jq -e \
+		--arg uid "${REPLACEMENT_UID}" --arg node "${DESTINATION_NODE}" '
+		.metadata.uid == $uid and .metadata.deletionTimestamp == null and .spec.nodeName == $node and
+		all(.spec.schedulingGates[]?; .name != "shiftpv.io/placement-hold")' >/dev/null
+	test "$(pod_sha256 "${namespace}" "${REPLACEMENT_POD}" /data/payload)" = "${SOURCE_CHECKSUM}"
+	test "$(kubectl get "node/${SOURCE_NODE}" -o jsonpath='{.spec.unschedulable}')" = true
+	kubectl get shiftpvmoves -o json | jq -e --arg volume "${VOLUME_ID}" --arg uid "${MOVE_UID}" '
+		[.items[] | select(.spec.volumeID == $volume)] | length == 1 and
+		all(.[]; .metadata.uid == $uid and .status.phase == "Succeeded")' >/dev/null
 }
 
 assert_destination_unavailable_wait() {
@@ -352,25 +482,18 @@ cleanup_case() {
 	kubectl uncordon "${DESTINATION_NODE}" >/dev/null 2>&1 || true
 }
 
-run_case() {
-	local namespace=$1 payload=$2 stopped_node=$3 expected_reason=$4
+run_pre_copy_source_restart_case() {
+	local namespace=$1 payload=$2
 	TEST_NAMESPACE="${namespace}"
 	create_source_workload "${namespace}" "${payload}"
 	kubectl cordon "${SOURCE_NODE}"
 	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 	pause_before_copy
-	stop_node "${stopped_node}"
-	# When the destination is down, the source is the only worker that can host
-	# the restarted controller. The transaction is already past preflight, so
-	# uncordoning it does not authorize a new move or change volume authority.
-	if [[ "${stopped_node}" == "${DESTINATION_NODE}" ]]; then
-		kubectl uncordon "${SOURCE_NODE}"
-	fi
+	stop_node "${SOURCE_NODE}"
 	controller_up
-	assert_blocked_source_authority "${expected_reason}"
-	start_node "${stopped_node}"
-	recover_source "${namespace}"
-	echo "mobility node restart recovery passed: node=${stopped_node} reason=${expected_reason} volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
+	assert_preparation_wait SourceUnavailable
+	finish_pre_copy_move "${namespace}" "${SOURCE_NODE}"
+	echo "mobility pre-copy source restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} replacementUID=${REPLACEMENT_UID} checksum=${SOURCE_CHECKSUM}"
 	cleanup_case "${namespace}"
 }
 
@@ -398,14 +521,38 @@ run_pre_copy_destination_restart_case() {
 	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
 	pause_before_copy
 	stop_node "${DESTINATION_NODE}"
-	# The destination capacity hold is durable, but the source remains authoritative.
-	# Let the controller run on the source and wait without releasing the workload.
-	kubectl uncordon "${SOURCE_NODE}"
+	# Keep the source cordoned throughout recovery. Only the controller may
+	# schedule onto it while the selected destination is unavailable.
+	allow_controller_on_cordoned_source
 	controller_up
-	assert_destination_unavailable_wait WaitingForCapacity "${SOURCE_NODE}"
-	start_node "${DESTINATION_NODE}"
-	finish_destination_move "${namespace}"
-	echo "mobility pre-copy destination restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} checksum=${SOURCE_CHECKSUM}"
+	test "$(kubectl get "node/${SOURCE_NODE}" -o jsonpath='{.spec.unschedulable}')" = true
+	assert_preparation_wait PreparedDestinationUnavailable
+	finish_pre_copy_move "${namespace}" "${DESTINATION_NODE}"
+	restore_controller_tolerations
+	kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=180s
+	echo "mobility pre-copy destination restart continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} replacementUID=${REPLACEMENT_UID} checksum=${SOURCE_CHECKSUM}"
+	cleanup_case "${namespace}"
+}
+
+run_pre_copy_destination_taint_case() {
+	local namespace=$1 payload=$2
+	TEST_NAMESPACE="${namespace}"
+	create_source_workload "${namespace}" "${payload}"
+	kubectl cordon "${SOURCE_NODE}"
+	MOVE_NAME=$(wait_for_move "${VOLUME_ID}" 120 0.2)
+	pause_before_copy
+	kubectl get "node/${DESTINATION_NODE}" -o json | jq -e --arg key "${DESTINATION_TAINT_KEY}" \
+		'all(.spec.taints[]?; .key != $key or .effect != "NoSchedule")' >/dev/null
+	# Arm exact cleanup before sending in case the successful write loses its response.
+	DESTINATION_TAINT_VALUE=${MOVE_UID}
+	kubectl taint node "${DESTINATION_NODE}" "${DESTINATION_TAINT_KEY}=${DESTINATION_TAINT_VALUE}:NoSchedule"
+	allow_controller_on_cordoned_source
+	controller_up
+	assert_preparation_wait PreparedDestinationUnavailable
+	finish_pre_copy_move "${namespace}"
+	restore_controller_tolerations
+	kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=180s
+	echo "mobility pre-copy destination taint continuation passed: volume=${VOLUME_ID} move=${MOVE_NAME} replacementUID=${REPLACEMENT_UID} checksum=${SOURCE_CHECKSUM}"
 	cleanup_case "${namespace}"
 }
 
@@ -453,8 +600,9 @@ run_cleaning_source_restart_case() {
 	cleanup_case "${namespace}"
 }
 
-# The node failure and recovery are real Kind container stop/start events. The
-# cleanup cases quiesce the controller before it can create a cleanup executor.
+# Restart cases use real Kind container stop/start; destination-taint changes
+# only an owned NoSchedule taint. Cleanup cases stop the controller before it
+# can create a cleanup executor.
 helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--namespace shiftpv-system \
 	--reuse-values \
@@ -462,15 +610,18 @@ helm upgrade shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--wait \
 	--timeout 5m
 
-ALL_CASES='source destination copying-source copying-destination promoting-destination committed-destination cleaning-source cleaning-destination'
+ALL_CASES='source destination destination-taint copying-source copying-destination promoting-destination committed-destination cleaning-source cleaning-destination'
 
 run_named_case() {
 	case $1 in
 	source)
-		run_case shiftpv-node-restart-source 'ShiftPV source node restart recovery' "${SOURCE_NODE}" SourceUnavailable
+		run_pre_copy_source_restart_case shiftpv-node-restart-source 'ShiftPV pre-copy source node restart continuation'
 		;;
 	destination)
 		run_pre_copy_destination_restart_case shiftpv-node-restart-destination 'ShiftPV pre-copy destination node restart continuation'
+		;;
+	destination-taint)
+		run_pre_copy_destination_taint_case shiftpv-destination-taint 'ShiftPV pre-copy destination NoSchedule continuation'
 		;;
 	copying-source)
 		run_copying_source_restart_case shiftpv-node-restart-copying-source 'ShiftPV Copying source restart recovery'

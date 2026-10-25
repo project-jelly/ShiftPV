@@ -37,7 +37,8 @@ Application I/O는 owner node의 local bind mount만 사용한다. Network path�
 | `ShiftPVVolume` | PVC identity, 단일 owner, capacity reservation, deletion journal |
 | `ShiftPVMove` | 한 번의 이동, owner commit, temporary holds, rollback/source cleanup journal |
 
-Helper Job은 filesystem effect를 실행할 뿐 authority나 완료 사실을 소유하지 않는다.
+resident Node는 생성·삭제·cleanup을 실행하고, Helper Job은 이동 중 copy·verify·promote를 실행한다.
+작업 승인과 완료 증거는 durable API 기록에 보관한다.
 
 ## Contract
 

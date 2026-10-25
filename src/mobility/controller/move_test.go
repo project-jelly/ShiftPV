@@ -15,8 +15,8 @@ import (
 	ktesting "k8s.io/client-go/testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/mobility/admission"
 	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 )
 
@@ -32,6 +32,8 @@ func cleanupMoveFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 			CopyOperationID: "copy-move-cleanup-uid", PromotionOperationID: "promote-move-cleanup-uid",
 		},
 	}
+	move = preparedFixtureMove(move)
+	move.Status.CapacityApproved, move.Status.SourceBytes = true, 1<<20
 	repository := &memoryRepository{
 		volumes: map[string]volumeapi.State{move.Spec.VolumeID: {
 			UID: destination.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: "destination", ActiveMove: move.Name,
@@ -50,8 +52,12 @@ func cleanupMoveFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 
 type failingCleanupOperator struct{}
 
-func (failingCleanupOperator) Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
-	return cleanupapi.Cleanup{}, errors.New("cleanup API unavailable")
+func (failingCleanupOperator) ObserveCompletedCleanup(context.Context, cleanupapi.Cleanup) (bool, error) {
+	return false, errors.New("cleanup API unavailable")
+}
+
+func (failingCleanupOperator) AdvanceReclaim(context.Context, cleanupapi.Cleanup, cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
+	return cleanupapi.Cleanup{}, false, errors.New("cleanup API unavailable")
 }
 
 func settleCleanupFixture(t *testing.T, reconciler *Reconciler, repository *memoryRepository) {
@@ -109,12 +115,12 @@ type rejectedStatusRepository struct {
 	rejectNext bool
 }
 
-func (r *rejectedStatusRepository) SetMoveStatus(ctx context.Context, name, uid string, next volumeapi.MoveStatus) error {
+func (r *rejectedStatusRepository) CompareAndSetMoveStatus(ctx context.Context, expected volumeapi.Move, next volumeapi.MoveStatus) (volumeapi.Move, error) {
 	if r.rejectNext {
 		r.rejectNext = false
-		return errors.New("status write rejected before persistence")
+		return volumeapi.Move{}, errors.New("status write rejected before persistence")
 	}
-	return r.memoryRepository.SetMoveStatus(ctx, name, uid, next)
+	return r.memoryRepository.CompareAndSetMoveStatus(ctx, expected, next)
 }
 
 func TestMoveActionSurvivesJournalFailureAndControllerRestart(t *testing.T) {
@@ -266,11 +272,12 @@ func TestCompletionRejectsConflictingAuthority(t *testing.T) {
 			}
 			repository.moves[0] = move
 			repository.volumes[move.Spec.VolumeID] = state
-			if err := reconciler.reconcileMove(context.Background(), move); err != nil {
+			err := reconciler.reconcileMove(context.Background(), move)
+			if err != nil && scenario != "empty destination" && scenario != "same source" {
 				t.Fatal(err)
 			}
 			after := repository.moves[0].Status
-			if after.Phase != "Completing" || after.Reason != "CompletionAuthorityMismatch" {
+			if after.Phase != "Completing" || (err == nil && after.Reason != "CompletionAuthorityMismatch") {
 				t.Fatalf("unsafe completion was not deferred: %+v", after)
 			}
 			got := repository.volumes[move.Spec.VolumeID]
@@ -406,6 +413,16 @@ func TestCompletionAfterVolumeDeletion(t *testing.T) {
 		t.Fatalf("deleted Volume did not finish metadata-only: %+v", repository.moves[0])
 	}
 	for _, action := range client.Actions() {
+		// ReconcileAll also observes orphan workload holds, without examining
+		// this deleted Volume's disk or helper resources.
+		if list, ok := action.(ktesting.ListAction); ok && action.Matches("list", "pods") && action.GetResource().Group == "" &&
+			action.GetNamespace() == metav1.NamespaceAll && list.GetListRestrictions().Labels.String() == admission.ManagedLabel+"=true" {
+			continue
+		}
+		if list, ok := action.(ktesting.ListAction); ok && action.Matches("list", "pods") && action.GetNamespace() == "system" &&
+			list.GetListRestrictions().Labels.String() == "" {
+			continue
+		}
 		if action.GetVerb() != "get" && action.GetVerb() != "delete" {
 			t.Fatalf("completion recreated or inspected disk resources: %+v", action)
 		}

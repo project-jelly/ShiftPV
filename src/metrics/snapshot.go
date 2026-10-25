@@ -42,6 +42,7 @@ var definitions = []struct {
 	{"pool_reserved_bytes", "Volume owner and active Move capacity holds, not disk usage.", []string{"pool", "node"}},
 	{"pool_accounting_valid", "Whether the latest Pool capacity-hold accounting is valid.", []string{"pool", "node"}},
 	{"pool_ready", "Pool readiness including generation and probe freshness.", []string{"pool", "node"}},
+	{"pool_registration_retired", "Whether the Controller retired this exact Pool registration; not physical absence.", []string{"pool", "node"}},
 	{"pool_filesystem_size_bytes", "Total size of the filesystem containing the registered directory.", []string{"pool", "node"}},
 	{"pool_filesystem_available_bytes", "Filesystem bytes available to unprivileged users, including external writers.", []string{"pool", "node"}},
 	{"pool_filesystem_available_inodes", "Free filesystem inodes reported by statfs.", []string{"pool", "node"}},
@@ -56,6 +57,8 @@ var definitions = []struct {
 	{"mobility_deferred_volumes", "Volumes deferred during the last completed cordon discovery.", []string{"reason"}},
 	{"persistent_volumes", "Driver-owned PersistentVolumes by phase and by the Pool holding the current copy.", []string{"phase", "pool"}},
 	{"persistent_volumes_released_bytes", "Requested capacity of Released driver-owned PersistentVolumes awaiting an operator reclaim decision.", []string{"pool"}},
+	{"volumes_without_persistent_volume", "Ready or preserved Blocked volume owners without a matching driver PersistentVolume, excluding lifecycle work.", []string{"pool"}},
+	{"volumes_without_persistent_volume_reserved_bytes", "Logical owner reservations without a matching driver PersistentVolume, not disk usage or reclaim permission.", []string{"pool"}},
 }
 
 func (c *Cache) Describe(ch chan<- *prometheus.Desc) {

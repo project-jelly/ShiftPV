@@ -23,10 +23,14 @@ func (i *blockedInspector) Inspect(volumeapi.Pool) readiness.Result {
 	return readiness.Result{CapacityReadable: readiness.Check{Known: true, OK: true}}
 }
 
+func (i *blockedInspector) InspectCapacityUnit(volumeapi.Pool) (*volumeapi.PoolCapacityUnit, readiness.Check) {
+	return nil, readiness.Check{Known: true, Reason: "CapacityAllocationUnproven"}
+}
+
 type localPool struct{}
 
 func (localPool) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
-	return []volumeapi.Pool{{Name: "pool", UID: "pool-uid", NodeName: "node"}}, nil
+	return []volumeapi.Pool{{Name: "pool", UID: "pool-uid", NodeName: "node", MountPath: "/pool", PoolGroup: "default", CapacityLimit: "1Gi"}}, nil
 }
 func (localPool) SetPoolStatus(context.Context, string, string, string, volumeapi.PoolStatus) error {
 	return nil

@@ -12,6 +12,8 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
 
+var errCleanupPending = errors.New("cleanup executor settlement is pending")
+
 func (r *Reconciler) cleanupState(ctx context.Context, move volumeapi.Move) (complete, failed bool, err error) {
 	spec, err := moveCleanupSpec(move)
 	if err != nil {
@@ -27,7 +29,46 @@ func (r *Reconciler) cleanupState(ctx context.Context, move volumeapi.Move) (com
 	if request.Spec != spec {
 		return false, false, fmt.Errorf("cleanup request belongs to a different Move")
 	}
+	if request.Status.Phase == cleanupapi.PhaseCompleted {
+		ready, err := r.observeCompletedCleanup(ctx, request)
+		return ready, false, err
+	}
 	return request.Status.Phase == cleanupapi.PhaseCompleted, request.Status.Phase == cleanupapi.PhaseNeedsReview, nil
+}
+
+func (r *Reconciler) observeCompletedCleanup(ctx context.Context, current cleanupapi.Cleanup) (bool, error) {
+	if r.CleanupOperator == nil {
+		return false, fmt.Errorf("completed cleanup observer is not configured")
+	}
+	ready, err := r.CleanupOperator.ObserveCompletedCleanup(ctx, current)
+	if err == nil && !ready {
+		return false, errCleanupPending
+	}
+	return ready, err
+}
+
+func (r *Reconciler) observeTerminalCleanupHistory(ctx context.Context, move volumeapi.Move) error {
+	if r.Cleanups == nil {
+		if move.Status.CleanupPhase != "" {
+			return fmt.Errorf("cleanup history store is not configured")
+		}
+		return nil
+	}
+	current, err := r.Cleanups.GetHistory(ctx, moveCleanupAuthority(move))
+	if errors.Is(err, cleanupapi.ErrNoJournal) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !cleanupIntentMatches(move, current.Spec) {
+		return fmt.Errorf("retain terminal history with mismatched cleanup intent")
+	}
+	if current.Status.Phase == cleanupapi.PhaseCompleted {
+		_, err := r.observeCompletedCleanup(ctx, current)
+		return err
+	}
+	return nil
 }
 
 func (r *Reconciler) acknowledgeCleanup(ctx context.Context, move volumeapi.Move) error {
@@ -61,12 +102,19 @@ func (r *Reconciler) ensureCleanupSpec(ctx context.Context, move *volumeapi.Move
 		return err
 	}
 	if request.Status.Phase == cleanupapi.PhaseCompleted {
-		return nil
+		_, _, err := r.observeTerminalExecutor(ctx, request)
+		return err
 	}
-	if request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
-		request, err = r.CleanupOperator.Reclaim(ctx, request, r.Cleanups)
+	// Historical releases could already open an absence fence before a Job
+	// exited. Observe that executor before either opening or consuming a fence.
+	if cleanupJobNeedsSettlement(request) || request.Status.Phase != cleanupapi.PhaseVerifying && request.Status.Phase != cleanupapi.PhaseConfirmingAbsence {
+		var ready bool
+		request, ready, err = r.CleanupOperator.AdvanceReclaim(ctx, request, r.Cleanups)
 		if err != nil {
 			return err
+		}
+		if !ready {
+			return errCleanupPending
 		}
 	}
 	if request.Status.Phase == cleanupapi.PhaseCompleted {
@@ -93,7 +141,7 @@ func (r *Reconciler) cleanupContractComplete(move *volumeapi.Move, spec cleanupa
 func cleanupReceiptComplete(request cleanupapi.Cleanup, spec cleanupapi.Spec) bool {
 	return (request.Status.Phase == cleanupapi.PhaseVerifying || request.Status.Phase == cleanupapi.PhaseConfirmingAbsence) &&
 		request.Status.Receipt != nil && request.Status.Executor != nil &&
-		request.Status.Receipt.OperationID == spec.OperationID && request.Status.Receipt.ExecutorUID == request.Status.Executor.JobUID &&
+		request.Status.Receipt.OperationID == spec.OperationID && request.Status.Receipt.ExecutorUID == request.Status.Executor.ExecutionUID() &&
 		request.Status.Receipt.Retired && request.Status.Receipt.Purged
 }
 
@@ -182,13 +230,27 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 			fmt.Sprintf("terminal Move carries cleanup operation %q for reason %q", current.Spec.OperationID, current.Spec.Reason))
 	}
 	switch current.Status.Phase {
-	case cleanupapi.PhaseCompleted, cleanupapi.PhaseNeedsReview:
+	case cleanupapi.PhaseCompleted:
+		_, _, err := r.observeTerminalExecutor(ctx, current)
+		return err
+	case cleanupapi.PhaseNeedsReview:
 		return nil
 	case cleanupapi.PhaseVerifying, cleanupapi.PhaseConfirmingAbsence:
 	default:
 		return r.reviewCleanupJournal(ctx, current, "TerminalMoveCleanupIntentUnfinished",
 			fmt.Sprintf("terminal Move carries a cleanup intent still in phase %q with no purge receipt", current.Status.Phase))
 	}
+	observed, ready, err := r.observeTerminalExecutor(ctx, current)
+	if err != nil {
+		if errors.Is(err, volumeapi.ErrPoolNotFound) {
+			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
+		}
+		return err
+	}
+	if !ready {
+		return nil
+	}
+	current = observed
 	if err := r.driveCleanupAbsence(ctx, current); err != nil {
 		if contradictedCleanup(err) {
 			return r.reviewCleanupJournal(ctx, current, "CleanupPoolIdentityChanged", err.Error())
@@ -196,6 +258,27 @@ func (r *Reconciler) settleTerminalCleanup(ctx context.Context, move volumeapi.M
 		return err
 	}
 	return nil
+}
+
+func cleanupJobNeedsSettlement(current cleanupapi.Cleanup) bool {
+	return (current.Status.Phase == cleanupapi.PhaseVerifying || current.Status.Phase == cleanupapi.PhaseConfirmingAbsence || current.Status.Phase == cleanupapi.PhaseCompleted) &&
+		current.Status.Executor != nil && current.Status.Executor.Kind == ""
+}
+
+func (r *Reconciler) observeTerminalExecutor(ctx context.Context, current cleanupapi.Cleanup) (cleanupapi.Cleanup, bool, error) {
+	if current.Status.Phase == cleanupapi.PhaseCompleted {
+		ready, err := r.observeCompletedCleanup(ctx, current)
+		return current, ready, err
+	}
+	if !cleanupJobNeedsSettlement(current) {
+		return current, true, nil
+	}
+	if r.CleanupOperator == nil {
+		return current, false, fmt.Errorf("cleanup executor settlement observer is not configured")
+	}
+	// Legacy work must already carry completed historical proof. The Node
+	// adapter only checks that proof and its exact executor's quiescence.
+	return r.CleanupOperator.AdvanceReclaim(ctx, current, r.Cleanups)
 }
 
 // driveCleanupAbsence finishes a receipt-bearing journal through its Pool

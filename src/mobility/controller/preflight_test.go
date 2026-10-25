@@ -29,6 +29,16 @@ func preflightFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
 	return newTestReconciler(client, repo), repo, client
 }
 
+// A new prepared Move has no source plan until its first eligible observation.
+func pendingPreflightFixture() (*Reconciler, *memoryRepository, *fake.Clientset) {
+	r, repo, client := preflightFixture()
+	move := preparedFixtureMove(volumeapi.Move{Name: "move-test", UID: "move-uid",
+		Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}})
+	move.Status = volumeapi.MoveStatus{Phase: string(fsm.PhasePending)}
+	repo.moves = []volumeapi.Move{move}
+	return r, repo, client
+}
+
 func TestPreflightDefersWithoutLockOrEviction(t *testing.T) {
 	for _, test := range []struct {
 		name, reason string
@@ -67,6 +77,12 @@ func TestPreflightDefersWithoutLockOrEviction(t *testing.T) {
 			v.PersistentVolumeClaim.ClaimName = "other"
 			p.Spec.Volumes = append(p.Spec.Volumes, v)
 		}},
+		{"template multiple PVC", "MultiplePVCsUnsupported", func(_ *corev1.Pod, rs *appsv1.ReplicaSet, _ *corev1.Node, _ *corev1.PersistentVolume) {
+			v := claimVolumes()[0]
+			v.Name = "other"
+			v.PersistentVolumeClaim.ClaimName = "other"
+			rs.Spec.Template.Spec.Volumes = append(rs.Spec.Template.Spec.Volumes, v)
+		}},
 		{"explicit binding", "ExplicitNodeNameUnsupported", func(_ *corev1.Pod, rs *appsv1.ReplicaSet, _ *corev1.Node, _ *corev1.PersistentVolume) {
 			rs.Spec.Template.Spec.NodeName = "source"
 		}},
@@ -92,7 +108,7 @@ func TestPreflightDefersWithoutLockOrEviction(t *testing.T) {
 			_, _ = client.AppsV1().ReplicaSets("workload").Update(ctx, rs, metav1.UpdateOptions{})
 			_, _ = client.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 			_, _ = client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
-			move := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}}
+			move := volumeapi.Move{Spec: volumeapi.MoveSpec{ProtocolVersion: volumeapi.MoveProtocolPreparedV1, VolumeID: preflightVolume, SourceNode: "source"}}
 			observed, err := r.observe(ctx, move)
 			if err != nil || observed.FSM.PreconditionsValid || observed.FSM.UnsafeReason != test.reason {
 				t.Fatalf("observed=%+v err=%v", observed.FSM, err)
@@ -146,41 +162,82 @@ func TestPreflightRecognizesInjectedPinAndToleratedDestination(t *testing.T) {
 	}
 }
 
-func TestPreflightPDBRecheckedBeforeLockAndEviction(t *testing.T) {
-	for _, phase := range []fsm.Phase{fsm.PhasePending, fsm.PhaseLocking, fsm.PhaseEvicting} {
+func TestPreflightPDBRecheckedBeforePreparationAndEviction(t *testing.T) {
+	for _, phase := range []fsm.Phase{fsm.PhasePending, fsm.PhasePreparing, fsm.PhaseStartingDisruption} {
 		t.Run(string(phase), func(t *testing.T) {
-			r, repo, client := preflightFixture()
-			ctx := context.Background()
-			if err := r.discoverMoves(ctx); err != nil {
-				t.Fatal(err)
-			}
-			move := &repo.moves[0]
-			move.Status.Phase = string(phase)
-			if phase != fsm.PhasePending {
-				repo.volumes[preflightVolume] = volumeapi.State{Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, PublishedNodes: []string{"source"}}
-			}
-			budget := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "budget", Namespace: "workload", Generation: 2}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{}}, Status: policyv1.PodDisruptionBudgetStatus{ObservedGeneration: 1, DisruptionsAllowed: 1}}
-			_, _ = client.PolicyV1().PodDisruptionBudgets("workload").Create(ctx, budget, metav1.CreateOptions{})
-			for range 2 {
-				if err := r.ReconcileAll(ctx); err != nil {
+			f := newPreparationRegistryFixture(t, 1)
+			if phase == fsm.PhasePreparing {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if move.Status.Phase != string(phase) || move.Status.Reason != "DisruptionBudgetDenied" {
-				t.Fatalf("move=%+v", move)
+			if phase == fsm.PhaseStartingDisruption {
+				move := f.untilPrepared(t, 0)
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
+					t.Fatal(err)
+				}
 			}
-			assertNoEviction(t, client)
-			budget.Status.ObservedGeneration = 2
-			_, _ = client.PolicyV1().PodDisruptionBudgets("workload").UpdateStatus(ctx, budget, metav1.UpdateOptions{})
-			if err := r.ReconcileAll(ctx); err != nil {
+			if got := f.move(t, 0).Status.Phase; got != string(phase) {
+				t.Fatalf("fixture phase=%s", got)
+			}
+			budget := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "budget", Namespace: f.workloads[0].Namespace.Name, Generation: 2}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{}}, Status: policyv1.PodDisruptionBudgetStatus{ObservedGeneration: 1, DisruptionsAllowed: 1}}
+			if _, err := f.client.PolicyV1().PodDisruptionBudgets(budget.Namespace).Create(f.ctx, budget, metav1.CreateOptions{}); err != nil {
 				t.Fatal(err)
 			}
-			if move.Status.Reason != "" {
-				t.Fatalf("stale deferred reason: %+v", move.Status)
+			if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+				t.Fatal(err)
 			}
-			if phase == fsm.PhasePending && repo.volumes[preflightVolume].Phase != volumeapi.PhaseMoving {
-				t.Fatal("did not resume")
+			denied := f.move(t, 0)
+			if denied.Status.Phase != string(phase) || denied.Status.Reason != "DisruptionBudgetDenied" {
+				t.Fatalf("budget denial was not preserved: %+v", denied.Status)
 			}
+			if f.state(t, 0).Phase != volumeapi.PhaseReady {
+				t.Fatal("budget denial disrupted the source")
+			}
+			assertNoEviction(t, f.client)
+			if phase == fsm.PhaseStartingDisruption && denied.Status.Preparation == nil {
+				t.Fatal("budget wait lost its reserved hold")
+			}
+			budget.Status.ObservedGeneration = 2
+			if _, err := f.client.PolicyV1().PodDisruptionBudgets(budget.Namespace).UpdateStatus(f.ctx, budget, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if phase != fsm.PhaseStartingDisruption {
+				for range 6 {
+					if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+						t.Fatal(err)
+					}
+					f.schedulePlacements(t)
+					if f.move(t, 0).Status.Reason == "" {
+						break
+					}
+				}
+				resumed := f.move(t, 0)
+				if resumed.Status.Phase != string(fsm.PhasePreparing) || resumed.Status.Reason != "" {
+					t.Fatalf("did not resume preparation: %+v", resumed.Status)
+				}
+				if f.state(t, 0).Phase != volumeapi.PhaseReady {
+					t.Fatal("preparation made the source unpublishable")
+				}
+				assertNoEviction(t, f.client)
+				return
+			}
+			// The durable disruption intent retains its reservation while the
+			// PDB is stale. A fresh allowed budget resumes the same attempt.
+			for range 6 {
+				if err := f.reconciler.reconcilePersistedMove(f.ctx, f.move(t, 0)); err != nil {
+					t.Fatal(err)
+				}
+				if f.move(t, 0).Status.Phase == string(fsm.PhaseWaitingForUnpublish) {
+					break
+				}
+			}
+			resumed := f.move(t, 0)
+			if resumed.UID != denied.UID || resumed.Status.Phase != string(fsm.PhaseWaitingForUnpublish) || !resumed.Status.EvictionRequested ||
+				resumed.Status.Preparation == nil || f.state(t, 0).ActiveMove != resumed.Name || f.state(t, 0).Phase != volumeapi.PhaseMoving {
+				t.Fatalf("recovered budget did not resume the reserved disruption: %+v", resumed.Status)
+			}
+			assertPreparationReserved(t, f, preparationRequestedBytes)
 		})
 	}
 }
@@ -232,7 +289,7 @@ func TestPreflightRequiresExactPresentSourceCopy(t *testing.T) {
 			destinationPool := identifiedTestPools(repo.pools)[1]
 			repo.readyPoolsConfigured = true
 			repo.readyPools = []volumeapi.Pool{sourcePool, destinationPool}
-			move := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}}
+			move := volumeapi.Move{Spec: volumeapi.MoveSpec{ProtocolVersion: volumeapi.MoveProtocolPreparedV1, VolumeID: preflightVolume, SourceNode: "source"}}
 			observed, err := r.observe(context.Background(), move)
 			if err != nil {
 				t.Fatal(err)
@@ -249,21 +306,34 @@ func TestPreflightRequiresExactPresentSourceCopy(t *testing.T) {
 }
 
 func TestConsumerUIDDistinguishesSameNameReplacement(t *testing.T) {
-	r, repo, client := preflightFixture()
-	move := volumeapi.Move{Name: "move", Spec: volumeapi.MoveSpec{VolumeID: preflightVolume, SourceNode: "source"}, Status: volumeapi.MoveStatus{Phase: "Evicting", ConsumerName: "consumer", ConsumerUID: "old-uid", EvictionRequested: true}}
-	repo.moves = []volumeapi.Move{move}
-	repo.volumes[preflightVolume] = volumeapi.State{Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name}
-	observed, err := r.observe(context.Background(), move)
-	if err != nil || observed.Consumer != nil || observed.Replacement == nil {
-		t.Fatalf("observation=%+v error=%v", observed, err)
-	}
-	if err := r.ReconcileAll(context.Background()); err != nil {
+	f := newPreparationRegistryFixture(t, 1)
+	move := f.untilPrepared(t, 0)
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
 		t.Fatal(err)
 	}
-	if repo.moves[0].Status.Phase != "WaitingForUnpublish" {
-		t.Fatal(repo.moves[0].Status)
+	move = f.move(t, 0)
+	pod := f.workloads[0].Consumer.DeepCopy()
+	if err := f.client.CoreV1().Pods(pod.Namespace).Delete(f.ctx, pod.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	assertNoEviction(t, client)
+	pod.UID = "replacement-consumer-uid"
+	pod, err := f.client.CoreV1().Pods(pod.Namespace).Create(f.ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := f.reconciler.observe(f.ctx, move)
+	if err != nil || observed.Consumer != nil || observed.Replacement == nil || observed.Replacement.UID != pod.UID {
+		t.Fatalf("same-name replacement was treated as the original consumer: %+v error=%v", observed, err)
+	}
+	if err := f.reconciler.reconcilePersistedMove(f.ctx, move); err != nil {
+		t.Fatal(err)
+	}
+	blocked := f.move(t, 0)
+	if blocked.Status.Phase != string(fsm.PhaseBlocked) || blocked.Status.Reason != "UnexpectedConsumerPlacement" || blocked.Status.Preparation == nil || f.state(t, 0).Phase != volumeapi.PhaseBlocked {
+		t.Fatalf("unheld replacement did not preserve the reserved authority: %+v", blocked.Status)
+	}
+	assertPreparationReserved(t, f, preparationRequestedBytes)
+	assertNoEviction(t, f.client)
 }
 
 func TestEvictionUsesObservedPodUID(t *testing.T) {
@@ -340,10 +410,7 @@ func TestPreflightPDBSelectorAndOverlap(t *testing.T) {
 
 func TestPreflightLateSecondConsumerWaitsAndResumes(t *testing.T) {
 	ctx := context.Background()
-	r, repo, client := preflightFixture()
-	if err := r.discoverMoves(ctx); err != nil {
-		t.Fatal(err)
-	}
+	r, repo, client := pendingPreflightFixture()
 	pod, _ := client.CoreV1().Pods("workload").Get(ctx, "consumer", metav1.GetOptions{})
 	pod.Name, pod.UID = "second-consumer", "second-uid"
 	if _, err := client.CoreV1().Pods("workload").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
@@ -365,7 +432,7 @@ func TestPreflightLateSecondConsumerWaitsAndResumes(t *testing.T) {
 	if err := r.ReconcileAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if repo.moves[0].Status.Phase != "Locking" {
+	if repo.moves[0].Status.Phase != string(fsm.PhasePreparing) {
 		t.Fatalf("did not resume: %+v", repo.moves[0].Status)
 	}
 }
@@ -394,10 +461,7 @@ func TestPendingEligibilityLossWaitsAndResumes(t *testing.T) {
 	for _, condition := range []string{"namespace opt-out", "consumer missing"} {
 		t.Run(condition, func(t *testing.T) {
 			ctx := context.Background()
-			r, repo, client := preflightFixture()
-			if err := r.discoverMoves(ctx); err != nil {
-				t.Fatal(err)
-			}
+			r, repo, client := pendingPreflightFixture()
 			pod, _ := client.CoreV1().Pods("workload").Get(ctx, "consumer", metav1.GetOptions{})
 			ns, _ := client.CoreV1().Namespaces().Get(ctx, "workload", metav1.GetOptions{})
 			if condition == "namespace opt-out" {
@@ -422,20 +486,26 @@ func TestPendingEligibilityLossWaitsAndResumes(t *testing.T) {
 			if err := r.ReconcileAll(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if repo.moves[0].Status.Phase != "Locking" {
+			if repo.moves[0].Status.Phase != string(fsm.PhasePreparing) {
 				t.Fatal(repo.moves[0].Status)
 			}
 		})
 	}
 }
 
-func TestPreflightLateSecondConsumerAfterLockDoesNotEvict(t *testing.T) {
+func TestPreflightLateSecondConsumerAfterSourceClaimDoesNotEvict(t *testing.T) {
 	ctx := context.Background()
-	r, repo, client := preflightFixture()
+	r, repo, client := pendingPreflightFixture()
 	if err := r.ReconcileAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if repo.moves[0].Status.Phase != "Locking" {
+	if err := r.ReconcileAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if repo.volumes[preflightVolume].ActiveMove != repo.moves[0].Name || repo.volumes[preflightVolume].Phase != volumeapi.PhaseReady {
+		t.Fatal("source was not claimed without disruption")
+	}
+	if repo.moves[0].Status.Phase != string(fsm.PhasePreparing) {
 		t.Fatal(repo.moves[0].Status)
 	}
 	pod, _ := client.CoreV1().Pods("workload").Get(ctx, "consumer", metav1.GetOptions{})
@@ -444,7 +514,7 @@ func TestPreflightLateSecondConsumerAfterLockDoesNotEvict(t *testing.T) {
 	if err := r.ReconcileAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if repo.moves[0].Status.Phase != "Locking" || repo.moves[0].Status.Reason != "MultipleConsumers" {
+	if repo.moves[0].Status.Phase != string(fsm.PhasePreparing) || repo.moves[0].Status.Reason != "MultipleConsumers" {
 		t.Fatal(repo.moves[0].Status)
 	}
 	assertNoEviction(t, client)

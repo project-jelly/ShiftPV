@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"syscall"
@@ -41,6 +42,11 @@ func (f *fakePoolCapacityRegistry) ReadyPools(context.Context) ([]volumeapi.Pool
 		return f.pools, f.err
 	}
 	return []volumeapi.Pool{f.pool}, f.err
+}
+
+func (f *fakePoolCapacityRegistry) ObservePools(ctx context.Context) (volumeapi.PoolSnapshot, error) {
+	pools, err := f.ReadyPools(ctx)
+	return volumeapi.PoolSnapshot{Registered: pools, Ready: pools}, err
 }
 
 func (f *fakePoolCapacityRegistry) PoolForIdentity(_ context.Context, name, uid, nodeName string) (volumeapi.Pool, error) {
@@ -102,6 +108,14 @@ type capacityTrackingVolumeRegistry struct {
 	poolNodes []string
 }
 
+func (*capacityTrackingVolumeRegistry) CancelUnstartedCreation(context.Context, string, string) error {
+	return volumeapi.ErrStateConflict
+}
+
+func (*capacityTrackingVolumeRegistry) BeginCreationCancellation(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error) {
+	return volumeapi.State{}, volumeapi.ErrStateConflict
+}
+
 func (r *capacityTrackingVolumeRegistry) Get(_ context.Context, id string) (volumeapi.State, error) {
 	unlock := readLock(r.mu)
 	defer unlock()
@@ -146,15 +160,28 @@ func (r *capacityTrackingVolumeRegistry) PoolNodesForGroup(ctx context.Context, 
 	return r.PoolNodes(ctx)
 }
 
-func (r *capacityTrackingVolumeRegistry) BeginCreate(ctx context.Context, volumeID, requestName, nodeName string, capacityBytes int64) (volumeapi.State, error) {
-	return r.BeginCreateInPool(ctx, volumeID, requestName, nodeName, capacityBytes, "pool", "pool-uid")
+func (r *capacityTrackingVolumeRegistry) PoolForIdentity(_ context.Context, name, uid, node string) (volumeapi.Pool, error) {
+	unlock := readLock(r.mu)
+	defer unlock()
+	for _, state := range r.volumes {
+		copy := state.CurrentCopy
+		if copy != nil && copy.PoolName == name && copy.PoolUID == uid && copy.NodeName == node {
+			return volumeapi.Pool{Name: name, UID: uid, NodeName: node, PoolGroup: volumeapi.DefaultPoolGroup}, nil
+		}
+	}
+	return volumeapi.Pool{}, volumeapi.ErrPoolNotFound
 }
 
-func (r *capacityTrackingVolumeRegistry) BeginCreateInPool(ctx context.Context, volumeID, requestName, nodeName string, capacityBytes int64, poolName, poolUID string) (volumeapi.State, error) {
+func (r *capacityTrackingVolumeRegistry) BeginCreate(ctx context.Context, request volumeapi.CreationRequest) (volumeapi.State, error) {
+	volumeID, requestName, nodeName, capacityBytes := request.VolumeID, request.RequestName, request.NodeName, request.CapacityBytes
+	poolName, poolUID := "pool", "pool-uid"
+	if request.Pool != nil {
+		poolName, poolUID = request.Pool.Name, request.Pool.UID
+	}
 	unlock := writeLock(r.mu)
 	defer unlock()
 	if state, ok := r.volumes[volumeID]; ok {
-		if err := validateCreateIntent(state, requestName, nodeName, capacityBytes); err != nil {
+		if err := validateFixtureCreateIntent(state, requestName, nodeName, capacityBytes); err != nil {
 			return volumeapi.State{}, err
 		}
 		return state, nil
@@ -165,7 +192,7 @@ func (r *capacityTrackingVolumeRegistry) BeginCreateInPool(ctx context.Context, 
 		NodeName: nodeName, Role: volume.RoleServing,
 	}
 	state := volumeapi.State{
-		UID: copy.VolumeUID, RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: nodeName,
+		UID: copy.VolumeUID, RequestName: requestName, CapacityBytes: capacityBytes, InitialNode: nodeName, CreationClaim: request.Claim,
 		Phase: volumeapi.PhasePending, OwnerNode: nodeName, CurrentCopy: &copy,
 	}
 	r.volumes[volumeID] = state
@@ -205,8 +232,8 @@ func TestCreateVolumeUsesPoolLimitAndFilesystemCapacity(t *testing.T) {
 		wantCode  codes.Code
 	}{
 		"accepted":             {limit: "128Mi", available: 128 << 20, wantCode: codes.OK},
-		"logical limit":        {limit: "32Mi", available: 128 << 20, wantCode: codes.ResourceExhausted},
-		"filesystem available": {limit: "128Mi", available: 32 << 20, wantCode: codes.ResourceExhausted},
+		"logical limit":        {limit: "32Mi", available: 128 << 20, wantCode: codes.Unavailable},
+		"filesystem available": {limit: "128Mi", available: 32 << 20, wantCode: codes.Unavailable},
 		"missing limit":        {available: 128 << 20, wantCode: codes.FailedPrecondition},
 		"invalid limit":        {limit: "not-a-quantity", available: 128 << 20, wantCode: codes.FailedPrecondition},
 	} {
@@ -295,24 +322,28 @@ func TestCreateVolumeRetriesAnyPoolThatCanFitScheduledConsumer(t *testing.T) {
 }
 
 func TestCreateVolumeUsesHealthyPoolWhenAnotherProbeFails(t *testing.T) {
-	volumes := map[string]volumeapi.State{}
-	service := configuredService(&Service{
-		Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
-		Volumes: &capacityTrackingVolumeRegistry{volumes: volumes},
-		CapacityPools: &fakePoolCapacityRegistry{pools: []volumeapi.Pool{
-			{Name: "failed", UID: "failed-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
-			{Name: "healthy", UID: "healthy-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
-		}},
-		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30},
-			poolErrors: map[string]error{"failed-uid": retryableDirectoryError{errors.New("probe failed")}}},
-	})
-	request := validCreateRequest("worker-a")
-	if _, err := service.CreateVolume(context.Background(), request); err != nil {
-		t.Fatal(err)
-	}
-	id, _ := volume.IDFromName(request.Name)
-	if copy := volumes[id].CurrentCopy; copy == nil || copy.PoolUID != "healthy-uid" {
-		t.Fatalf("healthy candidate was not chosen: %#v", copy)
+	for _, probeErr := range []error{retryableDirectoryError{errors.New("probe failed")}, fmt.Errorf("%w: %w", volumeapi.ErrPoolNotReady, syscall.EROFS)} {
+		t.Run(probeErr.Error(), func(t *testing.T) {
+			volumes := map[string]volumeapi.State{}
+			service := configuredService(&Service{
+				Client: fake.NewClientset(), Namespace: "shiftpv-system", Operator: &fakeDirectoryOperator{},
+				Volumes: &capacityTrackingVolumeRegistry{volumes: volumes},
+				CapacityPools: &fakePoolCapacityRegistry{pools: []volumeapi.Pool{
+					{Name: "failed", UID: "failed-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
+					{Name: "healthy", UID: "healthy-uid", NodeName: "worker-a", CapacityLimit: "1Gi"},
+				}},
+				CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30},
+					poolErrors: map[string]error{"failed-uid": probeErr}},
+			})
+			request := validCreateRequest("worker-a")
+			if _, err := service.CreateVolume(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			id, _ := volume.IDFromName(request.Name)
+			if copy := volumes[id].CurrentCopy; copy == nil || copy.PoolUID != "healthy-uid" {
+				t.Fatalf("healthy candidate was not chosen: %#v", copy)
+			}
+		})
 	}
 }
 
@@ -355,12 +386,13 @@ func TestCreateVolumeRetriesScheduledPodOwnedPVCWhenFilesystemSpaceReturns(t *te
 	}
 }
 
-func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *testing.T) {
+func TestCreateVolumeDenialPreservesPlacementAndRejectsStaleIdentity(t *testing.T) {
 	for name, test := range map[string]struct {
 		change func(*corev1.PersistentVolumeClaim, *corev1.Pod)
 		size   int64
 		limit  string
 		total  int64
+		code   codes.Code
 	}{
 		"no Pod owner":             {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.OwnerReferences = nil }},
 		"consumer not scheduled":   {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) { pod.Spec.NodeName = "" }},
@@ -369,8 +401,8 @@ func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *tes
 		"unrelated Pod volume": {change: func(_ *corev1.PersistentVolumeClaim, pod *corev1.Pod) {
 			pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName = "other"
 		}},
-		"wrong PVC identity": {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.UID = "other" }},
-		"selected node mismatch": {change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) {
+		"wrong PVC identity": {code: codes.FailedPrecondition, change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) { pvc.UID = "other" }},
+		"selected node mismatch": {code: codes.FailedPrecondition, change: func(pvc *corev1.PersistentVolumeClaim, _ *corev1.Pod) {
 			pvc.Annotations[selectedNodeAnnotation] = "worker-b"
 		}},
 		"oversized request": {size: 129 << 20},
@@ -397,8 +429,12 @@ func TestCreateVolumeKeepsReschedulingForUnfixedOrPermanentlyOversizedPVC(t *tes
 			if test.size != 0 {
 				req.CapacityRange.RequiredBytes = test.size
 			}
-			if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != codes.ResourceExhausted {
-				t.Fatalf("capacity denial = %v, want ResourceExhausted", err)
+			want := test.code
+			if want == codes.OK {
+				want = codes.Unavailable
+			}
+			if _, err := service.CreateVolume(context.Background(), req); status.Code(err) != want {
+				t.Fatalf("capacity denial = %v, want %s", err, want)
 			}
 		})
 	}
@@ -472,7 +508,7 @@ func TestCreateVolumeCountsReservationsAtCurrentVolumeOwner(t *testing.T) {
 	req := validCreateRequest("worker-b")
 	req.Name = "new-pvc"
 	_, err := service.CreateVolume(context.Background(), req)
-	if status.Code(err) != codes.ResourceExhausted {
+	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("moved reservation was not charged to current owner: %v", err)
 	}
 }
@@ -496,7 +532,7 @@ func TestCreateVolumeCountsCapacityApprovedMoveAtDestination(t *testing.T) {
 		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
 	})
 	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b"))
-	if status.Code(err) != codes.ResourceExhausted {
+	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("approved move was not charged to destination: %v", err)
 	}
 }
@@ -522,7 +558,7 @@ func TestCreateVolumeRetainsRecoveredMoveCapacityUntilSettled(t *testing.T) {
 		CapacityPools: registry,
 		CapacityProbe: &fakePoolCapacityProbe{stats: poolcapacity.Filesystem{AvailableBytes: 1 << 30}},
 	})
-	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b")); status.Code(err) != codes.ResourceExhausted {
+	if _, err := service.CreateVolume(context.Background(), validCreateRequest("worker-b")); status.Code(err) != codes.Unavailable {
 		t.Fatalf("recovered move released capacity before settlement: %v", err)
 	}
 }
@@ -587,7 +623,7 @@ func TestCreateVolumeSerializesPoolReservationAdmission(t *testing.T) {
 	for range requests {
 		counts[<-results]++
 	}
-	if counts[codes.OK] != 1 || counts[codes.ResourceExhausted] != 1 {
+	if counts[codes.OK] != 1 || counts[codes.Unavailable] != 1 {
 		t.Fatalf("result codes = %v", counts)
 	}
 }
@@ -658,17 +694,30 @@ func TestCreateVolumeReusesExistingVolumeIntentWithoutNewProbe(t *testing.T) {
 }
 
 func TestCreateVolumeFailsClosedOnCapacityProbeError(t *testing.T) {
-	probe := &fakePoolCapacityProbe{err: retryableDirectoryError{errors.New("statfs unavailable")}}
-	client := fake.NewClientset()
-	service := capacityService(client, "1Gi", nil, probe)
+	for name, probeErr := range map[string]error{
+		"retryable directory": retryableDirectoryError{errors.New("statfs unavailable")},
+		"Pool not ready":      volumeapi.ErrPoolNotReady,
+		"invalid inventory":   fmt.Errorf("InventoryInvalid: %w", volumeapi.ErrPoolNotReady),
+		"API conflict":        apierrors.NewConflict(schema.GroupResource{Resource: "shiftpvpools"}, "pool", errors.New("object has been modified")),
+		"API timeout":         apierrors.NewTimeoutError("timed out", 1),
+		"API server timeout":  apierrors.NewServerTimeout(schema.GroupResource{Resource: "shiftpvpools"}, "get", 1),
+		"API throttled":       apierrors.NewTooManyRequests("slow down", 1),
+		"API unavailable":     apierrors.NewServiceUnavailable("offline"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			probe := &fakePoolCapacityProbe{err: probeErr}
+			client := fake.NewClientset()
+			service := capacityService(client, "1Gi", nil, probe)
 
-	_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
-	if status.Code(err) != codes.Unavailable {
-		t.Fatalf("code = %s, want Unavailable: %v", status.Code(err), err)
-	}
-	registry, ok := service.Volumes.(*capacityTrackingVolumeRegistry)
-	if !ok || len(registry.volumes) != 0 {
-		t.Fatalf("probe failure created volume intent: %#v", registry)
+			_, err := service.CreateVolume(context.Background(), validCreateRequest("worker-a"))
+			if status.Code(err) != codes.Unavailable {
+				t.Fatalf("code = %s, want Unavailable: %v", status.Code(err), err)
+			}
+			registry, ok := service.Volumes.(*capacityTrackingVolumeRegistry)
+			if !ok || len(registry.volumes) != 0 {
+				t.Fatalf("probe failure created volume intent: %#v", registry)
+			}
+		})
 	}
 }
 

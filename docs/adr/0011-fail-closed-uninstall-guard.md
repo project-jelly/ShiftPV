@@ -33,6 +33,15 @@ exact Pool UID 참조가 모두 빈 것을 확인한 뒤 해당 UID의 identity 
 안에서 managed data와 marker가 빈 것을 다시 확인하고 exact Pool identity marker만 해제해
 `IdentityReleased` 상태를 기록한다. Controller는 이 상태를 확인한 뒤 finalizer를 해제한다.
 
+한 번도 승인되지 않은 FixedBlock Pool은 등록 취소로 정리한다. Node가 읽기 전용으로 경로 부재 또는
+`.shiftpv` 메타데이터·managed data 부재와 게시 대상 부재를 확인하고, Controller가 API 참조 부재를 승인한 뒤 Node가
+다시 확인해 `IdentityReleased=True / PoolRegistrationCanceled`를 기록한다. 이 경로는 디스크에 쓰지 않으며,
+승인 이력이나 mount·capacity anchor가 있는 Pool에는 적용하지 않는다. 불명확한 경로는 계속 대기한다.
+
+Controller의 `--v=2` 로그는 삭제 단계, blocker 수와 최대 5개의 상세 원인, node release의
+관측 generation을 보고한다. Chart 기본 `controller.logLevel: 2`에서 볼 수 있다.
+진단은 Pool UID 잠금을 해제한 뒤 수행하며 승인·absence proof·finalizer 조건을 바꾸지 않는다.
+
 Unknown orphan은 report-only dependency다. ShiftPV는 설치·Pool·Volume·Move identity가 모호한 path를 자동
 삭제하지 않는다. Emergency bypass는 운영자가 보존 데이터와 복구 책임을 명시적으로 인수하는 별도 절차다.
 

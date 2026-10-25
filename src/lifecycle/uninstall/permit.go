@@ -154,19 +154,21 @@ func (p *PermitStore) Granted(ctx context.Context) (bool, error) {
 }
 
 func (p *PermitStore) Cancel(ctx context.Context, attempt string) error {
-	state, err := p.readState(ctx)
-	if err != nil || state == nil {
-		return err
-	}
-	if state.Data[attemptKey] != attempt {
+	return retryUpdate(ctx, func() error {
+		state, err := p.readState(ctx)
+		if err != nil || state == nil {
+			return err
+		}
+		if state.Data[attemptKey] != attempt {
+			return nil
+		}
+		uid, revision := state.UID, state.ResourceVersion
+		err = p.Client.CoreV1().ConfigMaps(p.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &revision}})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("cancel uninstall quiesce state: %w", err)
+		}
 		return nil
-	}
-	uid := state.UID
-	err = p.Client.CoreV1().ConfigMaps(p.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("cancel uninstall quiesce state: %w", err)
-	}
-	return nil
+	})
 }
 
 func (p *PermitStore) DisableValidation(ctx context.Context, configurationName string) error {

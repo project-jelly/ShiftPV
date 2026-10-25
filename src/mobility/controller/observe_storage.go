@@ -4,7 +4,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -17,11 +16,13 @@ import (
 )
 
 // poolIndex is the Pool half of one observation snapshot, indexed by Pool UID.
-// registered holds every validated ShiftPVPool; ready holds only those whose
-// inventory is currently publishable.
+// registered retains every Pool identity, including rejected registrations;
+// ready holds new allocation candidates; existing holds fresh backing and
+// complete inventory for already-identified copies, regardless of peer health.
 type poolIndex struct {
 	registered map[string]volumeapi.Pool
 	ready      map[string]volumeapi.Pool
+	existing   map[string]volumeapi.Pool
 }
 
 func moveSourceCopy(move volumeapi.Move, state volumeapi.State) *volume.CopyIdentity {
@@ -60,6 +61,23 @@ func (r *Reconciler) observeVolume(ctx context.Context, move volumeapi.Move, res
 		result.FSM.CompletionReady = completionAllowed(move, state, false)
 		return true, nil
 	}
+	// Volume blocking and Move status are separate writes. If the latter loses
+	// its CAS, re-observe the exact failed journal before source/binding checks
+	// can mask it. This diagnoses failure only; Blocked grants no Ready authority.
+	if state.Phase == volumeapi.PhaseBlocked && matchesCommittedDestinationIdentity(move, state, false) &&
+		(move.Status.Phase == string(fsm.PhaseWaitingForDestinationPublish) || move.Status.Phase == string(fsm.PhaseCleaningSource)) {
+		if r.Cleanups == nil {
+			return false, fmt.Errorf("cleanup journal store is not configured")
+		}
+		_, failed, err := r.cleanupState(ctx, move)
+		if err != nil {
+			return false, err
+		}
+		if failed {
+			result.FSM.CleanupFailed = true
+			return true, nil
+		}
+	}
 	result.FSM.OwnerCommitted = hasCommittedDestinationAuthority(move, state, false)
 	return false, nil
 }
@@ -73,9 +91,6 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 	pools := snapshot.Registered
 	index.registered = make(map[string]volumeapi.Pool, len(pools))
 	for _, pool := range pools {
-		if pool.NodeName == "" || !filepath.IsAbs(pool.MountPath) || filepath.Clean(pool.MountPath) == "/" {
-			return index, fmt.Errorf("ShiftPVPool %q has invalid nodeName or mountPath", pool.Name)
-		}
 		if pool.UID == "" {
 			return index, fmt.Errorf("ShiftPVPool %q has no UID", pool.Name)
 		}
@@ -86,8 +101,29 @@ func (r *Reconciler) observePools(ctx context.Context) (poolIndex, error) {
 	}
 	readyPools := snapshot.Ready
 	index.ready = make(map[string]volumeapi.Pool, len(readyPools))
+	index.existing = make(map[string]volumeapi.Pool, len(pools))
 	for _, pool := range readyPools {
+		registered, exists := index.registered[pool.UID]
+		if !exists || registered.Name != pool.Name || registered.NodeName != pool.NodeName {
+			continue
+		}
+		if !pool.BackingConfigurationCheck().OK {
+			continue
+		}
 		index.ready[pool.UID] = pool
+		index.existing[pool.UID] = pool
+	}
+	staleAfter := r.PoolReadinessStaleAfter
+	if staleAfter <= 0 {
+		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
+	}
+	for _, pool := range pools {
+		if _, ready := index.ready[pool.UID]; ready {
+			continue
+		}
+		if usable, _ := pool.InventoryReadyAt(r.now(), staleAfter); usable {
+			index.existing[pool.UID] = pool
+		}
 	}
 	return index, nil
 }
@@ -98,24 +134,20 @@ func (r *Reconciler) observeSource(ctx context.Context, move volumeapi.Move, poo
 	if err != nil && !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("read source Node: %w", err)
 	}
-	sourcePool, sourceReady := indexedCopyPool(pools.ready, moveSourceCopy(move, state))
+	sourcePool, sourceReady := indexedCopyPool(pools.existing, moveSourceCopy(move, state))
 	sourceHealthy := err == nil && admission.NodeReady(sourceNode) && sourceReady && sourceCopyPresent(sourcePool, state.CurrentCopy)
 	result.FSM.SourceHealthy = sourceHealthy
 	result.SourceCordoned = sourceNode != nil && sourceNode.Spec.Unschedulable
 	if !sourceHealthy && !result.FSM.OwnerCommitted {
 		result.FSM.UnsafeReason = "SourceUnavailable"
 	}
-	// Discovery and Node updates are not atomic. A Move may be created from a
-	// cordoned snapshot just after the source was uncordoned. Before any volume
-	// lock or helper action, prefer the current Node observation and let the
-	// reconciler remove that obsolete transaction even if its PVC is disappearing.
-	result.PendingObsolete = move.Status.Phase == string(fsm.PhasePending) && sourceHealthy && !result.SourceCordoned &&
-		state.Phase == volumeapi.PhaseReady && state.ActiveMove == "" && state.OwnerNode == move.Spec.SourceNode
-	if result.PendingObsolete {
-		result.FSM.PreflightDeferred = true
-		result.FSM.UnsafeReason = "SourceNotCordoned"
-		return true, nil
+	if copy := moveSourceCopy(move, state); copy != nil && !result.FSM.OwnerCommitted {
+		if _, registered := indexedCopyPool(pools.registered, copy); !registered {
+			result.FSM.SourceAuthorityInvalid = true
+			result.FSM.UnsafeReason = "SourcePoolIdentityChanged"
+		}
 	}
+
 	return false, nil
 }
 
@@ -173,7 +205,7 @@ func (r *Reconciler) observeDestination(ctx context.Context, move volumeapi.Move
 		if staleAfter <= 0 {
 			staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
 		}
-		if exists && registeredPool.NodeName == result.DestinationNode && pools.capacityIndependent(registeredPool) && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
+		if exists && registeredPool.NodeName == result.DestinationNode && volumeapi.PoolReadyForActiveMoveRepairAt(registeredPool, move, result.Volume, r.now(), staleAfter) {
 			readyPool, ready, repaired = registeredPool, true, true
 		}
 	}
@@ -228,7 +260,11 @@ func destinationGroupMismatch(move volumeapi.Move, pools poolIndex, result *obse
 // Once approved, observation follows only the pinned destination incarnation.
 func destinationObservationPool(move volumeapi.Move, pools poolIndex, result *observation) (volumeapi.Pool, bool) {
 	if uid := move.Status.DestinationPoolUID; uid != "" {
-		pool, ready := pools.ready[uid]
+		candidates := pools.ready
+		if move.Status.CapacityApproved {
+			candidates = pools.existing
+		}
+		pool, ready := candidates[uid]
 		return pool, ready && pool.NodeName == result.DestinationNode
 	}
 	source, exists := indexedCopyPool(pools.registered, moveSourceCopy(move, result.Volume))
@@ -255,15 +291,4 @@ func sourceCopyPresent(pool volumeapi.Pool, copy *volume.CopyIdentity) bool {
 		}
 	}
 	return false
-}
-
-// A repair may bypass only its own inventory problem, never missing or
-// contradictory peer capacity evidence.
-func (p poolIndex) capacityIndependent(pool volumeapi.Pool) bool {
-	peers := make([]volumeapi.Pool, 0, len(p.registered))
-	for _, registered := range p.registered {
-		peers = append(peers, registered)
-	}
-	independent, _ := volumeapi.PoolCapacityIndependent(pool, peers)
-	return independent
 }

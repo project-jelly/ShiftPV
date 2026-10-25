@@ -15,10 +15,12 @@ type fakePools struct {
 	pool      volumeapi.Pool
 	onRequest func(request)
 	requests  int
+	reads     int
 	err       error
 }
 
 func (f *fakePools) ReadyPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error) {
+	f.reads++
 	return f.pool, f.err
 }
 
@@ -133,5 +135,118 @@ func TestClientRejectsChangedInitialAuthority(t *testing.T) {
 	client := &Client{Pools: pools, Fallback: fallback}
 	if _, err := client.StatFSForPool(context.Background(), expected); err == nil || pools.requests != 0 || fallback.calls != 0 {
 		t.Fatalf("changed authority reached execution: requests=%d fallback=%d err=%v", pools.requests, fallback.calls, err)
+	}
+}
+
+func TestClientWithoutFallbackReturnsRetryable(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		name := "unsupported"
+		if supported {
+			name = "answer timeout"
+		}
+		t.Run(name, func(t *testing.T) {
+			pool := testPool()
+			pool.Status.CapacityProbeSupported = supported
+			pools := &fakePools{pool: pool}
+			client := &Client{Pools: pools, Timeout: time.Millisecond}
+			stats, err := client.StatFSForPool(context.Background(), pool)
+			var retryable interface{ Retryable() bool }
+			if !errors.As(err, &retryable) || !retryable.Retryable() || stats != (capacity.Filesystem{}) {
+				t.Fatalf("missing resident probe must retry without allocation: stats=%+v err=%v", stats, err)
+			}
+			if supported && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("internal deadline identity lost: %v", err)
+			}
+			wantRequests := 0
+			if supported {
+				wantRequests = 1
+			}
+			if pools.requests != wantRequests {
+				t.Fatalf("requests=%d want=%d", pools.requests, wantRequests)
+			}
+		})
+	}
+}
+
+func TestClientNonBlockingPoolIsolation(t *testing.T) {
+	pool := testPool()
+	pools := &fakePools{pool: pool}
+	pools.onRequest = func(r request) {
+		pools.pool.Status.CapacityProbe = &volumeapi.PoolCapacityProbeResult{RequestID: r.ID, Evidence: r.Evidence, TotalBytes: 100, AvailableBytes: 50}
+	}
+	client := &Client{Pools: pools, NonBlocking: true}
+	busyPool := pool
+	busyPool.Name, busyPool.UID = "busy-pool", "busy-pool-uid"
+	unlock := client.locks.Lock(busyPool.UID)
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.StatFSForPool(context.Background(), busyPool)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		var retryable interface{ Retryable() bool }
+		if !errors.As(err, &retryable) || !retryable.Retryable() || pools.reads != 0 || pools.requests != 0 {
+			t.Fatalf("busy probe touched authority or did not retry: reads=%d requests=%d err=%v", pools.reads, pools.requests, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("busy probe waited for the Pool lock")
+	}
+	if stats, err := client.StatFSForPool(context.Background(), pool); err != nil || stats.AvailableBytes != 50 {
+		t.Fatalf("independent Pool failed: stats=%+v err=%v", stats, err)
+	}
+	unlock()
+	unlock = nil
+	pools.pool = busyPool
+	if stats, err := client.StatFSForPool(context.Background(), busyPool); err != nil || stats.AvailableBytes != 50 || pools.requests != 2 {
+		t.Fatalf("fresh retry failed after lock release: stats=%+v requests=%d err=%v", stats, pools.requests, err)
+	}
+}
+
+func TestClientDefaultWaitsForPoolLock(t *testing.T) {
+	pool := testPool()
+	pool.Status.CapacityProbeSupported = false
+	pools := &fakePools{pool: pool}
+	fallback := &fakeProbe{stats: capacity.Filesystem{TotalBytes: 100}}
+	client := &Client{Pools: pools, Fallback: fallback}
+	unlock := client.locks.Lock(pool.UID)
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.StatFSForPool(context.Background(), pool)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		unlock()
+		t.Fatalf("default probe did not wait for lock: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-result:
+		if err != nil || fallback.calls != 1 {
+			t.Fatalf("default fallback changed: calls=%d err=%v", fallback.calls, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("default probe did not resume after lock release")
+	}
+}
+
+func TestClientWithoutFallbackPreservesCallerCancellation(t *testing.T) {
+	pool := testPool()
+	pools := &fakePools{pool: pool}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pools.onRequest = func(request) { cancel() }
+	client := &Client{Pools: pools, NonBlocking: true}
+	stats, err := client.StatFSForPool(ctx, pool)
+	var retryable interface{ Retryable() bool }
+	if !errors.Is(err, context.Canceled) || errors.As(err, &retryable) || stats != (capacity.Filesystem{}) || pools.requests != 1 {
+		t.Fatalf("caller cancellation became an internal retry: stats=%+v requests=%d err=%v", stats, pools.requests, err)
 	}
 }

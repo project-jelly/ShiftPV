@@ -121,6 +121,7 @@
       "properties": {
         "enabled": {"type": "boolean"},
         "interval": {"type": "string", "pattern": "^[1-9][0-9]*(ms|s|m)$"},
+        "operationTimeout": {"type": "string", "pattern": "^[1-9][0-9]*(s|m|h)$"},
         "journalRetention": {"type": "string", "pattern": "^[1-9][0-9]*h$"},
         "webhookPort": {"type": "integer", "minimum": 1024, "maximum": 65535},
         "helperImage": {"type": "string"}
@@ -186,6 +187,15 @@
         "staleAfter": {"type": "string", "pattern": "^[1-9][0-9]*(s|m)$"}
       }
     },
+    "capacityTracking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "pollInterval"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "pollInterval": {"type": "string", "pattern": "^[1-9][0-9]*(s|m|h)$"}
+      }
+    },
     "lifecycle": {
       "type": "object",
       "additionalProperties": false,
@@ -195,6 +205,12 @@
           "type": "string",
           "minLength": 1,
           "description": "helm or argocd; the pre-delete guard rejects any other value with a named error"
+        },
+        "preserveRetiredPoolUIDs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "description": "Exact approved retired Pool UIDs retained with CRs, protection finalizers, paths, and storage after uninstall"
         }
       }
     },

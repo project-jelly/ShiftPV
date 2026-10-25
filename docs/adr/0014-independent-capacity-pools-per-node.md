@@ -12,11 +12,14 @@ thick LV나 별도 filesystem을 추가하려면 독립 용량을 Pool별로 구
 
 ## Decision
 
-- `ShiftPVPool` 하나가 독립 용량 단위 하나를 소유한다. 같은 node의 모든 Pool에
+- `ShiftPVPool` 하나가 독립 용량 단위 하나를 소유한다. 같은 node에서 함께 사용하는 Pool에
   `capacityPolicy: FixedBlock`을 요구하며 backing 구간과 경로의 중복을 거부한다.
 - ext4/xfs의 고정 device, partition, thick LVM linear allocation을 검증한다.
   독립성을 증명할 수 없는 thin/shared backing은 승인하지 않는다. 별도 mount에는
   [RequireMountPoint](0013-opt-in-pool-mount-identity.md)를 권장한다.
+- 설정과 실제 backing 검증은 공통 등록 정책을 사용한다. Node는 성공한 등록의
+  `status.registrationApproved`를 보존한다. 미승인 후보의 실패는 기존 승인 Pool과
+  분리하며, 승인된 peer의 backing 증거가 사라지면 신규 배치를 차단한다.
 - `spec.poolGroup`은 StorageClass 선택 범위이며 생략하면 `default`다. class는
   `shiftpv.io/pool-group`으로 그룹을 선택한다. PVC 하나는 수용 가능한 Pool 하나에 고정된다.
 - 예약과 생성·이동·삭제 lock은 Pool UID를 사용한다. 게시·삭제·이동 경로는 저장된

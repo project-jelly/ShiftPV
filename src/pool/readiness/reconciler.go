@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
@@ -19,16 +20,36 @@ type Repository interface {
 }
 
 type Reconciler struct {
-	NodeName   string
-	Pools      Repository
-	Inspector  Inspector
-	Interval   time.Duration
-	Wake       <-chan struct{}
-	Now        func() time.Time
-	Observe    func(volumeapi.Pool, Result, error)
-	ObserveAll func([]Observation, error)
-	Inventory  func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
-	Release    func(context.Context, volumeapi.Pool) error
+	reconcileMu sync.Mutex
+	workMu      sync.Mutex
+	inFlight    map[string]*poolWork
+	// Metrics snapshots retain peers across a targeted retry. Never used as
+	// storage authority; every reconciliation still reads live registrations.
+	lastObservations map[string]Observation
+	NodeName         string
+	Pools            Repository
+	Inspector        Inspector
+	Interval         time.Duration
+	Clock            clock.WithTicker
+	// PoolTimeout bounds each parallel observation and the registration batch.
+	// A blocked host call keeps one worker until it returns, without a retry fanout.
+	PoolTimeout time.Duration
+	Wake        <-chan struct{}
+	Now         func() time.Time
+	Observe     func(volumeapi.Pool, Result, error)
+	ObserveAll  func([]Observation, error)
+	Inventory   func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory
+	Release     func(context.Context, volumeapi.Pool) error
+}
+
+const defaultPoolTimeout = 5 * time.Second
+
+func NewReconciler(nodeName string, pools Repository, inspector Inspector, interval time.Duration) (*Reconciler, error) {
+	r := &Reconciler{NodeName: nodeName, Pools: pools, Inspector: inspector, Interval: interval}
+	if err := r.validate(); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 // Observation is one Pool's result from a node reconciliation pass.
@@ -38,31 +59,20 @@ type Observation struct {
 	Err    error
 }
 
-func (r *Reconciler) Run(ctx context.Context) error {
-	if err := r.validate(); err != nil {
-		return err
-	}
-	if err := r.reconcileAndLog(ctx); err != nil && errors.Is(err, context.Canceled) {
-		return nil
-	}
-	ticker := time.NewTicker(r.Interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-		case <-r.Wake:
-		}
-		if err := r.reconcileAndLog(ctx); err != nil && errors.Is(err, context.Canceled) {
-			return nil
-		}
-	}
+func (r *Reconciler) Reconcile(ctx context.Context) error {
+	_, err := r.reconcile(ctx, nil)
+	return err
 }
 
-func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
+// only selects scheduled retries by Pool UID; nil performs a complete pass.
+func (r *Reconciler) reconcile(ctx context.Context, only map[string]bool) (retry map[string]bool, reconcileErr error) {
 	if err := r.validate(); err != nil {
-		return err
+		return nil, err
+	}
+	r.reconcileMu.Lock()
+	defer r.reconcileMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	var observations []Observation
 	if r.ObserveAll != nil {
@@ -73,49 +83,92 @@ func (r *Reconciler) Reconcile(ctx context.Context) (reconcileErr error) {
 		if r.Observe != nil {
 			r.Observe(volumeapi.Pool{}, Result{}, err)
 		}
-		return err
+		return nil, err
 	}
-	isolation := r.capacityIsolation(pools)
-	observed := false
+	retry = make(map[string]bool)
+	isolation := r.capacityIsolation(ctx, pools, "")
+	observations = r.observeSelectedPools(ctx, pools, isolation, only)
+	for _, observation := range observations {
+		if r.Observe != nil {
+			r.Observe(observation.Pool, observation.Result, observation.Err)
+		}
+		retry[observation.Pool.UID] = observation.Result.RetryInventory
+		reconcileErr = errors.Join(reconcileErr, observation.Err)
+	}
+	reconcileErr = errors.Join(reconcileErr, ctx.Err())
+	if len(observations) == 0 && r.Observe != nil {
+		r.Observe(volumeapi.Pool{}, Result{}, nil)
+	}
+	if r.ObserveAll != nil {
+		observations = r.observationSnapshot(pools, observations)
+	}
+	return retry, reconcileErr
+}
+
+func (r *Reconciler) observationSnapshot(pools []volumeapi.Pool, changed []Observation) []Observation {
+	if r.lastObservations == nil {
+		r.lastObservations = map[string]Observation{}
+	}
+	for _, observation := range changed {
+		r.lastObservations[observation.Pool.UID] = observation
+	}
+	live := make(map[string]Observation)
+	snapshot := make([]Observation, 0, len(pools))
 	for _, pool := range pools {
 		if pool.NodeName != r.NodeName {
 			continue
 		}
-		observed = true
-		result, err := r.reconcilePool(ctx, pool, isolation[pool.UID])
-		observations = append(observations, Observation{Pool: pool, Result: result, Err: err})
-		reconcileErr = errors.Join(reconcileErr, err)
+		observation, ok := r.lastObservations[pool.UID]
+		if !ok || observation.Pool.Generation != pool.Generation {
+			observation = Observation{Pool: pool}
+		}
+		observation.Pool = pool
+		live[pool.UID] = observation
+		snapshot = append(snapshot, observation)
 	}
-	if !observed && r.Observe != nil {
-		r.Observe(volumeapi.Pool{}, Result{}, nil)
-	}
-	return reconcileErr
+	r.lastObservations = live
+	return snapshot
 }
 
 func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, allocation allocationObservation) (result Result, reconcileErr error) {
-	if r.Observe != nil {
-		defer func() { r.Observe(pool, result, reconcileErr) }()
-	}
 	now := time.Now().UTC()
 	if r.Now != nil {
 		now = r.Now().UTC()
 	}
-	if allocation.check.Reason != "" && !allocation.check.OK {
-		result = Result{Independent: allocation.check, Accessible: skipped(), Writable: skipped(), CapacityReadable: skipped()}
-	} else {
-		result = r.Inspector.Inspect(pool)
-		if allocation.unit != nil && !volumeapi.SameCapacityUnit(allocation.unit, result.CapacityUnit) {
-			result.Independent = capacityFailure("CapacityIdentityChanged", fmt.Errorf("capacity allocation changed during node observation"))
-		}
+	if pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
+		status := pool.Status
+		status.Conditions = append([]metav1.Condition(nil), pool.Status.Conditions...)
+		status.RegistrationApproved = pool.RegistrationApproved()
+		status.ObservedGeneration = pool.Generation
+		check := Check{Known: true, Reason: "PoolRegistrationRetired", Message: "registration is retired; storage and identity remain preserved"}
+		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, check, pool.Generation, now))
+		status.Inventory = &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "PoolRegistrationRetired: no storage observation requested"}
+		return Result{}, r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status)
 	}
-	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.Known && result.Mounted.Reason == "" {
-		result.Mounted = skipped()
-	}
-	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && result.Mounted.OK && result.MountIdentity == nil {
-		result.Mounted = Check{Known: true, Reason: "MountIdentityMissing", Message: "mount probe did not return an identity"}
+	result = r.inspectPool(pool, allocation)
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 	status, cleanupReady := r.observedStatus(ctx, pool, result, now)
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if !pool.RegistrationApproved() && status.RegistrationApproved {
+		if err := r.recheckRegistration(ctx, pool, &result); err != nil {
+			return result, err
+		}
+		if !result.Independent.OK && result.Independent.Reason != "" {
+			status, cleanupReady = r.observedStatus(ctx, pool, result, now)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	result.RetryInventory = needsInventoryRetry(status.Inventory)
 	releaseErr := r.recordIdentityRelease(ctx, pool, &status, cleanupReady, now)
+	if err := ctx.Err(); err != nil {
+		return result, errors.Join(err, releaseErr)
+	}
 	return result, errors.Join(r.Pools.SetPoolStatus(ctx, pool.Name, pool.UID, r.NodeName, status), releaseErr)
 }
 
@@ -123,25 +176,38 @@ func (r *Reconciler) reconcilePool(ctx context.Context, pool volumeapi.Pool, all
 // cleanup-ready even though it is no longer eligible for new placement.
 func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, result Result, now time.Time) (volumeapi.PoolStatus, bool) {
 	status := pool.Status
+	status.Conditions = append([]metav1.Condition(nil), pool.Status.Conditions...)
+	status.RegistrationApproved = pool.RegistrationApproved()
 	status.CapacityProbeSupported = true
 	status.ObservedGeneration = pool.Generation
 	status.LastProbeTime = metav1.NewTime(now)
 	status.FilesystemTotalBytes = 0
+	status.FilesystemAvailableBytes = nil
+	status.FilesystemAvailableInodes = nil
 	if result.CapacityReadable.OK {
 		status.FilesystemTotalBytes = result.Filesystem.TotalBytes
+		status.FilesystemAvailableBytes = &result.Filesystem.AvailableBytes
+		status.FilesystemAvailableInodes = &result.Filesystem.AvailableInodes
 	}
 	for _, condition := range conditions(result, pool.Generation, now) {
 		meta.SetStatusCondition(&status.Conditions, condition)
 	}
 	ready := meta.FindStatusCondition(status.Conditions, volumeapi.PoolConditionReady)
-	cleanupReady := ready != nil && ready.Status == metav1.ConditionTrue
-	if pool.DeletionTimestamp != nil && cleanupReady {
+	allocationReady := ready != nil && ready.Status == metav1.ConditionTrue
+	cleanupReady := ownObservationReady(pool, result)
+	configuration := pool.ConfigurationCheck()
+	if !configuration.OK {
+		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, configuration, pool.Generation, now))
+	} else if pool.DeletionTimestamp != nil && allocationReady {
 		meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionReady, Check{
 			Known: true, Reason: "PoolDeregistering", Message: "Pool rejects new placement while deregistration converges",
 		}, pool.Generation, now))
 	}
 	status.Inventory = r.observedInventory(ctx, pool, result, status, now)
-	if cleanupReady && completeInventory(status.Inventory) {
+	if allocationReady && completeInventory(status.Inventory) {
+		if pool.DeletionTimestamp == nil && configuration.OK {
+			status.RegistrationApproved = true
+		}
 		if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && status.MountIdentity == nil {
 			status.MountIdentity = result.MountIdentity
 		}
@@ -154,8 +220,18 @@ func (r *Reconciler) observedStatus(ctx context.Context, pool volumeapi.Pool, re
 }
 
 func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool, result Result, status volumeapi.PoolStatus, now time.Time) *volumeapi.PoolInventory {
-	if result.Independent.Reason != "" && !result.Independent.OK {
+	if pool.DeletingUnapprovedFixedBlock() && r.Inventory != nil {
+		inventory := r.Inventory(ctx, pool, now)
+		return &inventory
+	}
+	if invalidRegistrationCandidate(pool) {
+		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "ConfigurationUnavailable: " + pool.ConfigurationCheck().Reason}
+	}
+	if !pool.RegistrationApproved() && result.Independent.Reason != "" && !result.Independent.OK {
 		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "CapacityUnavailable: " + result.Independent.Reason}
+	}
+	if pool.CapacityPolicy != "" && !result.Backing.OK {
+		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "BackingUnavailable: " + result.Backing.Reason}
 	}
 	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint && !result.Mounted.OK {
 		return &volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now), Message: "MountUnavailable: " + result.Mounted.Reason}
@@ -164,6 +240,7 @@ func (r *Reconciler) observedInventory(ctx context.Context, pool volumeapi.Pool,
 		return status.Inventory
 	}
 	candidate := pool
+	candidate.Status.RegistrationApproved = status.RegistrationApproved
 	if candidate.Status.MountIdentity == nil {
 		candidate.Status.MountIdentity = result.MountIdentity
 	}
@@ -179,6 +256,25 @@ func completeInventory(inventory *volumeapi.PoolInventory) bool {
 	return inventory != nil && inventory.Valid && !inventory.Truncated && inventory.Message == ""
 }
 
+func ownObservationReady(pool volumeapi.Pool, result Result) bool {
+	if !pool.BackingConfigurationCheck().OK {
+		return false
+	}
+	checks := []Check{result.Accessible, result.Writable, result.CapacityReadable}
+	if pool.MountPolicy != "" {
+		checks = append(checks, result.Mounted)
+	}
+	if pool.CapacityPolicy != "" {
+		checks = append(checks, result.Backing)
+	}
+	for _, check := range checks {
+		if !check.Known || !check.OK {
+			return false
+		}
+	}
+	return true
+}
+
 // recordIdentityRelease performs only the exact empty Pool release approved
 // by the controller, then records the node's release evidence in status.
 func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.Pool, status *volumeapi.PoolStatus, cleanupReady bool, now time.Time) error {
@@ -187,10 +283,13 @@ func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.P
 	}
 	release := Check{Known: true, Reason: "PoolIdentityRetained", Message: "Pool identity remains until inventory is empty and complete"}
 	var releaseErr error
-	if pool.IdentityReleaseApproval != pool.UID {
+	if pool.RegistrationApproved() && !cleanupReady {
+		release.Reason = "PoolStorageRestorationRequired"
+		release.Message = "restore the original Pool backing and filesystem headroom; missing storage evidence cannot release its identity"
+	} else if pool.IdentityReleaseApproval != pool.UID {
 		release.Reason = "PoolIdentityReleasePending"
 		release.Message = "Pool identity remains until the controller approves exact release"
-	} else if cleanupReady && emptyInventory(status.Inventory) {
+	} else if (cleanupReady || pool.DeletingUnapprovedFixedBlock()) && emptyInventory(status.Inventory) {
 		if r.Release == nil {
 			release.Reason = "PoolIdentityReleaseUnavailable"
 			release.Message = "node Pool identity release is not configured"
@@ -202,6 +301,10 @@ func (r *Reconciler) recordIdentityRelease(ctx context.Context, pool volumeapi.P
 			release.OK = true
 			release.Reason = "PoolIdentityReleased"
 			release.Message = "exact empty Pool identity was released"
+			if pool.DeletingUnapprovedFixedBlock() {
+				release.Reason = "PoolRegistrationCanceled"
+				release.Message = "unapproved registration has no storage metadata, managed data, or published target"
+			}
 		}
 	}
 	meta.SetStatusCondition(&status.Conditions, condition(volumeapi.PoolConditionIdentityReleased, release, pool.Generation, now))
@@ -212,16 +315,8 @@ func emptyInventory(inventory *volumeapi.PoolInventory) bool {
 	return inventory != nil && inventory.Valid && !inventory.Truncated && inventory.Message == "" && len(inventory.Copies) == 0
 }
 
-func (r *Reconciler) reconcileAndLog(ctx context.Context) error {
-	err := r.Reconcile(ctx)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		klog.Errorf("reconcile ShiftPVPool readiness on node %s: %v", r.NodeName, err)
-	}
-	return err
-}
-
 func (r *Reconciler) validate() error {
-	if r.NodeName == "" || r.Pools == nil || r.Inspector == nil || r.Interval <= 0 {
+	if r == nil || r.NodeName == "" || r.Pools == nil || r.Inspector == nil || r.Interval <= 0 || r.PoolTimeout < 0 {
 		return fmt.Errorf("Pool readiness reconciler configuration is incomplete")
 	}
 	return nil
@@ -231,13 +326,19 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 	accessible := condition(volumeapi.PoolConditionAccessible, result.Accessible, generation, now)
 	writable := condition(volumeapi.PoolConditionWritable, result.Writable, generation, now)
 	capacity := condition(volumeapi.PoolConditionCapacityReadable, result.CapacityReadable, generation, now)
-	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and capacity-readable"}
+	readyCheck := Check{OK: true, Known: true, Reason: "PoolReady", Message: "Pool directory is accessible, writable, and has filesystem headroom"}
 	checks := []Check{}
+	if result.Backing.Reason != "" {
+		checks = append(checks, result.Backing)
+	}
 	if result.Independent.Reason != "" {
 		checks = append(checks, result.Independent)
 	}
 	checks = append(checks, result.Accessible)
 	conditions := []metav1.Condition{accessible}
+	if result.Backing.Reason != "" {
+		conditions = append(conditions, condition(volumeapi.PoolConditionCapacityBackingVerified, result.Backing, generation, now))
+	}
 	if result.Independent.Reason != "" {
 		conditions = append(conditions, condition(volumeapi.PoolConditionCapacityIndependent, result.Independent, generation, now))
 	}
@@ -254,6 +355,12 @@ func conditions(result Result, generation int64, now time.Time) []metav1.Conditi
 			readyCheck.Message = candidate.Message
 			break
 		}
+	}
+	// A small successful write does not establish headroom for a new allocation.
+	// Keep Writable and CapacityReadable as independent observations: exact
+	// already-approved effects still enforce their own write-ahead metadata.
+	if readyCheck.OK && (result.Filesystem.AvailableBytes <= 0 || result.Filesystem.AvailableInodes <= 0) {
+		readyCheck = Check{Known: true, Reason: "NoSpace", Message: "filesystem has no available bytes or inodes for new allocation"}
 	}
 	return append(conditions, condition(volumeapi.PoolConditionReady, readyCheck, generation, now))
 }

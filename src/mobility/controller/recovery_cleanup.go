@@ -65,7 +65,7 @@ func (r *Reconciler) settleSourceRollback(ctx context.Context, move *volumeapi.M
 	}
 	if noDestinationEffectIntent(*move) {
 		if move.Status.CapacityApproved {
-			return false, needsRecoveryCleanupReview("approved destination hold has no exact artifact identities")
+			return false, needsRecoveryCleanupReview("execution approval has no recorded destination plan")
 		}
 		return true, nil
 	}
@@ -101,6 +101,9 @@ func (r *Reconciler) settleSourceRollback(ctx context.Context, move *volumeapi.M
 // before the ordinary retained-source cleanup may run. It reports whether the
 // hold may now be released.
 func (r *Reconciler) settleDestinationCleanup(ctx context.Context, move *volumeapi.Move, state volumeapi.State) (bool, error) {
+	if move.Status.SettlementRequested {
+		return r.settleUnpublishedDestination(ctx, move, state)
+	}
 	if state.Phase != volumeapi.PhaseReady || state.ActiveMove != move.Name || move.Status.DestinationCopy == nil ||
 		state.CurrentCopy == nil || *state.CurrentCopy != *move.Status.DestinationCopy || state.UID != move.Status.DestinationCopy.VolumeUID ||
 		!slices.Contains(state.PublishedNodes, move.Status.DestinationNode) || slices.Contains(state.PublishedNodes, move.Spec.SourceNode) {
@@ -109,7 +112,7 @@ func (r *Reconciler) settleDestinationCleanup(ctx context.Context, move *volumea
 	// The read failure and the ordinary not-yet-published wait are separate
 	// facts. Only the first one carries a cause, so only the first one wraps.
 	copy := move.Status.DestinationCopy
-	destinationPool, err := r.Repository.ReadyPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
+	destinationPool, err := r.Repository.InventoryPoolForIdentity(ctx, copy.PoolName, copy.PoolUID, copy.NodeName)
 	if err != nil {
 		return false, fmt.Errorf("waiting for exact destination scanner publication before source cleanup: %w", err)
 	}
@@ -366,12 +369,12 @@ func (r *Reconciler) settledRollbackJournal(ctx context.Context, move volumeapi.
 	if err != nil {
 		return false, err
 	}
-	if current.Status.Phase == cleanupapi.PhaseCompleted {
-		return true, nil
-	}
-	if current.Spec.Reason != "MoveRollback" || current.Spec.OperationID != volumeapi.MoveRollbackOperationID(move.UID) {
+	if current.Spec.Reason != "MoveRollback" || !cleanupIntentMatches(move, current.Spec) {
 		return false, r.reviewCleanupJournal(ctx, current, "CleanupIntentMismatch",
 			fmt.Sprintf("rollback settlement found cleanup operation %q for reason %q", current.Spec.OperationID, current.Spec.Reason))
+	}
+	if current.Status.Phase == cleanupapi.PhaseCompleted {
+		return r.observeCompletedCleanup(ctx, current)
 	}
 	// Recovery is still Retiring here, so the hold is intact and an executor may
 	// legitimately run; only a lost Pool identity is a contradiction.
@@ -391,6 +394,12 @@ func (r *Reconciler) ensureRecoveryCleanup(ctx context.Context, move volumeapi.M
 		return false, fmt.Errorf("recovery cleanup store is not configured")
 	}
 	err := r.ensureCleanupSpec(ctx, &move, spec)
+	if ctx.Err() != nil {
+		return false, errors.Join(err, ctx.Err())
+	}
+	if errors.Is(err, errCleanupPending) {
+		return false, nil
+	}
 	current, getErr := r.Cleanups.Get(ctx, spec.Authority)
 	if getErr == nil && current.Status.Phase == cleanupapi.PhaseNeedsReview {
 		return false, needsRecoveryCleanupReview("cleanup journal entered NeedsReview: %s: %s", current.Status.Reason, current.Status.Message)

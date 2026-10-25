@@ -5,22 +5,24 @@ This describes the current implementation. Qualification requirements are in [Te
 Cleanup removes only exact non-authoritative ShiftPV copies. There is no
 standalone durable cleanup CR. Durable truth lives in `status.cleanup` on the
 parent `ShiftPVVolume` delete journal/finalizer or the parent `ShiftPVMove`
-rollback/source-cleanup journal/finalizer. Helper Jobs execute filesystem
-effects and own no truth.
+rollback/source-cleanup journal/finalizer. New creation, Volume deletion and Move
+cleanup execute only on resident Nodes. Copy, owner verification and promotion
+still use Jobs; measurement helpers remain (existing-copy usage uses read-only binds).
 
 ## Authority
 
 | Owner | Scope |
 |---|---|
-| Volume journal/finalizer | Delete the committed Volume copy during `DeleteVolume`. |
+| Volume journal/finalizer | Delete the committed copy or cancel the exact unfinished initial copy during `DeleteVolume`. |
 | Move journal/finalizer | Delete rollback artifacts before commit and source copy after commit. |
-| Helper Job | Execute retire, purge, and local receipt effects for the parent journal. |
+| Resident Node | Execute retire, purge, and local receipt effects for the parent journal. |
 | Pool inventory | Report observations; never grants deletion authority by itself. |
 
 Every destructive operation must be derived from a durable exact parent intent.
 Unknown paths are report-only, stale or truncated observations wait, and missing
-intent preserves data. Identity contradiction or terminal executor failure moves
-only the cleanup subjournal to `NeedsReview`.
+intent preserves data. Identity contradiction stops cleanup in `NeedsReview`.
+Only `prepared-v1` Moves execute. Legacy Move records are retained without
+execution unless independently settled history qualifies for metadata GC.
 
 ## Exact Identity
 
@@ -35,7 +37,7 @@ Valid destructive authority requires all of the following:
 |---|---|
 | Parent intent | Exact Volume or Move journal entry exists and still owns the operation |
 | Volume authority | Target is not a live current owner unless this is the Volume delete path |
-| Move authority | Destination owner CAS and actual-publish proof exist before source cleanup |
+| Move authority | Destination owner CAS plus actual publish or separately fenced [workload-retirement proof](volume-mobility.md#workload-retirement) |
 | Publication | No live kubelet mount references the target copy |
 | Pool identity | Pool name/UID/node still match and the protection finalizer is present |
 | Local marker | Copy marker and directory device/inode match the target |
@@ -49,13 +51,64 @@ Valid destructive authority requires all of the following:
 | `Verifying` | API receipt records the exact purged local effect | Request a post-receipt Pool scan |
 | `ConfirmingAbsence` | Post-receipt `scanEpoch` generation fence is recorded | Wait for fresh valid complete absence proof |
 | `Completed` | Receipt and absence proof match operation | Release parent finalizer and capacity hold |
-| `NeedsReview` | Identity contradiction or terminal executor failure | Preserve data; no destructive action |
+| `NeedsReview` | Identity or receipt authority contradiction | Preserve data; no destructive action |
 
 `Completed` is terminal for that exact cleanup operation. It proves one
 operation's receipt and later absence fence; it is not a license to delete again.
 If the exact copy reappears after settlement, it is a report-only anomaly for
 operator review; cleanup does not reopen or auto-delete from the completed
 operation.
+
+## Initial creation
+
+For the chart's `pvc-<UID>` requests with PVC metadata, the controller verifies the
+live original PVC before recording `spec.creationClaim` (namespace/name/UID) in
+the first protected intent. The CRD rejects later addition, removal or change.
+Unknown legacy/standalone provenance stays unknown. Pending retries recheck the
+recorded original; Ready replay and normal PV Delete/Retain behavior are unchanged.
+The creation retirement reconciler observes known, unfinished initial requests.
+It requires the original PVC to be absent, replaced by a different UID, or
+terminating, with no recorded original binding or observed PV handoff. API errors,
+legacy helper responsibility and contradictory state preserve data and accounting.
+Ready Volumes and unfenced unknown provenance remain outside automatic retirement.
+The provisioner's [PV store queue](https://github.com/kubernetes-sigs/sig-storage-lib-external-provisioner/blob/v13.0.0/controller/volume_store.go)
+can finish registering a PV after its PVC ends. No PV yet is not cancellation
+authority for Ready data; preserve the exact copy and its original reservation.
+
+CSI deletion, automatic retirement and explicit per-UID recovery share the same
+creation-only canceller.
+Completion and cancellation compete on the Volume CAS; a Ready winner is never
+converted into normal deletion by this reconciler. A durable cancellation resumes
+after restart without requiring another CreateVolume/DeleteVolume request. Its
+workers use independent bounded API requests and advance resident cleanup without
+waiting for an RPC effect. Settlement continues while provisioning is quiesced.
+
+Explicit cancellation uses `Deleting`, `cancel-create-<VolumeUID>` and cleanup
+reason `CreationCancelled`. It shares the creation lock and verifies serving,
+create-stage and retired paths. An unplaced stage must be empty. A local
+no-effects receipt may contain zero device/inode only for this exact initial-copy
+cancellation; all paths must be absent. The API cleanup receipt and a later
+generation-fenced complete inventory still precede finalization and hold release.
+
+## Execution compatibility
+
+An unfinished legacy creation Pod or Job-bound cleanup, including `Verifying`
+and `ConfirmingAbsence`, must settle on its compatible old writer and helper
+images before upgrade. The candidate neither resumes that executor nor converts
+its binding to a Node.
+
+Completed legacy cleanup history requires valid receipt and absence proof plus
+the exact Job UID, parent authority and execution termination. A retained Job
+must be Complete, inactive and not deleting or Failed; all related Pods must
+have explicit termination evidence for every main, init and ephemeral container.
+If the Job is absent, any remaining Job-owned or receipt-writing Pod blocks
+settlement, even if terminal. Mutable labels do not prove absence. A resident
+Node Pod need not terminate to settle a Node receipt.
+
+A prepared source recovery without cleanup intent closes through its exact
+Retiring CAS settlement and causal rollback fence; helper quiescence is still
+required. Recorded cleanup keeps its receipt/absence requirements, and legacy
+full-plan recovery without independent cleanup proof remains blocked.
 
 ## Terminal Move Journal Retention
 
@@ -66,8 +119,11 @@ default minimum retention is seven days and the Helm value
 
 A journal is eligible only when every gate below is true:
 
-- the Move is `Succeeded` with cleanup `Completed`, or `Blocked` with recovery
-  `Recovered`, capacity approval released, and reason `RecoverySettled`;
+- the Move is `Succeeded` with completed cleanup, `Blocked` with completed
+  recovery and released capacity, or `Cancelled` without execution or cleanup intent;
+- legacy history additionally passes independent settled-transaction validation,
+  no Volume references it, and exact owned, recorded or deterministic helpers
+  have complete quiescence evidence;
 - the controller protection finalizer has already been removed in an earlier
   reconcile and no other finalizer remains;
 - `lastTransitionTime` is valid, is not in the future, and the retention has
@@ -75,8 +131,9 @@ A journal is eligible only when every gate below is true:
 - the current Volume is absent or does not reference this Move as `activeMove`;
 - deletion uses the exact Move name and UID precondition.
 
-Missing or contradictory evidence retains the journal. Journal GC is therefore
-bounded metadata retention after cleanup closure, not a second data GC path.
+Missing or contradictory evidence retains the journal. Reading old status does
+not authorize runtime execution, intent repair or filesystem GC. Unsupported or
+unsettled legacy records remain unchanged.
 
 ## Volume Delete Cleanup
 
@@ -105,10 +162,34 @@ absence is a contradiction, not proof; the cleanup subjournal enters
 
 Move cleanup is parent-owned by the Move journal and finalizer.
 
+An unbound Move cleanup requires a resident Node advertising both
+`shiftpv.io/node-effects: v1` and `shiftpv.io/node-move-cleanup: v1`. Missing
+capability retries the same intent and reservation without creating a Job.
+Existing legacy Job bindings or accepted unbound Jobs block candidate execution
+until the old compatible writer settles them.
+
+The Node advertises this capability only after both Volume and Move watches
+have synced. RPC and watch recovery share the same per-Volume execution gate.
+Every effect and receipt replay rechecks the exact Move UID, active Volume,
+target copy, executor Pod UID and current authority. Rollback uses the recorded
+incoming or destination copy, not the Volume's authoritative source copy.
+
+A Node-bound operation never falls back to a Job on timeout or replacement.
+After the old Pod is absent, another capable Node Pod on the same node may bind
+the same operation and replay its durable local receipt. The Node writes the
+API receipt; the controller still requests a later Pool scan and requires fresh
+absence before releasing the hold. Mobility observes cleanup once per reconcile
+and returns while the executor runs. Node work starts through its synchronized
+watch; CSI deletion retains the direct RPC and bounded wait path.
+
+Apply Node RBAC for Move get/list/watch/status updates before rolling out the new
+Node binary. Finish old execution responsibilities before changing writers or
+helper images; the candidate provides history inspection, not old Job execution.
+
 | Case | Rule |
 |---|---|
 | Precommit abort | Destination incoming or promoted non-owner copy may be purged only from exact Move intent. |
-| Postcommit source cleanup | Source copy may be purged only after destination owner CAS and destination actual-publish proof. |
+| Postcommit source cleanup | Requires committed destination authority and actual publish, or the separate verified workload-retirement proof. |
 | Rollback artifact | Partial copy never promotes; cleanup removes only the exact non-authoritative artifact. |
 | Source capacity | After commit, the Move holds retained source capacity until receipt and fresh absence proof. |
 | Forward recovery | Postcommit cleanup waits and resumes; it never rolls ownership back to source. |
@@ -118,6 +199,40 @@ If precommit recovery settles rollback artifacts, the Move stays `Blocked` with
 Volume returns to source `Ready` with `activeMove` cleared. If postcommit source
 cleanup cannot prove authority, destination remains owner and the Move waits or
 the cleanup subjournal enters `NeedsReview`.
+
+An approved Move missing its full recorded copy/operation plan stops recovery
+with `CleanupNeedsReview` and retains its copies, lock and capacity holds. It
+does not infer an approval or reconstruct the plan by scanning storage.
+
+## Node Metadata Retention
+
+The node metadata collector runs at startup and hourly. Completed reclaim
+`receipt-*.json` and matching `cleanup-*.json` are retained for at least seven
+days (`--metadata-retention`, minimum one hour). Collection requires a canonical
+completed receipt, an unchanged ready Pool and backing filesystem, fresh complete
+inventory, no Volume or Move reference, and no data/copy/placement path. API
+failure, a busy lock, malformed metadata or contradictory evidence retains the
+records. Unlink the redundant intent and sync before unlinking the receipt;
+replay after an interrupted pass remains safe. Historical records at a
+re-registered path require the same installation and no remaining old Pool.
+API checks keep current-Pool candidates volume-locked; the Pool-wide marker lock covers
+only the final local recheck and unlink, so API latency cannot block other
+volumes' marker writes. GC uses a separate API client and rate limiter from
+foreground publish and readiness work.
+
+`lock-<volumeID>` stays for the entire Pool lifetime: unlinking an active lock
+can create two independently locked inodes at one path. Only controller-approved
+empty Pool deregistration removes these locks, while holding `identity.lock`
+and every volume lock. Pool identity removal is synced before lock removal;
+`identity.lock` remains across re-registration. Copy/promotion receipts and
+unknown metadata are preserved; this collector never deletes volume data or
+releases capacity.
+
+Empty Pool deregistration also removes abandoned `placements/pending-<UUIDv4>`
+marker temporary files under `identity.lock`, which all marker writers hold.
+Only regular files owned by the node process, mode `0600`, one link and at most
+8 KiB qualify. Unknown names, symlinks and other contradictions block removal.
+This does not authorize deleting copy data or completed placement markers.
 
 ## Already-Absent Rule
 
@@ -148,8 +263,8 @@ capacity hold.
 | Failure point | Recovery rule |
 |---|---|
 | Node down before cleanup | Wait; resume when the node returns. |
-| Helper Job lost before effect | Recreate from parent journal after live authority recheck. |
-| Helper Job lost after retire | Same Job UID may rebind a new Pod and continue if exact; a different Job UID enters cleanup `NeedsReview`. |
+| Resident Node Pod replaced | After old Pod absence, bind a capable replacement to the same journal; recheck authority and replay the exact local receipt. |
+| Unfinished legacy helper responsibility | Keep its journal and holds; settle with the compatible old writer before transition. |
 | Unlink succeeds, receipt lost | Reconstruct result only with prior exact intent and local effect evidence, then request the post-receipt absence fence. |
 | API timeout recording receipt | Read back receipt; retry idempotently if absent. |
 | Copy reappears after completion | Report anomaly only; do not reopen the completed operation or auto-delete. |

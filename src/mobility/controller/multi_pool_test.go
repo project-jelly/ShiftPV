@@ -7,9 +7,12 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	ktesting "k8s.io/client-go/testing"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
-	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -28,14 +31,17 @@ func (p *poolAwareCapacityProbe) StatFSForPool(_ context.Context, pool volumeapi
 	return poolcapacity.Filesystem{AvailableBytes: 128 << 20}, nil
 }
 
-func TestMoveCapacitySelectsIndependentPoolOnDestinationNode(t *testing.T) {
+func TestMoveCapacityConvertsExactHoldAmongSameNodePools(t *testing.T) {
 	r, repo, move := capacityCostFixture()
 	repo.pools[1].Name = "a-full"
 	repo.pools = append(repo.pools, volumeapi.Pool{Name: "b-free", UID: "free-uid", NodeName: "destination", MountPath: "/free", CapacityLimit: "128Mi"},
 		volumeapi.Pool{Name: "c-other", UID: "other-uid", NodeName: "destination", MountPath: "/other", CapacityLimit: "1Ti", PoolGroup: "other"})
 	repo.volumes["existing"] = volumeapi.State{OwnerNode: "destination", CapacityBytes: 128 << 20}
+	// Logical admission already chose the independent Pool; execution must use that exact hold.
+	prepareCapacityMove(repo, &move, repo.pools[2])
 	probe := &poolAwareCapacityProbe{}
 	r.CapacityProbe = probe
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	if err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err != nil {
 		t.Fatal(err)
 	}
@@ -45,22 +51,20 @@ func TestMoveCapacitySelectsIndependentPoolOnDestinationNode(t *testing.T) {
 	if probe.measured == nil || probe.measured.PoolUID != "source-uid" {
 		t.Fatalf("source usage identity = %+v", probe.measured)
 	}
-	// Replaying approval must neither double-count its hold nor select another Pool.
+	// Approval is a one-time transition; subsequent observations keep its exact Pool.
 	probe.probed = nil
-	if err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err != nil {
-		t.Fatal(err)
+	eligible, err := r.destinationPools(context.Background(), move, "destination")
+	if err != nil || len(eligible) != 1 || eligible[0].UID != "free-uid" || len(probe.probed) != 0 {
+		t.Fatalf("approved Pool was reallocated: %+v %v", eligible, err)
 	}
-	if len(probe.probed) != 0 || move.Status.DestinationPoolUID != "free-uid" {
-		t.Fatal("approved hold was reallocated")
-	}
-	// A recreated Pool with spare space cannot inherit the approved UID.
 	repo.pools[2].UID = "replacement-uid"
-	if err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err == nil {
+	if _, err := r.destinationPools(context.Background(), move, "destination"); err == nil {
 		t.Fatal("recreated Pool inherited approval")
 	}
 	if !move.Status.CapacityApproved || move.Status.DestinationPoolUID != "free-uid" {
-		t.Fatal("failed retry released durable hold")
+		t.Fatal("failed observation released durable hold")
 	}
+
 }
 
 func TestMoveCapacityHoldsRemainScopedToExactPool(t *testing.T) {
@@ -76,10 +80,18 @@ func TestMoveCapacityHoldsRemainScopedToExactPool(t *testing.T) {
 	held.Status.SourceCopy = state.CurrentCopy
 	repo.moves = append(repo.moves, held)
 	_, logical, physical, _, err := r.destinationCapacityForPool(context.Background(), current, repo.pools[1])
-	if err != nil || logical != 0 || physical != 0 {
+	if err != nil || logical != 32<<20 || physical != 0 {
 		t.Fatalf("other Pool's hold leaked: logical=%d physical=%d err=%v", logical, physical, err)
 	}
-	_, logical, physical, _, err = r.destinationCapacityForPool(context.Background(), current, other)
+	states, err := repo.ListVolumes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logical, err = poolcapacity.ReservedBytesForPool(states, repo.moves, other.UID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physical, err = pendingPhysicalBytes(current, other, states, repo.moves)
 	if err != nil || logical != 100<<20 || physical != 100<<20 {
 		t.Fatalf("selected Pool's hold missing: logical=%d physical=%d err=%v", logical, physical, err)
 	}
@@ -97,7 +109,7 @@ func TestMoveResourcesUsePinnedPoolsAmongSameNodeRegistrations(t *testing.T) {
 		{Name: "source-extra", UID: "source-extra-uid", NodeName: "source", MountPath: "/wrong-source"},
 		{Name: "destination-extra", UID: "destination-extra-uid", NodeName: "destination", MountPath: "/wrong-destination"},
 	}, w.repository.pools...)
-	if err := w.reconciler.prepareMoveCopyIdentities(w.ctx, &w.move); err != nil {
+	if err := prepareMoveCopyIdentitiesForPool(&w.move, w.repository.pools[3]); err != nil {
 		t.Fatal(err)
 	}
 	names := namesFor(w.move.Name)
@@ -132,6 +144,7 @@ func TestMoveObservationFollowsPinnedPoolReadiness(t *testing.T) {
 	w.repository.volumes[w.volumeID] = state
 	w.move.Status.DestinationNode = "destination"
 	w.move.Status.DestinationPoolUID = "destination-pool-uid"
+	w.move = preparedFixtureMove(w.move)
 	w.move.Status.CapacityApproved = true
 	w.repository.pools = append(w.repository.pools, volumeapi.Pool{Name: "extra", UID: "extra-uid", NodeName: "destination", MountPath: "/extra"})
 	w.repository.readyPoolsConfigured = true
@@ -151,53 +164,55 @@ func TestMoveObservationFollowsPinnedPoolReadiness(t *testing.T) {
 	}
 }
 
-type approvalFailureRepository struct {
-	*memoryRepository
-	accepted bool
-	writes   int
-}
-
-func (r *approvalFailureRepository) SetMoveStatus(ctx context.Context, name, uid string, status volumeapi.MoveStatus) error {
-	if !status.CapacityApproved {
-		return r.memoryRepository.SetMoveStatus(ctx, name, uid, status)
-	}
-	r.writes++
-	if r.accepted {
-		if err := r.memoryRepository.SetMoveStatus(ctx, name, uid, status); err != nil {
-			return err
-		}
-	}
-	return fmt.Errorf("capacity status timeout")
-}
-
 func TestCapacityApprovalFailureIsNotReplayedByDiagnostics(t *testing.T) {
 	for _, accepted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("accepted=%v", accepted), func(t *testing.T) {
-			w := newMobilityWalk()
-			w.observeAndLock(t)
-			state := w.repository.volumes[w.volumeID]
-			state.CapacityBytes = 32 << 20
-			w.repository.volumes[w.volumeID] = state
-			w.ensurePlacementOnDestination(t)
-			w.move.Status.Phase = string(fsm.PhaseWaitingForCapacity)
-			w.move.Status.CapacityApproved = false
-			w.move.Status.DestinationPoolUID = ""
-			w.move.Status.DestinationNode = "destination"
-			w.repository.moves[0] = w.move
-			for i := range w.repository.pools {
-				w.repository.pools[i].CapacityLimit = "128Mi"
+			f, move := preparationAtCapacity(t)
+			failure := errors.New("approval response lost or rejected")
+			writes := 0
+			f.dynamic.PrependReactor("update", "shiftpvmoves", func(action ktesting.Action) (bool, runtime.Object, error) {
+				object := action.(ktesting.UpdateAction).GetObject().(*unstructured.Unstructured)
+				approved, _, _ := unstructured.NestedBool(object.Object, "status", "capacityApproved")
+				if action.GetSubresource() != "status" || !approved {
+					return false, nil, nil
+				}
+				writes++
+				if !accepted {
+					return true, nil, failure
+				}
+				return false, nil, nil
+			})
+			f.afterWrite = func(resource schema.GroupVersionResource, object *unstructured.Unstructured) error {
+				approved, _, _ := unstructured.NestedBool(object.Object, "status", "capacityApproved")
+				if resource == volumeapi.MoveResource && approved {
+					return failure
+				}
+				return nil
 			}
-			w.reconciler.CapacityProbe = fakeMoveCapacityProbe{usage: 1, stats: poolcapacity.Filesystem{AvailableBytes: 128 << 20}}
-			w.reconciler.PoolLocks = &poolcapacity.Locker{}
-			repository := &approvalFailureRepository{memoryRepository: w.repository, accepted: accepted}
-			w.reconciler.Repository = repository
-			err := w.reconciler.reconcileMove(w.ctx, w.move)
-			if !errors.Is(err, errCapacityApprovalPersistence) || repository.writes != 1 {
-				t.Fatalf("approval was replayed outside its lock: writes=%d err=%v", repository.writes, err)
+			err := f.reconciler.reconcileMove(f.ctx, move)
+			if !errors.Is(err, errCapacityApprovalPersistence) || !errors.Is(err, failure) || writes != 1 {
+				t.Fatalf("approval was replayed outside its lock: writes=%d err=%v", writes, err)
 			}
-			if w.repository.moves[0].Status.CapacityApproved != accepted {
-				t.Fatalf("ambiguous response changed durable approval: %+v", w.repository.moves[0].Status)
+			persisted := f.move(t, 0)
+			if persisted.Status.CapacityApproved != accepted {
+				t.Fatalf("ambiguous response changed approval: %+v", persisted.Status)
+			}
+			if accepted {
+				persisted.Status.RecoveryPhase = recoveryRetiring
+				if err := validRollbackIntent(persisted); err != nil {
+					t.Fatal(err)
+				}
+			} else if !noDestinationEffectIntent(persisted) || persisted.Status.Preparation == nil {
+				t.Fatal("rejected approval changed the logical hold or execution plan")
 			}
 		})
 	}
+}
+
+func (p *poolAwareCapacityProbe) AdvanceSourceUsage(ctx context.Context, _ volumeapi.Move, copy volume.CopyIdentity) (int64, bool, error) {
+	measured, err := p.VolumeUsageForCopy(ctx, copy)
+	return measured, true, err
+}
+func (p *poolAwareCapacityProbe) FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error) {
+	return true, nil
 }

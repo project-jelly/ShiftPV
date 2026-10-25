@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -12,14 +13,14 @@ import (
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/provisioning/consumer"
+	"github.com/project-jelly/ShiftPV/src/provisioning/creation"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -45,10 +46,12 @@ type VolumeRegistry interface {
 	Get(context.Context, string) (volumeapi.State, error)
 	Delete(context.Context, string, string) error
 	RemoveVolumeFinalizer(context.Context, string, string) error
+	CancelUnstartedCreation(context.Context, string, string) error
+	BeginCreationCancellation(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error)
 	PoolNodes(context.Context) ([]string, error)
 	PoolNodesForGroup(context.Context, string) ([]string, error)
-	BeginCreate(context.Context, string, string, string, int64) (volumeapi.State, error)
-	BeginCreateInPool(context.Context, string, string, string, int64, string, string) (volumeapi.State, error)
+	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
+	BeginCreate(context.Context, volumeapi.CreationRequest) (volumeapi.State, error)
 	CompleteCreate(context.Context, string, string, volume.CopyIdentity) error
 	BeginDelete(context.Context, string, string, volume.CopyIdentity) (volumeapi.State, error)
 }
@@ -58,15 +61,20 @@ type ProvisioningGate interface {
 }
 
 type cleanupOperator interface {
-	Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error)
+	Reclaim(context.Context, cleanupapi.Cleanup, cleanupapi.Journal) (cleanupapi.Cleanup, error)
 }
 
 type Service struct {
 	csi.UnimplementedControllerServer
-	Client                  kubernetes.Interface
-	Namespace               string
-	Operator                DirectoryOperator
-	Volumes                 VolumeRegistry
+	Client            kubernetes.Interface
+	Namespace         string
+	Operator          DirectoryOperator
+	Volumes           VolumeRegistry
+	CreationInspector interface {
+		CreationExists(context.Context, volume.CopyIdentity) (bool, error)
+	}
+	CreationClaims          creation.ClaimInspection
+	ConsumerPlacement       consumer.Inspection
 	CapacityPools           PoolCapacityRegistry
 	CapacityProbe           PoolCapacityProbe
 	PoolLocks               *poolcapacity.Locker
@@ -75,6 +83,7 @@ type Service struct {
 	ObserveStep             func(string, time.Duration)
 	RetryRequests           interface {
 		Register(namespace, name, uid, node, group string, requested int64)
+		RegisterObservation(namespace, name, uid, node, group string, observed volumeapi.Pool)
 	}
 	ProvisioningGate ProvisioningGate
 	Cleanups         *cleanupapi.Store
@@ -98,13 +107,16 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		}
 		defer leave()
 	}
-	unlock := s.lifecycles.Lock(request.id)
+	unlock := s.observeLock("create_volume_lock_wait", request.id, &s.lifecycles, request.id)
 	defer unlock()
-	if err := s.ensureNoCleanupFence(ctx, request.id); err != nil {
-		return nil, err
+	fenceDone := s.observeStep("create_cleanup_fence", request.id)
+	fenceErr := s.ensureNoCleanupFence(ctx, request.id)
+	fenceDone()
+	if fenceErr != nil {
+		return nil, fenceErr
 	}
 
-	state, beginErr := s.beginCreate(ctx, request.id, request.name, request.nodeName, request.capacity, req.GetParameters())
+	state, beginErr := s.beginCreate(ctx, request, req.GetParameters())
 	if beginErr != nil {
 		if errors.Is(beginErr, volumeapi.ErrPoolCopyConflict) {
 			return nil, status.Error(codes.FailedPrecondition, beginErr.Error())
@@ -114,55 +126,31 @@ func (s *Service) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest
 		}
 		return nil, kubernetesAPIError("record volume creation intent", beginErr)
 	}
-	if err := s.createServingCopy(ctx, request.id, state); err != nil {
-		return nil, err
+	responseNode := state.OwnerNode
+	if state.Phase != volumeapi.PhaseReady {
+		if err := s.createServingCopy(ctx, request.id, state); err != nil {
+			return nil, err
+		}
+		responseNode = state.InitialNode
 	}
-	poolNodes, poolErr := s.Volumes.PoolNodesForGroup(ctx, requestedPoolGroup(req.GetParameters()))
+	return s.createVolumeResponse(ctx, request.id, responseNode, state.CapacityBytes, req.GetParameters())
+}
+
+func (s *Service) createVolumeResponse(ctx context.Context, id, nodeName string, capacity int64, parameters map[string]string) (*csi.CreateVolumeResponse, error) {
+	defer s.observeStep("create_topology", id)()
+	poolNodes, poolErr := s.Volumes.PoolNodesForGroup(ctx, requestedPoolGroup(parameters))
 	if poolErr != nil {
 		return nil, kubernetesAPIError("list volume topology", poolErr)
 	}
-	if !slices.Contains(poolNodes, request.nodeName) {
-		return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", request.nodeName)
+	if !slices.Contains(poolNodes, nodeName) {
+		return nil, status.Errorf(codes.FailedPrecondition, "selected node %q has no registered ShiftPVPool", nodeName)
 	}
-	accessibleNodes, err := s.accessibleNodes(ctx, req.GetParameters(), request.nodeName, poolNodes)
+	accessibleNodes, err := s.accessibleNodes(ctx, parameters, nodeName, poolNodes)
 	if err != nil {
 		return nil, err
 	}
 
-	return volumeResponse(request.id, request.nodeName, accessibleNodes, request.capacity), nil
-}
-
-// createRequest is the exact volume identity a validated CSI request names.
-type createRequest struct {
-	id       string
-	name     string
-	nodeName string
-	capacity int64
-}
-
-func parseCreateRequest(req *csi.CreateVolumeRequest) (createRequest, error) {
-	if req.GetName() == "" {
-		return createRequest{}, status.Error(codes.InvalidArgument, "name is required")
-	}
-	if err := validateCapabilities(req.GetVolumeCapabilities()); err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	if err := validateParameters(req.GetParameters()); err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	capacity, err := requestedCapacity(req.GetCapacityRange())
-	if err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	nodeName, err := selectedNode(req.GetAccessibilityRequirements())
-	if err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	id, err := volume.IDFromName(req.GetName())
-	if err != nil {
-		return createRequest{}, status.Error(codes.InvalidArgument, err.Error())
-	}
-	return createRequest{id: id, name: req.GetName(), nodeName: nodeName, capacity: capacity}, nil
+	return volumeResponse(id, nodeName, accessibleNodes, capacity), nil
 }
 
 // createServingCopy performs the node-local create effect and records its
@@ -172,13 +160,22 @@ func (s *Service) createServingCopy(ctx context.Context, id string, state volume
 	if state.CurrentCopy == nil {
 		return status.Error(codes.FailedPrecondition, "volume creation has no copy identity")
 	}
-	if createErr := s.Operator.CreateCopy(ctx, *state.CurrentCopy); createErr != nil {
+	createDone := s.observeStep("create_directory", id)
+	createErr := s.Operator.CreateCopy(ctx, *state.CurrentCopy)
+	createDone()
+	if createErr != nil {
 		return directoryOperationError("prepare identified volume directory", createErr)
 	}
-	if completeErr := s.Volumes.CompleteCreate(ctx, id, state.UID, *state.CurrentCopy); completeErr != nil {
+	completeDone := s.observeStep("create_complete", id)
+	completeErr := s.Volumes.CompleteCreate(ctx, id, state.UID, *state.CurrentCopy)
+	completeDone()
+	if completeErr != nil {
 		return kubernetesAPIError("complete volume creation", completeErr)
 	}
-	if finalizeErr := s.Operator.FinalizeCreate(ctx, *state.CurrentCopy); finalizeErr != nil {
+	finalizeDone := s.observeStep("create_finalize", id)
+	finalizeErr := s.Operator.FinalizeCreate(ctx, *state.CurrentCopy)
+	finalizeDone()
+	if finalizeErr != nil {
 		return directoryOperationError("settle volume creation helper", finalizeErr)
 	}
 	return nil
@@ -212,110 +209,11 @@ func (s *Service) accessibleNodes(ctx context.Context, parameters map[string]str
 	return poolNodes, nil
 }
 
-func (s *Service) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	if req.GetVolumeId() == "" {
-		return nil, status.Error(codes.InvalidArgument, "volume ID is required")
-	}
-	if err := volume.ValidateID(req.GetVolumeId()); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	if err := s.validate(); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	unlock := s.lifecycles.Lock(req.GetVolumeId())
-	defer unlock()
-	volumeState, exists, stateErr := s.deletableState(ctx, req.GetVolumeId())
-	if stateErr != nil {
-		return nil, stateErr
-	}
-	if !exists {
-		return &csi.DeleteVolumeResponse{}, nil
-	}
-	fenced, fenceErr := s.Volumes.BeginDelete(ctx, req.GetVolumeId(), volumeState.UID, *volumeState.CurrentCopy)
-	if fenceErr != nil {
-		if errors.Is(fenceErr, volumeapi.ErrStateConflict) {
-			return nil, status.Errorf(codes.FailedPrecondition, "fence volume deletion: %v", fenceErr)
-		}
-		return nil, kubernetesAPIError("fence volume deletion", fenceErr)
-	}
-	if err := s.settleVolumeCleanup(ctx, req.GetVolumeId(), fenced); err != nil {
-		return nil, err
-	}
-	if err := s.Volumes.Delete(ctx, req.GetVolumeId(), fenced.UID); err != nil {
-		return nil, kubernetesAPIError("delete volume state", err)
-	}
-	if err := s.Volumes.RemoveVolumeFinalizer(ctx, req.GetVolumeId(), fenced.UID); err != nil {
-		return nil, kubernetesAPIError("release settled volume cleanup protection", err)
-	}
-	return &csi.DeleteVolumeResponse{}, nil
-}
-
-// deletableState reads the live volume state and reports whether a deletion
-// still has work to do. An absent object is an already completed deletion.
-func (s *Service) deletableState(ctx context.Context, volumeID string) (volumeapi.State, bool, error) {
-	state, stateErr := s.Volumes.Get(ctx, volumeID)
-	if stateErr != nil && !apierrors.IsNotFound(stateErr) {
-		return volumeapi.State{}, false, kubernetesAPIError("read volume state", stateErr)
-	}
-	if stateErr != nil {
-		return volumeapi.State{}, false, nil
-	}
-	if state.OwnerNode == "" {
-		return volumeapi.State{}, false, status.Error(codes.FailedPrecondition, "volume has no owner node")
-	}
-	if state.UID == "" || state.CurrentCopy == nil || state.CurrentCopy.Role != volume.RoleServing {
-		return volumeapi.State{}, false, status.Error(codes.FailedPrecondition, "identified volume state is required for cleanup")
-	}
-	return state, true, nil
-}
-
-// settleVolumeCleanup records the cleanup intent, runs the node-local effect
-// while it is still pending, and requires a fresh post-receipt absence proof
-// before the caller may remove the volume's durable state.
-func (s *Service) settleVolumeCleanup(ctx context.Context, volumeID string, fenced volumeapi.State) error {
-	defer s.observeStep("delete_settle", volumeID)()
-	cleanup, ensureErr := s.Cleanups.Ensure(ctx, cleanupapi.Spec{
-		OperationID: fenced.DeletionOperationID,
-		Target:      *fenced.CurrentCopy,
-		Reason:      "VolumeDelete",
-		Authority: cleanupapi.Authority{
-			Kind: "ShiftPVVolume", Name: volumeID, UID: fenced.UID,
-		},
-	})
-	if ensureErr != nil {
-		return kubernetesAPIError("record volume cleanup intent", ensureErr)
-	}
-	if cleanup.Status.Phase == cleanupapi.PhasePending || cleanup.Status.Phase == cleanupapi.PhaseRunning {
-		cleanup, ensureErr = s.CleanupOperator.Reclaim(ctx, cleanup, s.Cleanups)
-		if ensureErr != nil {
-			return directoryOperationError("reclaim identified volume copy", ensureErr)
-		}
-	}
-	if cleanup.Status.Phase == cleanupapi.PhaseNeedsReview {
-		return status.Errorf(codes.FailedPrecondition, "cleanup %q requires review: %s", cleanup.Name, cleanup.Status.Message)
-	}
-	if cleanup.Status.Phase != cleanupapi.PhaseVerifying && cleanup.Status.Phase != cleanupapi.PhaseConfirmingAbsence && cleanup.Status.Phase != cleanupapi.PhaseCompleted {
-		return status.Errorf(codes.FailedPrecondition, "cleanup is phase=%q", cleanup.Status.Phase)
-	}
-	cleanup, settled, settleErr := s.Cleanups.ReconcileAbsence(ctx, cleanup)
-	if settleErr == nil && !settled {
-		cleanup, settled, settleErr = s.Cleanups.WaitForAbsence(ctx, cleanup, s.CleanupAbsenceWait)
-	}
-	if settleErr != nil {
-		if errors.Is(settleErr, cleanupapi.ErrConflict) {
-			return status.Errorf(codes.FailedPrecondition, "verify exact cleanup absence: %v", settleErr)
-		}
-		return kubernetesAPIError("verify exact cleanup absence", settleErr)
-	}
-	if !settled || cleanup.Status.Phase != cleanupapi.PhaseCompleted {
-		return status.Errorf(codes.Unavailable, "cleanup %q is waiting for a fresh post-receipt Pool absence proof", cleanup.Name)
-	}
-	return nil
-}
-
 func (s *Service) ControllerGetCapabilities(context.Context, *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
 	return &csi.ControllerGetCapabilitiesResponse{Capabilities: []*csi.ControllerServiceCapability{{
 		Type: &csi.ControllerServiceCapability_Rpc{Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME}},
+	}, {
+		Type: &csi.ControllerServiceCapability_Rpc{Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_GET_CAPACITY}},
 	}}}, nil
 }
 
@@ -336,17 +234,64 @@ func (s *Service) ValidateVolumeCapabilities(_ context.Context, req *csi.Validat
 	}}, nil
 }
 
-func (s *Service) beginCreate(ctx context.Context, id, requestName, nodeName string, capacity int64, parameters map[string]string) (volumeapi.State, error) {
+func (s *Service) beginCreate(ctx context.Context, request createRequest, parameters map[string]string) (volumeapi.State, error) {
 	if s.CapacityPools != nil || s.CapacityProbe != nil {
 		if s.CapacityPools == nil || s.CapacityProbe == nil {
 			return volumeapi.State{}, status.Error(codes.Internal, "Pool capacity admission is incompletely configured")
 		}
-		return s.beginCreateWithinPool(ctx, id, requestName, nodeName, capacity, parameters)
+		return s.beginCreateWithinPool(ctx, request, parameters)
+	}
+	existing, err := s.Volumes.Get(ctx, request.id)
+	if err == nil && existing.Phase == volumeapi.PhaseReady {
+		return s.resumeReadyCreate(ctx, existing, request, parameters)
 	}
 	if requestedPoolGroup(parameters) != volumeapi.DefaultPoolGroup {
 		return volumeapi.State{}, status.Error(codes.FailedPrecondition, "Pool group selection requires Pool capacity admission")
 	}
-	return s.Volumes.BeginCreate(ctx, id, requestName, nodeName, capacity)
+	if err == nil {
+		if err := s.validateExistingCreate(ctx, existing, request, parameters); err != nil {
+			return volumeapi.State{}, err
+		}
+		return s.Volumes.BeginCreate(ctx, volumeapi.CreationRequest{VolumeID: request.id, RequestName: existing.RequestName, NodeName: existing.InitialNode, CapacityBytes: existing.CapacityBytes, Claim: existing.CreationClaim})
+	}
+	if !apierrors.IsNotFound(err) {
+		return volumeapi.State{}, kubernetesAPIError("read volume creation intent", err)
+	}
+	intent, err := s.newCreationRequest(ctx, request, parameters)
+	if err != nil {
+		return volumeapi.State{}, err
+	}
+	return s.Volumes.BeginCreate(ctx, intent)
+}
+
+func (s *Service) validateExistingCreate(ctx context.Context, existing volumeapi.State, request createRequest, parameters map[string]string) error {
+	if err := compatibleCreateRequest(existing, request); err != nil {
+		return err
+	}
+	if err := s.validateCreationClaim(ctx, existing); err != nil {
+		return err
+	}
+	if request.nodeName == existing.InitialNode || (parameters[PVCNamespaceKey] == "" && parameters[PVCNameKey] == "") {
+		return nil
+	}
+	// A broad CSI topology does not prove that a Kubernetes consumer can move.
+	if s.ConsumerPlacement == nil {
+		return status.Error(codes.Unavailable, "consumer placement inspection is not configured")
+	}
+	placement, err := s.ConsumerPlacement.Inspect(ctx, consumer.Request{
+		Namespace: parameters[PVCNamespaceKey], Name: parameters[PVCNameKey],
+		UID: strings.TrimPrefix(request.name, "pvc-"), Node: existing.InitialNode,
+	})
+	if errors.Is(err, consumer.ErrIdentity) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "inspect existing PVC placement: %v", err)
+	}
+	if placement.Placement != consumer.Fixed && placement.Placement != consumer.Reschedulable {
+		return status.Error(codes.Unavailable, "existing PVC placement is unproven")
+	}
+	return nil
 }
 
 func (s *Service) validate() error {
@@ -363,7 +308,7 @@ func kubernetesAPIError(operation string, err error) error {
 		code = codes.Canceled
 	case errors.Is(err, context.DeadlineExceeded):
 		code = codes.DeadlineExceeded
-	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
+	case apierrors.IsConflict(err), apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err), apierrors.IsServiceUnavailable(err):
 		code = codes.Unavailable
 	}
 	return status.Errorf(code, "%s: %v", operation, err)
@@ -393,71 +338,6 @@ func volumeResponse(id, nodeName string, poolNodes []string, capacity int64) *cs
 	}}
 }
 
-func requestedCapacity(capacityRange *csi.CapacityRange) (int64, error) {
-	if capacityRange == nil {
-		return 0, fmt.Errorf("capacity range is required")
-	}
-	required := capacityRange.GetRequiredBytes()
-	limit := capacityRange.GetLimitBytes()
-	if required <= 0 {
-		return 0, fmt.Errorf("required capacity must be greater than zero")
-	}
-	if limit > 0 && required > limit {
-		return 0, fmt.Errorf("required capacity exceeds the limit")
-	}
-	return required, nil
-}
-
-func validateParameters(parameters map[string]string) error {
-	for key, value := range parameters {
-		switch key {
-		case PVCNameKey, PVCNamespaceKey, PVNameKey:
-			// Added by csi-provisioner --extra-create-metadata, not by the StorageClass.
-		case CapacityEnforcementKey:
-			// Kept as a no-op because StorageClass parameters are immutable.
-			if value != capacityEnforcementNone {
-				return fmt.Errorf("unsupported StorageClass parameter %q value %q", key, value)
-			}
-		case PoolGroupKey:
-			if len(validation.IsDNS1123Label(value)) != 0 {
-				return fmt.Errorf("invalid StorageClass pool group %q", value)
-			}
-		default:
-			return fmt.Errorf("unsupported StorageClass parameter %q", key)
-		}
-	}
-	return nil
-}
-
-func validateCapabilities(capabilities []*csi.VolumeCapability) error {
-	if len(capabilities) == 0 {
-		return fmt.Errorf("at least one volume capability is required")
-	}
-	for _, capability := range capabilities {
-		if capability.GetMount() == nil {
-			return fmt.Errorf("only filesystem volumes are supported")
-		}
-		if capability.GetAccessMode() == nil || capability.GetAccessMode().GetMode() != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
-			return fmt.Errorf("only SINGLE_NODE_WRITER is supported")
-		}
-	}
-	return nil
-}
-
-func selectedNode(requirements *csi.TopologyRequirement) (string, error) {
-	if requirements == nil {
-		return "", fmt.Errorf("selected topology is required; use WaitForFirstConsumer")
-	}
-	for _, candidates := range [][]*csi.Topology{requirements.GetPreferred(), requirements.GetRequisite()} {
-		for _, topology := range candidates {
-			if node := topology.GetSegments()[TopologyKey]; node != "" {
-				return node, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("selected topology does not contain %q", TopologyKey)
-}
-
 func (s *Service) observeStep(step, volumeID string) func() {
 	started := time.Now()
 	return func() {
@@ -467,4 +347,11 @@ func (s *Service) observeStep(step, volumeID string) func() {
 			s.ObserveStep(step, elapsed)
 		}
 	}
+}
+
+func (s *Service) observeLock(step, volumeID string, locker *poolcapacity.Locker, key string) func() {
+	done := s.observeStep(step, volumeID)
+	unlock := locker.Lock(key)
+	done()
+	return unlock
 }

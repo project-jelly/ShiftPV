@@ -12,6 +12,7 @@ import (
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/mobility/admission"
+	"github.com/project-jelly/ShiftPV/src/mobility/fsm"
 )
 
 // observeBinding resolves the PV/PVC pair this volume is still bound to and the
@@ -40,7 +41,8 @@ func (r *Reconciler) observeBinding(ctx context.Context, move volumeapi.Move, re
 	result.Claim = claim
 	// Names can be reused after PVC/namespace deletion while Retain PVs and
 	// ShiftPVVolumes survive. Never associate that old volume with the new Pod.
-	if !validBinding(result.PV, claim, move.Spec.VolumeID) {
+	if !validBinding(result.PV, claim, move.Spec.VolumeID) ||
+		(move.Status.SourceCopy != nil && !preparedBindingMatches(move, result.PV, claim)) {
 		result.FSM.UnsafeReason = "VolumeBindingMismatch"
 		result.FSM.SourceAuthorityInvalid = true
 		return true, nil
@@ -56,7 +58,7 @@ func (r *Reconciler) observeBinding(ctx context.Context, move volumeapi.Move, re
 	}
 	if namespace.Labels[admissionNamespaceLabel] != "enabled" {
 		result.FSM.UnsafeReason = "AdmissionNotEnabled"
-		result.FSM.PreflightDeferred = preEviction(move)
+		result.FSM.PreflightDeferred = preEviction(move) || move.Status.Phase == string(fsm.PhaseStartingDisruption)
 		return true, nil
 	}
 	return false, nil
@@ -96,6 +98,8 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 	if err != nil {
 		return false, fmt.Errorf("list consumer Pods: %w", err)
 	}
+	result.ConsumersObserved = true
+	ambiguous := false
 	for index := range pods.Items {
 		pod := &pods.Items[index]
 		if !podUsesClaim(pod, claim.Name) || terminalPod(pod) {
@@ -108,15 +112,28 @@ func (r *Reconciler) observeConsumers(ctx context.Context, move volumeapi.Move, 
 		}
 		if move.Status.ConsumerName == "" && pod.Spec.NodeName == move.Spec.SourceNode {
 			if result.Consumer != nil {
-				result.FSM.UnsafeReason = "MultipleConsumers"
-				result.FSM.PreflightDeferred = preEviction(move)
-				return true, nil
+				ambiguous = true
+				break
 			}
 			result.Consumer = pod.DeepCopy()
 			continue
 		}
 		if result.Replacement == nil {
 			result.Replacement = pod.DeepCopy()
+		} else {
+			ambiguous = true
+			break
+		}
+	}
+	if ambiguous {
+		result.Consumer, result.Replacement = nil, nil
+		result.FSM.ConsumersAmbiguous = true
+		// Preparation cannot disrupt this shape. Approved execution must still
+		// observe its Jobs, placement and cleanup rather than inventing absence.
+		if !move.Status.CapacityApproved {
+			result.FSM.UnsafeReason = "MultipleConsumers"
+			result.FSM.PreflightDeferred = true
+			return true, nil
 		}
 	}
 	return false, nil
@@ -185,6 +202,33 @@ func (r *Reconciler) observePlacement(ctx context.Context, move volumeapi.Move, 
 		}
 	}
 	return nil
+}
+
+// recordedWorkloadClaim is the fresh binding check shared by service recovery
+// and release of a consumer on the committed owner. Names alone never rebind it.
+func (r *Reconciler) recordedWorkloadClaim(ctx context.Context, move volumeapi.Move) (*corev1.PersistentVolumeClaim, error) {
+	if move.Status.PersistentVolumeName == "" || move.Status.ClaimNamespace == "" || move.Status.ClaimName == "" {
+		return nil, fmt.Errorf("move has no recorded binding; do not patch Volume status")
+	}
+	pv, err := r.Client.CoreV1().PersistentVolumes().Get(ctx, move.Status.PersistentVolumeName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	claim, err := r.Client.CoreV1().PersistentVolumeClaims(move.Status.ClaimNamespace).Get(ctx, move.Status.ClaimName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if !validBinding(pv, claim, move.Spec.VolumeID) || !preparedBindingMatches(move, pv, claim) {
+		return nil, fmt.Errorf("PV/PVC binding or volume handle changed")
+	}
+	namespace, err := r.Client.CoreV1().Namespaces().Get(ctx, claim.Namespace, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if namespace.Labels[admissionNamespaceLabel] != "enabled" {
+		return nil, fmt.Errorf("workload namespace must keep ShiftPV admission enabled")
+	}
+	return claim, nil
 }
 
 // validBinding is the single PV/PVC binding rule. Names can be reused after

@@ -23,6 +23,9 @@ func (e *Exporter) ObservePools(observations []readiness.Observation, err error)
 	}
 	values := make([]sample, 0, 3*len(observations))
 	for _, observation := range observations {
+		if observation.Pool.RegistrationRetired() {
+			continue
+		}
 		if observation.Err != nil || !observation.Result.CapacityReadable.OK {
 			e.Cache.update("filesystem", nil, false)
 			return

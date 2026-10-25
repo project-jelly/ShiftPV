@@ -1,5 +1,5 @@
 // Package wiring holds the Kubernetes client construction and bootstrap retry
-// every ShiftPV process entrypoint repeats. It owns no failure convention:
+// every ShiftPV process entrypoint repeats. It owns no startup failure convention:
 // each binary passes its own Fail and keeps reporting startup failures exactly
 // as it did before.
 package wiring
@@ -45,9 +45,24 @@ func InClusterDynamic(fail Fail) *dynamic.DynamicClient {
 	if !ok {
 		return nil
 	}
+	return DynamicForConfig(config, "", fail)
+}
+
+// InClusterConfig loads configuration without constructing clients.
+func InClusterConfig(fail Fail) *rest.Config {
+	config, _ := inClusterConfig(fail)
+	return config
+}
+
+// DynamicForConfig builds a dynamic-only client with the supplied role budget.
+func DynamicForConfig(config *rest.Config, role string, fail Fail) *dynamic.DynamicClient {
+	qualifier := ""
+	if role != "" {
+		qualifier = role + " "
+	}
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		fail("create dynamic Kubernetes client", err)
+		fail("create "+qualifier+"dynamic Kubernetes client", err)
 		return nil
 	}
 	return dynamicClient

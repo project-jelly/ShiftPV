@@ -38,6 +38,26 @@ func TestCRDsUseKubernetesStructuralObjectSchemas(t *testing.T) {
 	}
 }
 
+func TestVolumeInitialPoolSchemaPreservesLegacyObjects(t *testing.T) {
+	crd := readYAMLMap(t, filepath.Join(repositoryRoot(t), "charts", "shiftpv", "crds", "shiftpv.io_shiftpvvolumes.yaml"))
+	spec := requiredMap(t, singleCRDVersion(t, crd), "schema", "openAPIV3Schema", "properties", "spec")
+	for _, field := range requiredStrings(t, spec, "required") {
+		if field == "initialPool" {
+			t.Fatal("old Volumes must remain valid without initialPool")
+		}
+	}
+	initialPool := requiredMap(t, spec, "properties", "initialPool")
+	assertStringSet(t, requiredStrings(t, initialPool, "required"), []string{"name", "uid"}, "initial reservation identity")
+	rules, _, _ := unstructured.NestedSlice(spec, "x-kubernetes-validations")
+	want := "!has(oldSelf.initialPool) || (has(self.initialPool) && self.initialPool == oldSelf.initialPool)"
+	for _, value := range rules {
+		if rule, ok := value.(map[string]any); ok && rule["rule"] == want {
+			return
+		}
+	}
+	t.Fatal("initialPool must support one-time legacy binding and reject subsequent removal or change")
+}
+
 func TestParentCleanupJournalSchemasMatchRuntimeContract(t *testing.T) {
 	root := repositoryRoot(t)
 	wantPhases := []string{
@@ -52,7 +72,7 @@ func TestParentCleanupJournalSchemasMatchRuntimeContract(t *testing.T) {
 		file, parentKind string
 		reasons          []string
 	}{
-		{"shiftpv.io_shiftpvvolumes.yaml", "ShiftPVVolume", []string{"VolumeDelete"}},
+		{"shiftpv.io_shiftpvvolumes.yaml", "ShiftPVVolume", []string{"VolumeDelete", "CreationCancelled"}},
 		{"shiftpv.io_shiftpvmoves.yaml", "ShiftPVMove", []string{"MoveSource", "MoveRollback"}},
 	} {
 		t.Run(tc.parentKind, func(t *testing.T) {
@@ -100,6 +120,34 @@ func TestParentCleanupJournalSchemasMatchRuntimeContract(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOriginalCreationClaimIsOptionalAndCannotBeBackfilled(t *testing.T) {
+	crd := readYAMLMap(t, filepath.Join(repositoryRoot(t), "charts", "shiftpv", "crds", "shiftpv.io_shiftpvvolumes.yaml"))
+	spec := requiredMap(t, singleCRDVersion(t, crd), "schema", "openAPIV3Schema", "properties", "spec")
+	for _, field := range requiredStrings(t, spec, "required") {
+		if field == "creationClaim" {
+			t.Fatal("legacy Volumes require unknown provenance compatibility")
+		}
+	}
+	claim := requiredMap(t, spec, "properties", "creationClaim")
+	assertStringSet(t, requiredStrings(t, claim, "required"), []string{"namespace", "name", "uid"}, "original claim identity")
+	rules, _, _ := unstructured.NestedSlice(spec, "x-kubernetes-validations")
+	want := map[string]bool{"has(self.creationClaim) == has(oldSelf.creationClaim) && (!has(self.creationClaim) || self.creationClaim == oldSelf.creationClaim)": false, "!has(self.creationClaim) || self.requestName == 'pvc-' + self.creationClaim.uid": false}
+	for _, value := range rules {
+		if rule, ok := value.(map[string]any); ok {
+			if text, ok := rule["rule"].(string); ok {
+				if _, needed := want[text]; needed {
+					want[text] = true
+				}
+			}
+		}
+	}
+	for rule, found := range want {
+		if !found {
+			t.Fatalf("missing original-claim contract: %s", rule)
+		}
 	}
 }
 

@@ -12,21 +12,20 @@ import (
 )
 
 type observation struct {
-	FSM             fsm.Observation
-	Volume          volumeapi.State
-	VolumeMissing   bool
-	PV              *corev1.PersistentVolume
-	Claim           *corev1.PersistentVolumeClaim
-	Consumer        *corev1.Pod
-	Replacement     *corev1.Pod
-	Placement       *corev1.Pod
-	DestinationNode string
-	CandidateNodes  []string
-	Names           resourceNames
-	SourceCordoned  bool
-	// PendingObsolete marks an unstarted Move whose source is schedulable again.
-	// The reconciler deletes the transaction instead of deciding a next phase.
-	PendingObsolete bool
+	FSM               fsm.Observation
+	Volume            volumeapi.State
+	Pools             poolIndex
+	VolumeMissing     bool
+	PV                *corev1.PersistentVolume
+	Claim             *corev1.PersistentVolumeClaim
+	Consumer          *corev1.Pod
+	Replacement       *corev1.Pod
+	Placement         *corev1.Pod
+	DestinationNode   string
+	CandidateNodes    []string
+	Names             resourceNames
+	SourceCordoned    bool
+	ConsumersObserved bool
 }
 
 // observe builds the immutable snapshot the reconciler decides on. Each step
@@ -66,7 +65,7 @@ func (r *Reconciler) observe(ctx context.Context, move volumeapi.Move) (observat
 // cleanup journal — is named after a Move that does not exist.
 func (r *Reconciler) preflightVolume(ctx context.Context, volumeID, sourceNode string) (valid bool, reason string, err error) {
 	var result observation
-	candidate := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: sourceNode}}
+	candidate := volumeapi.Move{Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: sourceNode, ProtocolVersion: volumeapi.MoveProtocolPreparedV1}}
 	if _, _, err := r.observeEligibility(ctx, candidate, &result); err != nil {
 		return false, "", err
 	}
@@ -79,6 +78,12 @@ func (r *Reconciler) preflightVolume(ctx context.Context, volumeID, sourceNode s
 // later siblings reuse so readiness is read once per observation.
 func (r *Reconciler) observeEligibility(ctx context.Context, move volumeapi.Move, result *observation) (poolIndex, bool, error) {
 	if done, err := r.observeVolume(ctx, move, result); done || err != nil {
+		return poolIndex{}, true, err
+	}
+	if retired, handled, err := r.observeWorkloadRetirement(ctx, move, result.Volume); handled || err != nil {
+		if err == nil {
+			*result = retired
+		}
 		return poolIndex{}, true, err
 	}
 	pools, err := r.observePools(ctx)
@@ -118,6 +123,22 @@ func (r *Reconciler) observePreconditions(ctx context.Context, move volumeapi.Mo
 	result.FSM.PreconditionsValid = preconditions
 	if preEviction(move) && result.Consumer != nil && sourceHealthy {
 		return r.deferOnPreflight(ctx, result, preconditions)
+	}
+	if move.Status.Phase == string(fsm.PhaseStartingDisruption) && result.Consumer != nil && result.Consumer.DeletionTimestamp == nil {
+		// A live original must remain available while another consumer exists.
+		// A terminating original is already disrupted, even if its reply was lost.
+		reason := "MultipleConsumers"
+		var err error
+		if result.Replacement == nil {
+			reason, err = r.preflightPDB(ctx, result.Consumer)
+		}
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			result.FSM.PreflightDeferred, result.FSM.PreparationUnavailable = true, true
+			result.FSM.UnsafeReason = reason
+		}
 	}
 	return nil
 }

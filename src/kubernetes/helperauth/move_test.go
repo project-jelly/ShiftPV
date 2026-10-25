@@ -29,7 +29,7 @@ func TestMoveAuthorityRequiresExactMoveJobPoolAndSourceCopy(t *testing.T) {
 	)
 	source := volume.CopyIdentity{InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing}
 	incoming := volume.CopyIdentity{InstallationID: "installation", PoolName: "destination-pool", PoolUID: "destination-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "incoming-copy", NodeName: "destination", Role: volume.RoleIncoming}
-	moveObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove", "metadata": map[string]any{"name": moveName, "uid": moveUID}, "spec": map[string]any{"volumeID": volumeID, "sourceNode": "source"}}}
+	moveObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove", "metadata": map[string]any{"name": moveName, "uid": moveUID}, "spec": map[string]any{"volumeID": volumeID, "sourceNode": "source", "protocolVersion": volumeapi.MoveProtocolPreparedV1}}}
 	volumeObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume", "metadata": map[string]any{"name": volumeID, "uid": source.VolumeUID}, "spec": map[string]any{"volumeID": volumeID}}}
 	poolObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool", "metadata": map[string]any{"name": incoming.PoolName, "uid": incoming.PoolUID}, "spec": map[string]any{"nodeName": incoming.NodeName, "mountPath": "/pool", "capacity": map[string]any{"limit": "1Gi"}}}}
 	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "kube-system", "uid": source.InstallationID}}}
@@ -39,9 +39,7 @@ func TestMoveAuthorityRequiresExactMoveJobPoolAndSourceCopy(t *testing.T) {
 	}, moveObject, volumeObject, poolObject, clusterIdentity)
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	moveStatus := volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &source, IncomingCopy: &incoming, CopyOperationID: "copy-operation", CopyJobName: jobName}
-	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err != nil {
-		t.Fatal(err)
-	}
+	setMoveStatusFixture(t, dynamicClient, moveName, moveStatus)
 	setVolumeStateFixture(t, dynamicClient, volumeID, volumeapi.State{UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: moveName, CurrentCopy: &source})
 	controller := true
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: "system", UID: types.UID(jobUID), Labels: map[string]string{"shiftpv.io/move-uid": moveUID}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "shiftpv.io/v1alpha1", Kind: "ShiftPVMove", Name: moveName, UID: types.UID(moveUID), Controller: &controller}}}}
@@ -56,17 +54,17 @@ func TestMoveAuthorityRequiresExactMoveJobPoolAndSourceCopy(t *testing.T) {
 	destination := incoming
 	destination.Role = volume.RoleServing
 	promotion.PromotionJobName, promotion.PromotionOperationID, promotion.DestinationCopy = jobName, "copy-operation", &destination
-	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, promotion); err != nil {
-		t.Fatal(err)
-	}
+	setMoveStatusFixture(t, dynamicClient, moveName, promotion)
 	if err := MoveAuthority(client, registry, options, "promote", incoming)(context.Background()); err != nil {
 		t.Fatalf("exact promotion operation rejected: %v", err)
 	}
 	moveStatus = promotion
 	moveStatus.CopyOperationID = "replacement"
-	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err == nil {
-		t.Fatal("immutable operation identity was replaced")
+	setMoveStatusFixture(t, dynamicClient, moveName, moveStatus)
+	if err := authority(context.Background()); err == nil {
+		t.Fatal("changed durable operation retained helper authority")
 	}
+	setMoveStatusFixture(t, dynamicClient, moveName, promotion)
 	job.Labels["shiftpv.io/move-uid"] = "replacement"
 	if _, err := client.BatchV1().Jobs("system").Update(context.Background(), job, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
@@ -85,7 +83,7 @@ func TestRecoveryAuthorityRequiresBlockedOwnerAndOwnedExecutorJob(t *testing.T) 
 		jobUID   = "job-uid"
 	)
 	identity := volume.CopyIdentity{InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing}
-	moveObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove", "metadata": map[string]any{"name": moveName, "uid": moveUID}, "spec": map[string]any{"volumeID": volumeID, "sourceNode": identity.NodeName, "recovery": "ResumeOwner"}}}
+	moveObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove", "metadata": map[string]any{"name": moveName, "uid": moveUID}, "spec": map[string]any{"volumeID": volumeID, "sourceNode": identity.NodeName, "recovery": "ResumeOwner", "protocolVersion": volumeapi.MoveProtocolPreparedV1}}}
 	volumeObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume", "metadata": map[string]any{"name": volumeID, "uid": identity.VolumeUID}, "spec": map[string]any{"volumeID": volumeID}}}
 	poolObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool", "metadata": map[string]any{"name": identity.PoolName, "uid": identity.PoolUID}, "spec": map[string]any{"nodeName": identity.NodeName, "mountPath": "/pool", "capacity": map[string]any{"limit": "1Gi"}}}}
 	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "kube-system", "uid": identity.InstallationID}}}
@@ -94,11 +92,9 @@ func TestRecoveryAuthorityRequiresBlockedOwnerAndOwnedExecutorJob(t *testing.T) 
 		volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
 	}, moveObject, volumeObject, poolObject, clusterIdentity)
 	registry := &volumeapi.Registry{Client: dynamicClient}
-	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, volumeapi.MoveStatus{
+	setMoveStatusFixture(t, dynamicClient, moveName, volumeapi.MoveStatus{
 		Phase: "Blocked", RecoveryPhase: "Verifying", RecoveryOwner: identity.NodeName, SourceCopy: &identity,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	state := volumeapi.State{
 		UID: identity.VolumeUID, Phase: volumeapi.PhaseBlocked, OwnerNode: identity.NodeName,
 		ActiveMove: moveName, CurrentCopy: &identity, PublishedNodes: []string{identity.NodeName},
@@ -161,7 +157,7 @@ func TestSourceAuthorityRequiresCurrentMoveOwnedPodAndUnpublishedCopy(t *testing
 		moveUID  = "move-uid"
 	)
 	identity := volume.CopyIdentity{InstallationID: "installation", PoolName: "source-pool", PoolUID: "source-pool-uid", VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "source-copy", NodeName: "source", Role: volume.RoleServing}
-	moveObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove", "metadata": map[string]any{"name": moveName, "uid": moveUID}, "spec": map[string]any{"volumeID": volumeID, "sourceNode": "source"}}}
+	moveObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove", "metadata": map[string]any{"name": moveName, "uid": moveUID}, "spec": map[string]any{"volumeID": volumeID, "sourceNode": "source", "protocolVersion": volumeapi.MoveProtocolPreparedV1}}}
 	volumeObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume", "metadata": map[string]any{"name": volumeID, "uid": identity.VolumeUID}, "spec": map[string]any{"volumeID": volumeID}}}
 	poolObject := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool", "metadata": map[string]any{"name": identity.PoolName, "uid": identity.PoolUID}, "spec": map[string]any{"nodeName": identity.NodeName, "mountPath": "/pool", "capacity": map[string]any{"limit": "1Gi"}}}}
 	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "kube-system", "uid": identity.InstallationID}}}
@@ -171,9 +167,7 @@ func TestSourceAuthorityRequiresCurrentMoveOwnedPodAndUnpublishedCopy(t *testing
 	}, moveObject, volumeObject, poolObject, clusterIdentity)
 	registry := &volumeapi.Registry{Client: dynamicClient}
 	status := volumeapi.MoveStatus{Phase: "Copying", SourceCopy: &identity, CopyOperationID: "copy-operation"}
-	if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, status); err != nil {
-		t.Fatal(err)
-	}
+	setMoveStatusFixture(t, dynamicClient, moveName, status)
 	setVolumeStateFixture(t, dynamicClient, volumeID, volumeapi.State{UID: identity.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: identity.NodeName, ActiveMove: moveName, CurrentCopy: &identity})
 	controller := true
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{

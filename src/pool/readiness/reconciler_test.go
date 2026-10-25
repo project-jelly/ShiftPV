@@ -3,6 +3,7 @@ package readiness
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,11 +16,17 @@ import (
 
 var testTime = time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
 
+var testFilesystem = poolcapacity.Filesystem{TotalBytes: 1024, AvailableBytes: 512, AvailableInodes: 64}
+
 type fakeInspector struct{ result Result }
 
 func (f fakeInspector) Inspect(volumeapi.Pool) Result { return f.result }
+func (f fakeInspector) InspectCapacityUnit(volumeapi.Pool) (*volumeapi.PoolCapacityUnit, Check) {
+	return nil, Check{Known: true, Reason: "CapacityAllocationUnproven", Message: "fake has no allocation evidence"}
+}
 
 type fakeRepository struct {
+	mu         sync.Mutex
 	pool       volumeapi.Pool
 	pools      []volumeapi.Pool
 	currentUID string
@@ -29,7 +36,22 @@ type fakeRepository struct {
 	statusSets int
 }
 
+func testRegistration(pool volumeapi.Pool) volumeapi.Pool {
+	if pool.MountPath == "" {
+		pool.MountPath = "/" + pool.Name
+	}
+	if pool.PoolGroup == "" {
+		pool.PoolGroup = volumeapi.DefaultPoolGroup
+	}
+	if pool.CapacityLimit == "" {
+		pool.CapacityLimit = "1Gi"
+	}
+	return pool
+}
+
 func (f *fakeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Pool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if errors.Is(f.err, volumeapi.ErrPoolNotFound) {
 		return nil, nil
 	}
@@ -37,12 +59,18 @@ func (f *fakeRepository) ListPoolRegistrations(context.Context) ([]volumeapi.Poo
 		return nil, f.err
 	}
 	if f.pools != nil {
-		return f.pools, nil
+		pools := make([]volumeapi.Pool, len(f.pools))
+		for i, pool := range f.pools {
+			pools[i] = testRegistration(pool)
+		}
+		return pools, nil
 	}
-	return []volumeapi.Pool{f.pool}, nil
+	return []volumeapi.Pool{testRegistration(f.pool)}, nil
 }
 
 func (f *fakeRepository) SetPoolStatus(_ context.Context, name, uid, node string, status volumeapi.PoolStatus) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	pools := f.pools
 	if pools == nil {
 		pools = []volumeapi.Pool{f.pool}
@@ -76,7 +104,7 @@ func TestReconcilePersistsReadyConditionsAndPreservesTransitionTime(t *testing.T
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok,
 			Writable:         Check{OK: true, Known: true, Reason: "Writable", Message: "write"},
-			CapacityReadable: Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "capacity"}}},
+			CapacityReadable: Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "capacity"}, Filesystem: testFilesystem}},
 		Interval: time.Minute, Now: func() time.Time { return testTime },
 	}
 	if err := reconciler.Reconcile(context.Background()); err != nil {
@@ -102,7 +130,7 @@ func TestReconcileRequiredMountPointKeepsAnchorAndInvalidatesInventory(t *testin
 		MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
 	}}
 	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
-	inspector := fakeInspector{Result{Accessible: ok, Mounted: ok, Writable: ok, CapacityReadable: ok, MountIdentity: identity}}
+	inspector := fakeInspector{Result{Accessible: ok, Mounted: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem, MountIdentity: identity}}
 	scans := 0
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Inspector: inspector,
@@ -155,7 +183,7 @@ func TestReconcileObservesEveryRegistrationOnNode(t *testing.T) {
 	scanned := map[string]bool{}
 	reconciler := &Reconciler{
 		NodeName: "node-a", Pools: repository, Interval: time.Minute,
-		Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}},
 		Now:       func() time.Time { return testTime },
 		Inventory: func(_ context.Context, pool volumeapi.Pool, _ time.Time) volumeapi.PoolInventory {
 			scanned[pool.Name] = true
@@ -213,7 +241,7 @@ func TestReconcileKeepsInventoryFreshWhilePoolDeregisters(t *testing.T) {
 	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
 	releases := 0
 	reconciler := &Reconciler{
-		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}},
 		Interval: time.Minute, Now: func() time.Time { return testTime },
 		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
 			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true}
@@ -242,6 +270,62 @@ func TestReconcileKeepsInventoryFreshWhilePoolDeregisters(t *testing.T) {
 	}
 }
 
+func TestDeletingApprovedPoolWaitsForRestoredMountThenExactRelease(t *testing.T) {
+	deleted := metav1.NewTime(testTime.Add(-time.Minute))
+	identity := &volumeapi.PoolMountIdentity{Device: "8:1", Source: "/dev/original", Root: "/", Filesystem: "ext4"}
+	repo := &fakeRepository{pool: testRegistration(volumeapi.Pool{
+		Name: "pool-a", UID: "pool-uid", NodeName: "node", Generation: 1, DeletionTimestamp: &deleted,
+		MountPolicy: volumeapi.PoolMountPolicyRequireMountPoint,
+		Status:      volumeapi.PoolStatus{RegistrationApproved: true, MountIdentity: identity},
+	})}
+	ok := Check{Known: true, OK: true, Reason: "OK"}
+	result := Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem,
+		Mounted: Check{Known: true, Reason: "MountMissing"}}
+	inspector := fakeInspector{result: result}
+	scans, releases := 0, 0
+	r := &Reconciler{NodeName: "node", Pools: repo, Inspector: inspector, Interval: time.Minute, Now: func() time.Time { return testTime },
+		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+			scans++
+			return volumeapi.PoolInventory{Valid: true, ObservedAt: metav1.NewTime(testTime)}
+		},
+		Release: func(_ context.Context, pool volumeapi.Pool) error {
+			if pool.UID != "pool-uid" || pool.Status.MountIdentity == nil || *pool.Status.MountIdentity != *identity {
+				t.Fatal("release lost the original Pool or mount identity")
+			}
+			releases++
+			return nil
+		},
+	}
+	for _, approval := range []string{"", "pool-uid"} {
+		repo.pool.IdentityReleaseApproval = approval
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		condition := meta.FindStatusCondition(repo.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+		if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "PoolStorageRestorationRequired" || scans != 0 || releases != 0 {
+			t.Fatalf("lost mount was released or lacked restoration diagnosis: condition=%+v scans=%d releases=%d", condition, scans, releases)
+		}
+	}
+	result.Mounted, result.MountIdentity = ok, identity
+	r.Inspector = fakeInspector{result: result}
+	repo.pool.IdentityReleaseApproval = ""
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	condition := meta.FindStatusCondition(repo.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	if condition == nil || condition.Reason != "PoolIdentityReleasePending" || releases != 0 || scans == 0 {
+		t.Fatalf("restored mount bypassed controller approval: condition=%+v scans=%d releases=%d", condition, scans, releases)
+	}
+	repo.pool.IdentityReleaseApproval = "pool-uid"
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	condition = meta.FindStatusCondition(repo.status.Conditions, volumeapi.PoolConditionIdentityReleased)
+	if condition == nil || condition.Status != metav1.ConditionTrue || releases != 1 {
+		t.Fatalf("exact release did not resume after restoration and approval: condition=%+v releases=%d", condition, releases)
+	}
+}
+
 func TestReconcilePreservesPoolIdentityUntilInventoryIsEmpty(t *testing.T) {
 	deletedAt := metav1.NewTime(testTime.Add(-time.Minute))
 	repository := &fakeRepository{pool: volumeapi.Pool{
@@ -250,7 +334,7 @@ func TestReconcilePreservesPoolIdentityUntilInventoryIsEmpty(t *testing.T) {
 	ok := Check{OK: true, Known: true, Reason: "OK", Message: "ok"}
 	releases := 0
 	reconciler := &Reconciler{
-		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok}},
+		NodeName: "node-a", Pools: repository, Inspector: fakeInspector{Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}},
 		Interval: time.Minute, Now: func() time.Time { return testTime },
 		Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
 			return volumeapi.PoolInventory{ObservedAt: metav1.NewTime(testTime), Valid: true, Copies: []volumeapi.CopyObservation{{Marker: "copy"}}}
@@ -324,15 +408,16 @@ func TestReconcilerObserverReceivesExistingProbeAndErrors(t *testing.T) {
 func TestCapacityObservationClearedWhenProbeFails(t *testing.T) {
 	r := &Reconciler{}
 	pool := volumeapi.Pool{Status: volumeapi.PoolStatus{FilesystemTotalBytes: 123}}
-	result := Result{CapacityReadable: Check{OK: true, Known: true}, Filesystem: poolcapacity.Filesystem{TotalBytes: 456}}
+	result := Result{CapacityReadable: Check{OK: true, Known: true}, Filesystem: poolcapacity.Filesystem{TotalBytes: 456, AvailableBytes: 123, AvailableInodes: 8}}
 	status, _ := r.observedStatus(context.Background(), pool, result, testTime)
-	if status.FilesystemTotalBytes != 456 {
+	if status.FilesystemTotalBytes != 456 || status.FilesystemAvailableBytes == nil || *status.FilesystemAvailableBytes != 123 ||
+		status.FilesystemAvailableInodes == nil || *status.FilesystemAvailableInodes != 8 {
 		t.Fatal("successful capacity observation missing")
 	}
 	pool.Status = status
 	result.CapacityReadable = Check{Known: true}
 	status, _ = r.observedStatus(context.Background(), pool, result, testTime)
-	if status.FilesystemTotalBytes != 0 {
+	if status.FilesystemTotalBytes != 0 || status.FilesystemAvailableBytes != nil || status.FilesystemAvailableInodes != nil {
 		t.Fatal("failed probe retained old capacity observation")
 	}
 }

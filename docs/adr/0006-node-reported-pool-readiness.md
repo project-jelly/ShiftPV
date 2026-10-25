@@ -24,6 +24,24 @@ Node Plugin은 자기 Pool의 generation, 삭제 요청, identity release 승인
 재검사를 유발하지 않으며, watch 연결이 끊겨도 기존 주기 검사가 계속된다. 이를 위해 Node의
 `shiftpvpools` 권한에는 `get`, `list`, `watch`가 필요하다.
 
+스캔 중 물리 경로가 바뀌면 `inventory.reason: PhysicalInventoryChanged`와 invalid 결과를 기록한다.
+Node 실행 루프는 해당 Pool UID만 1초부터 최대 30초까지 지수 백오프로 다시 관측하며, 정상 관측이나
+다른 실패 원인으로 바뀌면 짧은 재검사를 멈춘다. 신원 불일치·원인 불명의 실패는 짧은 재검사를
+예약하지 않는다. 재시작하면 새 전체 관측으로 시작하며, 이벤트와 기존 주기 검사는 계속 유지한다.
+이 재검사 신호는 storage action을 승인하거나 삭제 후 generation fence를 대체하지 않는다.
+
+승인된 상주 Node 생성·삭제는 `ExecutionReadyAt`으로 backing 관측의 freshness와 관측 내부의
+generation 일치를 확인하고, 각 권한 검사에서 live mount·고정 block allocation도 확인한다.
+다른 작업의 `scanEpoch` 증가만으로 기존 예약을 다시 승인받지 않는다. 신원·권한 변경, 누락된 anchor,
+실패·stale·future 관측은 계속 거부한다. Helper 실행과 신규 publish, 이동 목적지 게시 증거,
+rollback inventory 선택, 삭제 후 부재 증명은 현재 generation 조건을 유지한다.
+
+각 Pool의 context를 따르는 inventory·identity release·API 작업은 기본 5초 제한을 둔다.
+한 Pool이 timeout되어도 다음 Pool을 관측하고, 만료를 확인한 뒤에는 새 status 쓰기를 시작하지 않는다. 부모 context가
+취소되면 새 Pool 작업을 시작하지 않는다. 동기식 host filesystem syscall과 전체 Pool 목록 조회는
+이 제한으로 중단하지 못한다.
+이미 보낸 API 쓰기는 timeout 전에 반영됐을 수 있으므로 재시도는 live 상태와 기존 generation fence를 확인한다.
+
 한 inventory scan 안에서는 mount table을 한 번 읽어 복사본들의 publication을 판정한다. 이 관찰은
 해당 scan에만 유효하며 다음 generation이나 다음 scan으로 재사용하지 않는다. 실제 publish/unpublish는
 기존 per-volume lock과 live mount 검사를 유지한다.

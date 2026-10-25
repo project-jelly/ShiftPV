@@ -43,7 +43,7 @@ func TestProbeInspect(t *testing.T) {
 					return test.inspectErr
 				},
 				write:  func(string) error { return test.writeErr },
-				statFS: func(string) (poolcapacity.Filesystem, error) { return poolcapacity.Filesystem{}, test.statErr },
+				statFS: func(string) (poolcapacity.Filesystem, error) { return testFilesystem, test.statErr },
 			}
 			result := probe.Inspect(volumeapi.Pool{MountPath: "/pool"})
 			conditions := conditions(result, 1, testTime)
@@ -89,7 +89,7 @@ func TestRequiredMountPointAnchorsIdentityAndSkipsWritesOnMismatch(t *testing.T)
 		},
 		statFS: func(string) (poolcapacity.Filesystem, error) {
 			stats++
-			return poolcapacity.Filesystem{}, nil
+			return testFilesystem, nil
 		},
 		listMounts: func() ([]mountutils.MountInfo, error) { return mounts, nil },
 	}
@@ -173,5 +173,36 @@ func TestHostPathValidation(t *testing.T) {
 		if _, err := hostPath(paths[0], paths[1]); err == nil {
 			t.Fatalf("accepted hostRoot=%q mountPath=%q", paths[0], paths[1])
 		}
+	}
+}
+
+func TestProbeDependencyValidationAndInjectedFailure(t *testing.T) {
+	deps := HostProbeDependencies("/host")
+	for _, change := range []func(*ProbeDependencies){
+		func(d *ProbeDependencies) { d.Allocations = nil },
+		func(d *ProbeDependencies) { d.InspectDirectory = nil },
+		func(d *ProbeDependencies) { d.Write = nil },
+		func(d *ProbeDependencies) { d.StatFS = nil },
+		func(d *ProbeDependencies) { d.ListMounts = nil },
+	} {
+		d := deps
+		change(&d)
+		if p, err := NewProbeWithDependencies("/host", d); err == nil || p != nil {
+			t.Fatal("missing host dependency accepted")
+		}
+	}
+	if _, err := NewProbeWithDependencies("relative", deps); err == nil {
+		t.Fatal("invalid host root accepted")
+	}
+	writes := 0
+	deps.InspectDirectory = func(string) error { return os.ErrPermission }
+	deps.Write = func(string) error { writes++; return nil }
+	p, err := NewProbeWithDependencies("/host", deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := p.Inspect(volumeapi.Pool{MountPath: "/pool"})
+	if result.Accessible.Reason != "PermissionDenied" || writes != 0 {
+		t.Fatalf("failed prerequisite performed writes: %+v", result)
 	}
 }

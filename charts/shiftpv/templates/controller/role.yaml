@@ -6,6 +6,10 @@ metadata:
   labels:
     {{- include "shiftpv.labels" . | nindent 4 }}
 rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ printf "%s-controller" (include "shiftpv.fullname" .) | quote }}]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods", "services"]
     verbs: ["create", "get", "list", "watch", "delete"]
@@ -21,3 +25,8 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
+  {{- if .Values.capacityTracking.enabled }}
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csistoragecapacities"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  {{- end }}

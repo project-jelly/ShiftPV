@@ -33,7 +33,7 @@ func (p measuredCapacityProbe) VolumeUsageForCopy(ctx context.Context, _ volume.
 	return p.usage(ctx)
 }
 
-func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *testing.T) {
+func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksPhysicalReservations(t *testing.T) {
 	r, repo, move := capacityCostFixture()
 	r.CapacityProbe = measuredCapacityProbe{
 		usage: func(ctx context.Context) (int64, error) {
@@ -49,7 +49,11 @@ func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *tes
 			select {
 			case unlock := <-acquired:
 				// A competing create can spend capacity while the source is measured.
-				repo.volumes["another-volume"] = volumeapi.State{OwnerNode: "destination", CapacityBytes: 120 << 20}
+				otherID := "shiftpv-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				source, _, _ := testCopyIdentities(otherID, "source", "destination")
+				source.PoolName, source.PoolUID = "source", "source-uid"
+				repo.volumes[otherID] = volumeapi.State{UID: source.VolumeUID, OwnerNode: "source", CurrentCopy: &source, ActiveMove: "other-move", CapacityBytes: 120 << 20}
+				repo.moves = append(repo.moves, volumeapi.Move{Name: "other-move", Spec: volumeapi.MoveSpec{VolumeID: otherID, SourceNode: "source"}, Status: volumeapi.MoveStatus{SourceCopy: &source, DestinationNode: "destination", DestinationPoolUID: "destination-uid", CapacityApproved: true, SourceBytes: 120 << 20}})
 				unlock()
 			case <-ctx.Done():
 				return 0, errors.New("source measurement held destination lock")
@@ -60,12 +64,13 @@ func TestCapacityMeasurementDoesNotHoldDestinationAndRechecksReservations(t *tes
 			return poolcapacity.Filesystem{AvailableBytes: 128 << 20}, nil
 		},
 	}
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := r.ensureCapacity(ctx, &move, observation{DestinationNode: "destination"}); err != nil {
 		t.Fatal(err)
 	}
-	if move.Status.CapacityApproved || move.Status.CapacityReason != "DestinationReservationLimit" {
+	if move.Status.CapacityApproved || move.Status.CapacityReason != "DestinationFilesystemSpace" {
 		t.Fatalf("stale reservations accepted: %+v", move.Status)
 	}
 }
@@ -83,6 +88,7 @@ func TestCapacityRetryReusesPersistedSourceMeasurement(t *testing.T) {
 			return poolcapacity.Filesystem{AvailableBytes: 128 << 20}, nil
 		},
 	}
+	r.SourceUsage = r.CapacityProbe.(SourceUsage)
 	if err := r.ensureCapacity(context.Background(), &move, observation{DestinationNode: "destination"}); err == nil {
 		t.Fatal("missing probe failure")
 	}
@@ -98,13 +104,22 @@ func TestCapacityRetryReusesPersistedSourceMeasurement(t *testing.T) {
 
 func capacityCostFixture() (*Reconciler, *memoryRepository, volumeapi.Move) {
 	id := "shiftpv-0123456789abcdef0123456789abcdef"
-	move := volumeapi.Move{Name: "move-test", Spec: volumeapi.MoveSpec{VolumeID: id, SourceNode: "source"}}
+	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: id, SourceNode: "source"}}
 	repo := &memoryRepository{
 		volumes: map[string]volumeapi.State{id: {Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CapacityBytes: 32 << 20}},
 		pools:   []volumeapi.Pool{{Name: "source", UID: "source-uid", NodeName: "source", MountPath: "/source", CapacityLimit: "128Mi"}, {Name: "destination", UID: "destination-uid", NodeName: "destination", MountPath: "/destination", CapacityLimit: "128Mi"}},
 		moves:   []volumeapi.Move{move},
 	}
+	prepareCapacityMove(repo, &move, repo.pools[1])
 	r := newTestReconciler(fake.NewSimpleClientset(), repo)
 	r.PoolLocks = &poolcapacity.Locker{}
 	return r, repo, move
+}
+
+func (p measuredCapacityProbe) AdvanceSourceUsage(ctx context.Context, _ volumeapi.Move, copy volume.CopyIdentity) (int64, bool, error) {
+	measured, err := p.VolumeUsageForCopy(ctx, copy)
+	return measured, true, err
+}
+func (p measuredCapacityProbe) FinalizeSourceUsage(context.Context, volumeapi.Move) (bool, error) {
+	return true, nil
 }

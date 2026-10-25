@@ -51,7 +51,10 @@ groups:
             (shiftpv_pool_accounting_valid={{ $value }}).
           runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvpoolaccountinginvalid
       - alert: ShiftPVPoolInventoryUnsafe
-        expr: shiftpv_pool_inventory_valid{shiftpv="true"} == 0 or shiftpv_pool_inventory_truncated{shiftpv="true"} == 1
+        expr: |
+          (shiftpv_pool_inventory_valid{shiftpv="true"} == 0 or shiftpv_pool_inventory_truncated{shiftpv="true"} == 1)
+          unless on (job, instance, cluster, namespace, release, component, pod, pool, node)
+            (shiftpv_pool_registration_retired{shiftpv="true"} == 1)
         for: 5m
         labels:
           severity: warning
@@ -73,8 +76,55 @@ groups:
             {{ $value }} durable cleanup contract(s) in state {{ $labels.state }} are
             preserving data pending operator action.
           runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcleanupneedsreview
+      - alert: ShiftPVPoolNoSpace
+        expr: |
+          (
+            shiftpv_pool_filesystem_available_bytes{shiftpv="true"} == 0
+            or shiftpv_pool_filesystem_available_inodes{shiftpv="true"} == 0
+          )
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (shiftpv_metrics_snapshot_success{shiftpv="true",source="filesystem"} == 1)
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="filesystem"} > 0)
+          and on (job, instance, cluster, namespace, release, component, pod)
+            (time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="filesystem"} < 300)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV Pool filesystem has no available space
+          description: >-
+            Pool {{ $labels.pool }} on node {{ $labels.node }} reports zero available bytes or inodes.
+            New allocation is blocked and cleanup may need headroom for durable metadata.
+            Preserve owned data and inspect the filesystem before reclaiming space.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnospace
+      - alert: ShiftPVVolumesWithoutPersistentVolume
+        expr: |
+          max by (shiftpv, cluster, namespace, release, component, pool) (
+            shiftpv_volumes_without_persistent_volume{shiftpv="true"}
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (shiftpv_metrics_snapshot_success{shiftpv="true",source="metadata"} == 1)
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} > 0)
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} < 300)
+          ) > 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV retained owners have no PersistentVolume reference
+          description: >-
+            {{ $value }} Ready or preserved Blocked Volume owner(s) on pool {{ $labels.pool }} have
+            no matching driver PersistentVolume. This may be delayed PV publication or retained data;
+            inspect the Volume and provisioning history before deciding how to recover it.
+            Data and capacity reservations remain protected.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvvolumeswithoutpersistentvolume
       - alert: ShiftPVReleasedVolumes
-        expr: shiftpv_persistent_volumes{shiftpv="true",phase="Released"} > 0
+        expr: |
+          max by (shiftpv, cluster, namespace, release, component, pool, phase) (
+            shiftpv_persistent_volumes{shiftpv="true",phase="Released"}
+          ) > 0
         for: 6h
         labels:
           severity: warning
@@ -98,3 +148,66 @@ groups:
             {{ $labels.pool }}: the copy is orphan-preserved, missing from its expected
             placement, or carries an unsafe identity observation.
           runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/charts/shiftpv/README.md#shiftpvcopyneedsreview
+      - alert: ShiftPVMoveBlocked
+        expr: |
+          max by (shiftpv, cluster, namespace, release, component) (
+            shiftpv_moves{shiftpv="true",phase="Blocked"}
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (shiftpv_metrics_snapshot_success{shiftpv="true",source="metadata"} == 1)
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} > 0)
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} < 300)
+          ) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV moves are blocked
+          description: >-
+            {{ $value }} active Move(s) are Blocked. Inspect the Move status, current owner
+            and cleanup evidence before choosing recovery.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvmoveblocked
+      - alert: ShiftPVPoolNotReady
+        expr: |
+          min by (shiftpv, cluster, namespace, release, component, pool, node) (
+            shiftpv_pool_ready{shiftpv="true"}
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (shiftpv_metrics_snapshot_success{shiftpv="true",source="metadata"} == 1)
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} > 0)
+            and on (job, instance, cluster, namespace, release, component, pod)
+              (time() - shiftpv_metrics_snapshot_last_success_timestamp_seconds{shiftpv="true",source="metadata"} < 300)
+            unless on (job, instance, cluster, namespace, release, component, pod, pool, node)
+              (shiftpv_pool_registration_retired{shiftpv="true"} == 1)
+          ) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV Pool is not ready
+          description: >-
+            Pool {{ $labels.pool }} on node {{ $labels.node }} is not ready for allocation.
+            Inspect Pool conditions and the original mounted filesystem.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvpoolnotready
+      - alert: ShiftPVCSIErrorRate
+        expr: |
+          (
+            sum by (shiftpv, cluster, namespace, release, component, node, method) (
+              rate(shiftpv_csi_requests_total{shiftpv="true",code=~"Unknown|DeadlineExceeded|PermissionDenied|Internal|Unavailable|DataLoss|Unauthenticated"}[5m])
+            )
+            /
+            sum by (shiftpv, cluster, namespace, release, component, node, method) (
+              rate(shiftpv_csi_requests_total{shiftpv="true"}[5m])
+            )
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: ShiftPV CSI server errors are sustained
+          description: >-
+            CSI {{ $labels.method }} reports a sustained server-side error ratio of
+            {{ printf "%.2f" $value }} (threshold 0.05). Inspect API availability,
+            credentials and the corresponding gRPC codes.
+          runbook_url: https://github.com/project-jelly/ShiftPV/blob/main/docs/spec/metrics.md#shiftpvcsierrorrate

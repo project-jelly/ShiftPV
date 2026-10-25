@@ -68,13 +68,15 @@ recover_source_only() {
 	kubectl delete namespace shiftpv-mobility-blocked --wait=true --timeout=180s
 }
 
-recover_after_commit_failure() {
-	local return_move current_pod latest_checksum failed_job destination_mount source_copy
-	# The current owner becomes the return Move source. The test helper fails the
-	# approved cleanup before filesystem mutation without invalidating inventory.
+recover_after_commit_failure() (
+	local return_move current_pod latest_checksum destination_mount source_copy fault_path
+	local policy=shiftpv-recovery-cleanup-barrier move_uid operation receipt_hash
+	# The current owner becomes the return source. Invalid local evidence must
+	# stop native cleanup before any rename or purge, preserving inventory.
 	source_copy=$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.currentCopy.copyID}')
 	test -n "${source_copy}"
 	kubectl uncordon "${SOURCE_NODE}"
+	hold_cleanup_admission "${policy}" "${VOLUME_ID}"
 	kubectl cordon "${DESTINATION_NODE}"
 	return_move=""
 	for _ in {1..120}; do
@@ -83,21 +85,35 @@ recover_after_commit_failure() {
 		sleep 1
 	done
 	test -n "${return_move}"
+	wait_for_cleanup_barrier "${return_move}" "${VOLUME_ID}" "${DESTINATION_NODE}"
 	destination_mount=$(pool_mount_for_node "${DESTINATION_NODE}")
-	local fault_path="${destination_mount}/.shiftpv-e2e-fail-cleanup"
+	move_uid=$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.metadata.uid}')
+	operation="cleanup-${move_uid}"
+	receipt_hash=$(printf '%s' "${operation}" | shasum -a 256 | cut -c1-32)
+	fault_path="${destination_mount}/.shiftpv/receipt-${receipt_hash}.json"
 	docker exec "${DESTINATION_NODE}" test ! -e "${fault_path}"
-	docker exec "${DESTINATION_NODE}" touch -- "${fault_path}"
+	docker exec "${DESTINATION_NODE}" test ! -L "${fault_path}"
+	# Explicitly invalid version: this is never a positive execution proof.
+	# Exclusive creation must not replace any existing local evidence.
+	# shellcheck disable=SC2016
+	docker exec "${DESTINATION_NODE}" sh -ec '
+	 umask 077
+	 set -C
+	 printf "%s" "{\"version\":0,\"value\":{}}" >"$1"
+	 sync
+	' sh "${fault_path}"
+	release_cleanup_admission "${policy}"
 	kubectl wait "shiftpvmove/${return_move}" --for=jsonpath='{.status.phase}'=Blocked --timeout=480s
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.spec.sourceNode}')" = "${DESTINATION_NODE}"
 	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.reason}')" = "CleanupFailed"
 	test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
-	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanup.status.phase}')" = NeedsReview
-	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanup.spec.authority.name}')" = "${return_move}"
-	test "$(kubectl get "shiftpvmove/${return_move}" -o jsonpath='{.status.cleanup.spec.target.copyID}')" = "${source_copy}"
-	failed_job=$(cleanup_job_name "shiftpvmove/${return_move}")
-	test -n "${failed_job}"
-	kubectl -n shiftpv-system logs "job/${failed_job}" >"${WORK_DIR}/cleanup-failure.txt" 2>&1
-	grep -Fq 'injected cleanup failure before filesystem mutation' "${WORK_DIR}/cleanup-failure.txt"
+	kubectl get "shiftpvmove/${return_move}" -o json | jq -e --arg copy "${source_copy}" --arg operation "${operation}" '
+	 .status.cleanup.status.phase == "NeedsReview" and .status.cleanup.status.reason == "CopyEvidenceInvalid" and
+	 .status.cleanup.status.executor.kind == "Node" and .status.cleanup.status.receipt == null and
+	 .status.cleanup.spec.operationID == $operation and .status.cleanup.spec.target.copyID == $copy' >/dev/null
+	assert_no_cleanup_job "${return_move}"
+	docker exec "${DESTINATION_NODE}" test -f "${destination_mount}/volumes/${VOLUME_ID}/payload"
+	test "$(node_sha256 "${DESTINATION_NODE}" "${destination_mount}/volumes/${VOLUME_ID}/payload")" = "${CHECKSUM_BEFORE}"
 	kubectl -n shiftpv-mobility-test rollout status deployment/wffc --timeout=180s
 	current_pod=$(kubectl -n shiftpv-mobility-test get pod -l app=shiftpv-mobility-wffc -o jsonpath='{.items[0].metadata.name}')
 	# New writes on the committed destination must survive recovery.
@@ -125,4 +141,4 @@ recover_after_commit_failure() {
 	kubectl uncordon "${DESTINATION_NODE}"
 	echo 'post-commit cleanup review passed: current owner writes preserved; non-owner copy, Move lock, and capacity hold retained'
 	verify_cleanup_lifecycle "${return_move}" "${DESTINATION_NODE}" "${destination_mount}" "${latest_checksum}" "${current_pod}"
-}
+)

@@ -29,13 +29,15 @@ controller:
   logLevel: 2
   image:
     repository: ghcr.io/project-jelly/shiftpv-controller
-    tag: 0.4.15
+    tag: 0.4.25
     pullPolicy: IfNotPresent
   resources: {}
 
 mobility:
   enabled: true
   interval: 30s
+  # Deadline for each new copy/promote Job, including Pod startup and retries.
+  operationTimeout: 5m
   # Settled terminal Move journals are metadata-only audit records. They are
   # deleted after this retention; copy data and unresolved journals are never
   # deleted by this policy.
@@ -51,7 +53,7 @@ node:
   logLevel: 2
   image:
     repository: ghcr.io/project-jelly/shiftpv-node
-    tag: 0.4.11
+    tag: 0.4.22
     pullPolicy: IfNotPresent
   nodeSelector: {}
   tolerations: []
@@ -74,10 +76,17 @@ poolReadiness:
   interval: 1m
   staleAfter: 3m
 
+capacityTracking:
+  # Requires controller images with CSI GetCapacity support.
+  enabled: false
+  pollInterval: 1m
+
 lifecycle:
   # Use argocd when Argo CD owns this release so a blocked Application deletion
   # stays pending and completes automatically after storage dependencies are removed.
   uninstallMode: helm
+  # Exact approved retired Pool UIDs whose CRs, finalizers, and storage must remain.
+  preserveRetiredPoolUIDs: []
 
 storageClass:
   create: true

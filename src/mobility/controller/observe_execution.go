@@ -20,9 +20,7 @@ import (
 // reason the capacity reconciler already recorded.
 func observeMoveState(move volumeapi.Move, result *observation) {
 	state := result.Volume
-	result.FSM.VolumeLocked = state.Phase == volumeapi.PhaseMoving && state.ActiveMove == move.Name && state.OwnerNode == move.Spec.SourceNode
 	result.FSM.ConsumerExists = result.Consumer != nil
-	result.FSM.EvictionRequested = move.Status.EvictionRequested
 	result.FSM.PublishedOnSource = slices.Contains(state.PublishedNodes, move.Spec.SourceNode)
 	result.FSM.CapacityApproved = move.Status.CapacityApproved
 	result.FSM.CapacityBlocked = move.Status.CapacityReason != "" && !move.Status.CapacityApproved
@@ -54,7 +52,7 @@ func (r *Reconciler) observeJobs(ctx context.Context, move volumeapi.Move, repai
 }
 
 func observeDestinationPublish(move volumeapi.Move, pools poolIndex, result *observation) {
-	destinationPool, destinationReady := indexedCopyPool(pools.ready, move.Status.DestinationCopy)
+	destinationPool, destinationReady := indexedCopyPool(pools.existing, move.Status.DestinationCopy)
 	result.FSM.PublishedOnDestination = result.DestinationNode != "" &&
 		slices.Contains(result.Volume.PublishedNodes, result.DestinationNode) &&
 		destinationReady &&

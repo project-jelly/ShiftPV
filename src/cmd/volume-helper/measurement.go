@@ -9,14 +9,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
 	"github.com/project-jelly/ShiftPV/src/pool/capacity"
+	"github.com/project-jelly/ShiftPV/src/pool/measurement"
 	"github.com/project-jelly/ShiftPV/src/pool/readiness"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
@@ -26,10 +30,14 @@ type measurementOptions struct {
 	root, evidence, volumeID string
 	copy                     *volume.CopyIdentity
 	staleAfter               time.Duration
+	now                      func() time.Time
+	wait                     func(context.Context) error
 }
 
 type measurementRegistry interface {
+	PoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	ReadyPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
+	InventoryPoolForIdentity(context.Context, string, string, string) (volumeapi.Pool, error)
 	Get(context.Context, string) (volumeapi.State, error)
 	InstallationID(context.Context) (string, error)
 }
@@ -112,7 +120,11 @@ func runMeasurement(action string, arguments []string) error {
 }
 
 func measureWithAuthority(ctx context.Context, registry measurementRegistry, options measurementOptions, verifyMount func(string, volumeapi.Pool) error, verifyCopy func(string, volume.CopyIdentity) error, read func(context.Context) (string, error)) (string, error) {
-	copy, err := measurementAuthority(ctx, registry, options, verifyMount, verifyCopy)
+	pool, copy, err := measurementAuthority(ctx, registry, options, verifyMount, verifyCopy)
+	if err != nil {
+		return "", err
+	}
+	configuration, err := capacity.UsageConfigurationEvidence(pool)
 	if err != nil {
 		return "", err
 	}
@@ -122,35 +134,148 @@ func measureWithAuthority(ctx context.Context, registry measurementRegistry, opt
 	if err != nil {
 		return "", err
 	}
-	if _, err := measurementAuthority(ctx, registry, options, verifyMount, verifyCopy); err != nil {
+	if options.volumeID != "" {
+		if err := awaitUsageAuthority(ctx, registry, options, configuration, verifyMount, verifyCopy); err != nil {
+			return "", err
+		}
+	} else if _, _, err := measurementAuthority(ctx, registry, options, verifyMount, verifyCopy); err != nil {
 		return "", err
 	}
 	return output, nil
 }
 
-func measurementAuthority(ctx context.Context, registry measurementRegistry, options measurementOptions, verifyMount func(string, volumeapi.Pool) error, verifyCopy func(string, volume.CopyIdentity) error) (*volume.CopyIdentity, error) {
-	pool, err := registry.ReadyPoolForIdentity(ctx, options.pool.Name, options.pool.UID, options.pool.NodeName)
+func measurementAuthority(ctx context.Context, registry measurementRegistry, options measurementOptions, verifyMount func(string, volumeapi.Pool) error, verifyCopy func(string, volume.CopyIdentity) error) (volumeapi.Pool, *volume.CopyIdentity, error) {
+	resolve := registry.ReadyPoolForIdentity
+	if options.volumeID != "" {
+		// Usage measures an existing quiesced copy; statfs serves new allocation.
+		resolve = registry.InventoryPoolForIdentity
+	}
+	pool, err := resolve(ctx, options.pool.Name, options.pool.UID, options.pool.NodeName)
 	if err != nil {
-		return nil, fmt.Errorf("read measurement Pool: %w", err)
+		return volumeapi.Pool{}, nil, fmt.Errorf("read measurement Pool: %w", err)
 	}
 	evidence, err := capacity.MeasurementEvidence(pool)
 	if err != nil || evidence != options.evidence {
-		return nil, fmt.Errorf("measurement Pool evidence changed")
+		return volumeapi.Pool{}, nil, fmt.Errorf("measurement Pool evidence changed")
 	}
 	if err := verifyMount(options.root, pool); err != nil {
-		return nil, fmt.Errorf("verify measurement mount: %w", err)
+		return volumeapi.Pool{}, nil, fmt.Errorf("verify measurement mount: %w", err)
 	}
 	if options.volumeID == "" {
-		return nil, nil
+		return pool, nil, nil
 	}
 	copy, err := measurementCopy(ctx, registry, options)
 	if err != nil {
-		return nil, err
+		return volumeapi.Pool{}, nil, err
 	}
 	if err := verifyCopy(options.root, *copy); err != nil {
-		return nil, fmt.Errorf("verify measurement serving copy: %w", err)
+		return volumeapi.Pool{}, nil, fmt.Errorf("verify measurement serving copy: %w", err)
 	}
-	return copy, nil
+	return pool, copy, nil
+}
+
+// du runs once. Only a coherent successful observation awaiting a newer scan
+// or timestamp may wait here. The raw current generation must become ready;
+// substituting the initial generation would manufacture freshness.
+func awaitUsageAuthority(ctx context.Context, registry measurementRegistry, options measurementOptions, configuration string, verifyMount func(string, volumeapi.Pool) error, verifyCopy func(string, volume.CopyIdentity) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		ready, err := usageAuthorityCurrent(ctx, registry, options, configuration, verifyMount, verifyCopy)
+		if err != nil || ready {
+			return err
+		}
+		wait := options.wait
+		if wait == nil {
+			wait = waitUsageObservation
+		}
+		if err := wait(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func usageAuthorityCurrent(ctx context.Context, registry measurementRegistry, options measurementOptions, configuration string, verifyMount func(string, volumeapi.Pool) error, verifyCopy func(string, volume.CopyIdentity) error) (bool, error) {
+	pool, err := registry.PoolForIdentity(ctx, options.pool.Name, options.pool.UID, options.pool.NodeName)
+	if err != nil {
+		return false, fmt.Errorf("read current usage Pool: %w", err)
+	}
+	current, err := capacity.UsageConfigurationEvidence(pool)
+	if err != nil || current != configuration {
+		return false, fmt.Errorf("usage Pool configuration changed during measurement")
+	}
+	copy, err := measurementCopy(ctx, registry, options)
+	if err != nil {
+		return false, err
+	}
+	if err := verifyCopy(options.root, *copy); err != nil {
+		return false, fmt.Errorf("verify measurement serving copy: %w", err)
+	}
+	now := time.Now()
+	if options.now != nil {
+		now = options.now()
+	}
+	staleAfter := options.staleAfter
+	if staleAfter <= 0 {
+		staleAfter = volumeapi.DefaultPoolReadinessStaleAfter
+	}
+	if ready, reason := pool.InventoryReadyAt(now, staleAfter); !ready {
+		if usageObservationPending(pool, now) {
+			return false, nil
+		}
+		return false, fmt.Errorf("usage Pool observation changed: %s", reason)
+	}
+	if err := verifyMount(options.root, pool); err != nil {
+		return false, fmt.Errorf("verify measurement mount: %w", err)
+	}
+	return true, nil
+}
+
+func usageObservationPending(pool volumeapi.Pool, now time.Time) bool {
+	if !pool.BackingConfigurationCheck().OK || !slices.Contains(pool.Finalizers, volumeapi.PoolProtectionFinalizer) ||
+		pool.Status.ObservedGeneration <= 0 || pool.Status.ObservedGeneration > pool.Generation ||
+		pool.Status.LastProbeTime.IsZero() || now.Before(pool.Status.LastProbeTime.Time) {
+		return false
+	}
+	inventory := pool.Status.Inventory
+	if inventory == nil || !inventory.Valid || inventory.Truncated || inventory.Message != "" ||
+		inventory.ObservedAt.IsZero() || now.Before(inventory.ObservedAt.Time) {
+		return false
+	}
+	return usageConditionsPositive(pool)
+}
+
+func usageConditionsPositive(pool volumeapi.Pool) bool {
+	kinds := []string{volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable}
+	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint {
+		kinds = append(kinds, volumeapi.PoolConditionMounted)
+	}
+	if pool.CapacityPolicy != "" {
+		backing := volumeapi.PoolConditionCapacityBackingVerified
+		if meta.FindStatusCondition(pool.Status.Conditions, backing) == nil {
+			backing = volumeapi.PoolConditionCapacityIndependent
+		}
+		kinds = append(kinds, backing)
+	}
+	for _, kind := range kinds {
+		condition := meta.FindStatusCondition(pool.Status.Conditions, kind)
+		if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration <= 0 || condition.ObservedGeneration > pool.Generation {
+			return false
+		}
+	}
+	return true
+}
+
+func waitUsageObservation(ctx context.Context) error {
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func measurementCopy(ctx context.Context, registry measurementRegistry, options measurementOptions) (*volume.CopyIdentity, error) {
@@ -176,11 +301,11 @@ func measurementCopy(ctx context.Context, registry measurementRegistry, options 
 
 func readMeasurement(ctx context.Context, action string, options measurementOptions) (string, error) {
 	if action == "statfs" {
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs(options.root, &stat); err != nil {
+		stats, err := measurement.ReadFilesystem(options.root)
+		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("%d %d %d %d", stat.Blocks, stat.Bavail, stat.Bsize, stat.Ffree), nil
+		return fmt.Sprintf("%d %d 1 %d", stats.TotalBytes, stats.AvailableBytes, stats.AvailableInodes), nil
 	}
 	path, err := volume.Path(options.root, options.volumeID)
 	if err != nil {

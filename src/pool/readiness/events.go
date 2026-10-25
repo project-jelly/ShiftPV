@@ -59,7 +59,9 @@ func poolChangeHandler(nodeName string, wake chan<- struct{}) cache.ResourceEven
 			newPool := newObject.(*unstructured.Unstructured)
 			if oldPool.GetUID() == newPool.GetUID() && oldPool.GetGeneration() == newPool.GetGeneration() &&
 				oldPool.GetDeletionTimestamp().Equal(newPool.GetDeletionTimestamp()) &&
-				oldPool.GetAnnotations()[volumeapi.PoolIdentityReleaseAnnotation] == newPool.GetAnnotations()[volumeapi.PoolIdentityReleaseAnnotation] {
+				oldPool.GetAnnotations()[volumeapi.PoolIdentityReleaseAnnotation] == newPool.GetAnnotations()[volumeapi.PoolIdentityReleaseAnnotation] &&
+				oldPool.GetAnnotations()[volumeapi.PoolRetirementRequestAnnotation] == newPool.GetAnnotations()[volumeapi.PoolRetirementRequestAnnotation] &&
+				oldPool.GetAnnotations()[volumeapi.PoolRetirementApprovalAnnotation] == newPool.GetAnnotations()[volumeapi.PoolRetirementApprovalAnnotation] {
 				return
 			}
 			notify(oldPool)

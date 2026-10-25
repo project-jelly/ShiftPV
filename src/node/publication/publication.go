@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -86,8 +87,11 @@ func (p Publisher) Publish(ctx context.Context, req PublishRequest) error {
 			return fmt.Errorf("registered node pool changed before publish: %w", volumeapi.ErrStateConflict)
 		}
 		fresh, getErr := p.Volumes.Get(ctx, req.VolumeID)
-		if getErr != nil || fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.Phase != volumeapi.PhaseReady || fresh.OwnerNode != p.NodeName {
-			return fmt.Errorf("volume publish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
+		if getErr != nil {
+			return fmt.Errorf("read volume publish authority: %w", errors.Join(getErr, ErrObservationRetry))
+		}
+		if fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.Phase != volumeapi.PhaseReady || fresh.OwnerNode != p.NodeName {
+			return fmt.Errorf("volume publish authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		if verifyErr := store.VerifyServing(req.Copy); verifyErr != nil {
 			return verifyErr
@@ -114,7 +118,7 @@ func (p Publisher) Publish(ctx context.Context, req PublishRequest) error {
 // the caller needs to tell an unreached reconcile from a failed one.
 func (p Publisher) Unpublish(ctx context.Context, req UnpublishRequest) (bool, error) {
 	enteredLock := false
-	err := ownership.WithLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, func(*ownership.Store) error {
+	reconcile := func(*ownership.Store) error {
 		enteredLock = true
 		freshPool, freshPoolRoot, poolErr := p.Pools(ctx, req.Copy)
 		if poolErr != nil {
@@ -127,18 +131,29 @@ func (p Publisher) Unpublish(ctx context.Context, req UnpublishRequest) (bool, e
 			return ErrIdentityUnavailable
 		}
 		fresh, getErr := p.Volumes.Get(ctx, req.VolumeID)
-		if getErr == nil && fresh.CurrentCopy != nil && fresh.CurrentCopy.Role == volume.RoleServing && fresh.CurrentCopy.NodeName != p.NodeName {
+		if getErr != nil {
+			return fmt.Errorf("read volume unpublish authority: %w", errors.Join(getErr, ErrObservationRetry))
+		}
+		if fresh.CurrentCopy != nil && fresh.CurrentCopy.Role == volume.RoleServing && fresh.CurrentCopy.NodeName != p.NodeName {
 			return nil
 		}
-		if getErr != nil || fresh.UID != req.StateUID || fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.OwnerNode != p.NodeName {
-			return fmt.Errorf("volume unpublish authority changed: %w", errors.Join(getErr, volumeapi.ErrStateConflict))
+		if fresh.UID != req.StateUID || fresh.CurrentCopy == nil || *fresh.CurrentCopy != req.Copy || fresh.OwnerNode != p.NodeName {
+			return fmt.Errorf("volume unpublish authority changed: %w", volumeapi.ErrStateConflict)
 		}
 		stillPublished, inspectErr := p.Binder.HasPublishedTarget(req.Source, p.TargetRoot)
 		if inspectErr != nil {
 			return inspectErr
 		}
 		return p.Volumes.ReconcilePublished(ctx, req.VolumeID, p.NodeName, req.Copy, stillPublished)
-	})
+	}
+	// Reconciliation only reads the local Pool. Join the existing lock without
+	// requiring a write-open on a backing filesystem that may now be read-only.
+	err := ownership.WithExistingLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, reconcile)
+	if !enteredLock && errors.Is(err, os.ErrNotExist) {
+		// Preserve missing-lock initialization on writable Pools. Never retry an
+		// entered callback or bypass a busy, unreadable or foreign lock/store.
+		err = ownership.WithLock(ctx, req.PoolRoot, poolIdentity(req.Copy), req.VolumeID, reconcile)
+	}
 	return enteredLock, err
 }
 
@@ -150,7 +165,7 @@ func CopyMatchesPool(copy volume.CopyIdentity, pool volumeapi.Pool) bool {
 // PoolIdentityUnavailable reports whether the Pool read failed in a way that
 // leaves the node without a verifiable Pool identity.
 func PoolIdentityUnavailable(err error) bool {
-	return apierrors.IsNotFound(err) || errors.Is(err, volumeapi.ErrPoolNotFound) || errors.Is(err, volumeapi.ErrPoolConfiguration)
+	return apierrors.IsNotFound(err) || errors.Is(err, volumeapi.ErrPoolNotFound) || errors.Is(err, volumeapi.ErrPoolIdentityChanged) || errors.Is(err, volumeapi.ErrPoolConfiguration)
 }
 
 func poolIdentity(copy volume.CopyIdentity) ownership.PoolIdentity {

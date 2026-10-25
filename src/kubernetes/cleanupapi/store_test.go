@@ -125,6 +125,14 @@ func TestTransitionRequiresReceiptThenFreshAbsence(t *testing.T) {
 	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: missingDigest}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("digestless receipt entered Verifying: %v", err)
 	}
+	incomplete := &Receipt{OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID, ObservedAt: testNow(), Retired: true, LocalReceiptDigest: testReceiptDigest}
+	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: incomplete}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unpurged receipt entered Verifying: %v", err)
+	}
+	unchanged, err := store.Get(context.Background(), cleanup.Spec.Authority)
+	if err != nil || unchanged.Status.Phase != PhaseRunning || unchanged.Status.Receipt != nil || unchanged.Status.Executor == nil || *unchanged.Status.Executor != *executor {
+		t.Fatalf("unpurged receipt changed journal: current=%#v err=%v", unchanged, err)
+	}
 	receipt := &Receipt{OperationID: cleanup.Spec.OperationID, ExecutorUID: executor.JobUID, ObservedAt: testNow(), Retired: true, Purged: true, LocalReceiptDigest: testReceiptDigest}
 	if err := store.UpdateStatus(context.Background(), cleanup, Status{Phase: PhaseVerifying, Executor: executor, Receipt: receipt}); err != nil {
 		t.Fatal(err)
@@ -498,3 +506,51 @@ func copyObservationMap(identity CopyIdentity, present bool) map[string]any {
 }
 
 func testNow() string { return time.Unix(1_700_000_200, 0).UTC().Format(time.RFC3339Nano) }
+
+func TestGetHistoryReadsUnprotectedExactParentWithoutGrantingWrites(t *testing.T) {
+	for _, kind := range []string{"ShiftPVVolume", "ShiftPVMove"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			name, uid, finalizer, reason := testVolumeID, "volume-uid", volumeapi.VolumeProtectionFinalizer, "VolumeDelete"
+			resource := volumeapi.VolumeResource
+			if kind == "ShiftPVMove" {
+				name, uid, finalizer, reason = "move-history", "move-uid", volumeapi.MoveProtectionFinalizer, "MoveSource"
+				resource = volumeapi.MoveResource
+			}
+			store, client := testStore(testParent(kind, name, uid, finalizer))
+			expected, err := store.Ensure(ctx, testSpec(kind, name, uid, reason))
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent, err := client.Resource(resource).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent.SetFinalizers(nil)
+			if _, err := client.Resource(resource).Update(ctx, parent, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			client.ClearActions()
+			history, err := store.GetHistory(ctx, expected.Spec.Authority)
+			if err != nil || history.Spec != expected.Spec || history.UID != uid || history.Status.Phase != PhasePending {
+				t.Fatalf("history=%+v err=%v", history, err)
+			}
+			if _, err := store.Get(ctx, expected.Spec.Authority); !errors.Is(err, ErrConflict) {
+				t.Fatalf("unprotected execution read allowed: %v", err)
+			}
+			if err := store.UpdateStatus(ctx, history, history.Status); !errors.Is(err, ErrConflict) {
+				t.Fatalf("history granted write authority: %v", err)
+			}
+			replaced := expected.Spec.Authority
+			replaced.UID = "other-uid"
+			if _, err := store.GetHistory(ctx, replaced); !errors.Is(err, ErrConflict) {
+				t.Fatalf("replaced parent accepted: %v", err)
+			}
+			for _, action := range client.Actions() {
+				if action.GetVerb() != "get" {
+					t.Fatalf("history path mutated: %+v", action)
+				}
+			}
+		})
+	}
+}

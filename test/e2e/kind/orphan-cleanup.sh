@@ -74,7 +74,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: data
 spec:
-  storageClassName: shiftpv
+  storageClassName: shiftpv-retain
   accessModes: [ReadWriteOnce]
   volumeMode: Filesystem
   resources:
@@ -116,6 +116,9 @@ test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.requestName
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.initialNode}')" = "${NODE}"
 test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.spec.capacityBytes}')" = 8388608
 
+# Preserve the copy before removing API parents. Delete reclaim policy would
+# authorize CSI cleanup concurrently with this synthetic orphan scenario.
+test "$(kubectl get "pv/${PV_NAME}" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}')" = Retain
 kubectl -n "${NAMESPACE}" delete pod/writer --wait=true
 kubectl -n "${NAMESPACE}" delete pvc/data --wait=true
 kubectl wait --for=jsonpath='{.status.phase}'=Released "pv/${PV_NAME}" --timeout=2m

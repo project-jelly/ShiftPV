@@ -39,13 +39,14 @@ type CleanupRepository interface {
 }
 
 type Checker struct {
-	Client            kubernetes.Interface
-	Volumes           VolumeRepository
-	StorageClassNames []string
-	Namespace         string
-	Cleanups          CleanupRepository
-	Now               func() time.Time
-	InventoryMaxAge   time.Duration
+	Client                  kubernetes.Interface
+	Volumes                 VolumeRepository
+	StorageClassNames       []string
+	Namespace               string
+	Cleanups                CleanupRepository
+	Now                     func() time.Time
+	InventoryMaxAge         time.Duration
+	PreserveRetiredPoolUIDs []string
 }
 
 type Blocker struct {
@@ -71,16 +72,37 @@ func (c *Checker) Check(ctx context.Context) (Report, error) {
 }
 
 func (c *Checker) ReleasePoolProtection(ctx context.Context) error {
+	return c.ReleasePoolProtectionAfter(ctx, time.Time{})
+}
+
+// ReleasePoolProtectionAfter retains the same quiesce observation boundary when
+// rechecking an explicit preservation before releasing ordinary registrations.
+func (c *Checker) ReleasePoolProtectionAfter(ctx context.Context, inventoryAfter time.Time) error {
 	if c == nil || c.Volumes == nil {
 		return fmt.Errorf("uninstall checker is not configured")
+	}
+	// A preserved retirement is an exception to physical observation, never to
+	// current logical obligations. Recheck them after quiesce and before release.
+	if len(c.PreserveRetiredPoolUIDs) > 0 {
+		report, err := c.CheckAfter(ctx, inventoryAfter)
+		if err != nil {
+			return err
+		}
+		if !report.Safe() {
+			return fmt.Errorf("storage dependencies changed before Pool protection release: %+v", report.Blockers)
+		}
 	}
 	pools, err := c.Volumes.ListPoolRegistrations(ctx)
 	if err != nil {
 		return fmt.Errorf("list ShiftPVPools: %w", err)
 	}
+	preserved, err := c.preservedPoolUIDs(pools)
+	if err != nil {
+		return err
+	}
 	var result error
 	for _, pool := range pools {
-		if !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
+		if preserved[pool.UID] || !slices.Contains(pool.Finalizers, PoolProtectionFinalizer) {
 			continue
 		}
 		if err := c.Volumes.RemovePoolFinalizer(ctx, pool.Name, pool.UID); err != nil {
@@ -318,7 +340,8 @@ func poolVolumeBlockers(volumes map[string]volumeapi.State, pool volumeapi.Pool)
 		if known && !usesPool {
 			continue
 		}
-		if !known && !slices.Contains(state.PublishedNodes, pool.NodeName) && state.OwnerNode != pool.NodeName {
+		if !known && !slices.Contains(state.PublishedNodes, pool.NodeName) && state.OwnerNode != pool.NodeName &&
+			!(state.Phase == "" && state.InitialNode == pool.NodeName) {
 			continue
 		}
 		reason := "owner=" + state.OwnerNode
@@ -384,15 +407,27 @@ func (c *Checker) cleanupBlockers(ctx context.Context, pool *volumeapi.Pool) ([]
 
 // poolBlockers reports the inventory and retained identity of every Pool.
 func (c *Checker) poolBlockers(ctx context.Context, inventoryAfter time.Time) ([]Blocker, error) {
-	pools, err := c.Volumes.ListPools(ctx)
+	pools, err := c.Volumes.ListPoolRegistrations(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list ShiftPVPools: %w", err)
+	}
+	preserved, err := c.preservedPoolUIDs(pools)
+	if err != nil {
+		return nil, err
 	}
 	now := c.now()
 	maxAge := c.inventoryMaxAge()
 	observedAfter := inventoryAfter.UTC()
 	blockers := []Blocker{}
 	for _, pool := range pools {
+		if preserved[pool.UID] {
+			report, err := c.retirementReferences(ctx, pool)
+			if err != nil {
+				return nil, err
+			}
+			blockers = append(blockers, report.Blockers...)
+			continue
+		}
 		blockers = append(blockers, poolInventoryBlockers(pool, now, maxAge, observedAfter)...)
 		if pool.DeletionTimestamp == nil {
 			continue
@@ -434,6 +469,10 @@ func copyUsesPool(copy *cleanupapi.CopyIdentity, pool volumeapi.Pool) bool {
 }
 
 func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
+	preparationUses, destinationKnown := preparationUsesPool(move.Status.Preparation, pool)
+	if preparationUses {
+		return true
+	}
 	sourceKnown := exactMoveCopy(move.Status.SourceCopy, move.Spec.VolumeID, move.Spec.SourceNode, volume.RoleServing)
 	if sourceKnown {
 		if copyUsesPool(move.Status.SourceCopy, pool) {
@@ -443,7 +482,6 @@ func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
 		return true
 	}
 
-	destinationKnown := false
 	for _, candidate := range []struct {
 		identity *volume.CopyIdentity
 		role     string
@@ -465,11 +503,30 @@ func moveUsesPool(move volumeapi.Move, pool volumeapi.Pool) bool {
 	return !destinationKnown && (move.Status.DestinationNode == pool.NodeName || slices.Contains(move.Status.CandidateNodes, pool.NodeName))
 }
 
+func preparationUsesPool(preparation *volumeapi.MovePreparation, pool volumeapi.Pool) (uses, known bool) {
+	if preparation == nil {
+		return false, false
+	}
+	// A contradictory name or node must not erase a retained Pool UID.
+	if preparation.Pool.UID == pool.UID {
+		return true, true
+	}
+	if volume.ValidObjectName(preparation.Pool.Name) && volume.ValidIdentityToken(preparation.Pool.UID) &&
+		volume.ValidObjectName(preparation.NodeName) {
+		return false, true
+	}
+	// Without an exact target, retain protection wherever it might belong.
+	return preparation.Pool.Name == pool.Name || preparation.NodeName == "" || preparation.NodeName == pool.NodeName, false
+}
+
 func exactMoveCopy(copy *volume.CopyIdentity, volumeID, nodeName, role string) bool {
 	return copy != nil && copy.Validate() == nil && copy.VolumeID == volumeID && copy.NodeName == nodeName && copy.Role == role
 }
 
 func currentCopyUsesPool(volumeID string, state volumeapi.State, pool volumeapi.Pool) (bool, bool) {
+	if state.HasInitialReservation() {
+		return state.InitialPool.Name == pool.Name && state.InitialPool.UID == pool.UID, true
+	}
 	copy := state.CurrentCopy
 	if copy == nil || copy.Validate() != nil || copy.VolumeID != volumeID || copy.VolumeUID != state.UID || copy.NodeName != state.OwnerNode || copy.Role != volume.RoleServing {
 		return false, false

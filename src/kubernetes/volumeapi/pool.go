@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
@@ -32,6 +31,8 @@ type Pool struct {
 	DeletionTimestamp       *metav1.Time
 	Finalizers              []string
 	IdentityReleaseApproval string
+	RetirementRequest       string
+	RetirementApproval      string
 	CapacityProbeRequest    string
 	Status                  PoolStatus
 }
@@ -39,17 +40,20 @@ type Pool struct {
 const DefaultPoolGroup = "default"
 
 type PoolStatus struct {
+	RegistrationApproved   bool                     `json:"registrationApproved,omitempty"`
 	CapacityProbeSupported bool                     `json:"capacityProbeSupported,omitempty"`
 	CapacityProbe          *PoolCapacityProbeResult `json:"capacityProbe,omitempty"`
-	// FilesystemTotalBytes is a node observation for rejection classification,
-	// never a substitute for live free-space admission.
-	FilesystemTotalBytes int64              `json:"filesystemTotalBytes,omitempty"`
-	ObservedGeneration   int64              `json:"observedGeneration,omitempty"`
-	LastProbeTime        metav1.Time        `json:"lastProbeTime,omitempty"`
-	CapacityUnit         *PoolCapacityUnit  `json:"capacityUnit,omitempty"`
-	MountIdentity        *PoolMountIdentity `json:"mountIdentity,omitempty"`
-	Conditions           []metav1.Condition `json:"conditions,omitempty"`
-	Inventory            *PoolInventory     `json:"inventory,omitempty"`
+	// Filesystem observations share ObservedGeneration and LastProbeTime.
+	// They never replace live admission; nil availability means unobserved.
+	FilesystemTotalBytes      int64              `json:"filesystemTotalBytes,omitempty"`
+	FilesystemAvailableBytes  *int64             `json:"filesystemAvailableBytes,omitempty"`
+	FilesystemAvailableInodes *int64             `json:"filesystemAvailableInodes,omitempty"`
+	ObservedGeneration        int64              `json:"observedGeneration,omitempty"`
+	LastProbeTime             metav1.Time        `json:"lastProbeTime,omitempty"`
+	CapacityUnit              *PoolCapacityUnit  `json:"capacityUnit,omitempty"`
+	MountIdentity             *PoolMountIdentity `json:"mountIdentity,omitempty"`
+	Conditions                []metav1.Condition `json:"conditions,omitempty"`
+	Inventory                 *PoolInventory     `json:"inventory,omitempty"`
 }
 
 // PoolCapacityProbeResult answers one causally requested read. A result from a
@@ -73,10 +77,13 @@ type PoolMountIdentity struct {
 	Filesystem string `json:"filesystem"`
 }
 
+const InventoryPhysicalChanged = "PhysicalInventoryChanged"
+
 type PoolInventory struct {
 	ObservedAt metav1.Time       `json:"observedAt"`
 	Valid      bool              `json:"valid"`
 	Truncated  bool              `json:"truncated,omitempty"`
+	Reason     string            `json:"reason,omitempty"`
 	Message    string            `json:"message,omitempty"`
 	Copies     []CopyObservation `json:"copies,omitempty"`
 }
@@ -97,23 +104,12 @@ func (r *Registry) Pools(ctx context.Context) ([]Pool, error) {
 	return pools, err
 }
 
-// ListPools permits an empty registry for read-only inventory.
+// ListPools retains every registration for inventory and peer safety checks.
+// Placement validates each Pool independently; an empty registry is allowed.
 func (r *Registry) ListPools(ctx context.Context) ([]Pool, error) {
 	pools, err := r.ListPoolRegistrations(ctx)
 	if err != nil {
 		return nil, err
-	}
-	nodes := make(map[string]Pool, len(pools))
-	for _, pool := range pools {
-		if pool.NodeName == "" || len(validation.IsDNS1123Label(pool.PoolGroup)) != 0 || !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" ||
-			(pool.MountPolicy != "" && pool.MountPolicy != PoolMountPolicyRequireMountPoint) ||
-			(pool.CapacityPolicy != "" && pool.CapacityPolicy != PoolCapacityPolicyFixedBlock) {
-			return nil, fmt.Errorf("%w: ShiftPVPool %q has invalid nodeName, poolGroup, mountPath, mountPolicy, or capacityPolicy", ErrPoolConfiguration, pool.Name)
-		}
-		if previous, duplicate := nodes[pool.NodeName]; duplicate && (pool.CapacityPolicy != PoolCapacityPolicyFixedBlock || previous.CapacityPolicy != PoolCapacityPolicyFixedBlock) {
-			return nil, duplicatePoolError(pool.NodeName)
-		}
-		nodes[pool.NodeName] = pool
 	}
 	sort.Slice(pools, func(left, right int) bool {
 		if pools[left].NodeName != pools[right].NodeName {
@@ -148,13 +144,15 @@ func (r *Registry) ListPoolRegistrations(ctx context.Context) ([]Pool, error) {
 }
 
 // PoolSnapshot keeps registration and placement readiness on the same API read.
+// An empty snapshot is valid: capacity publication must withdraw old capacity
+// after the final Pool is removed.
 type PoolSnapshot struct {
 	Registered []Pool
 	Ready      []Pool
 }
 
 func (r *Registry) ObservePools(ctx context.Context) (PoolSnapshot, error) {
-	pools, err := r.Pools(ctx)
+	pools, err := r.ListPools(ctx)
 	if err != nil {
 		return PoolSnapshot{}, err
 	}
@@ -173,6 +171,9 @@ func (r *Registry) ObservePools(ctx context.Context) (PoolSnapshot, error) {
 
 func (r *Registry) ReadyPools(ctx context.Context) ([]Pool, error) {
 	snapshot, err := r.ObservePools(ctx)
+	if err == nil && len(snapshot.Registered) == 0 {
+		return nil, fmt.Errorf("%w: no ShiftPVPool nodes are registered", ErrPoolConfiguration)
+	}
 	return snapshot.Ready, err
 }
 
@@ -192,6 +193,9 @@ func (r *Registry) PoolNodesForGroup(ctx context.Context, group string) ([]strin
 	}
 	nodes := make(map[string]struct{}, len(pools))
 	for _, pool := range pools {
+		if !pool.TopologyConfigurationCheck().OK {
+			continue
+		}
 		if group != "" && pool.PoolGroup != group {
 			continue
 		}
@@ -215,7 +219,7 @@ func (r *Registry) PoolForNode(ctx context.Context, nodeName string) (Pool, erro
 	}
 	var result Pool
 	for _, pool := range pools {
-		if pool.NodeName != nodeName {
+		if pool.NodeName != nodeName || pool.RegistrationRetired() {
 			continue
 		}
 		if result.NodeName != "" {
@@ -243,7 +247,7 @@ func (r *Registry) PoolForNodeLifecycle(ctx context.Context, nodeName string) (P
 	candidates := make([]Pool, 0, 2)
 	deleting := make([]Pool, 0, 1)
 	for _, pool := range pools {
-		if pool.NodeName != nodeName {
+		if pool.NodeName != nodeName || pool.RegistrationRetired() && pool.DeletionTimestamp == nil {
 			continue
 		}
 		candidates = append(candidates, pool)
@@ -292,7 +296,7 @@ func (r *Registry) PoolForIdentity(ctx context.Context, name, uid, nodeName stri
 		return Pool{}, err
 	}
 	if pool.UID != uid || pool.NodeName != nodeName {
-		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q identity changed", ErrStateConflict, name)
+		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q", ErrPoolIdentityChanged, name)
 	}
 	if !filepath.IsAbs(pool.MountPath) || pool.MountPath == "/" {
 		return Pool{}, fmt.Errorf("%w: ShiftPVPool %q has invalid mountPath", ErrPoolConfiguration, name)
@@ -312,9 +316,9 @@ func (r *Registry) ReadyPoolForNode(ctx context.Context, nodeName string) (Pool,
 	return pool, nil
 }
 
-// CleanupPoolForIdentity checks an approved cleanup's exact Pool and backing
-// readiness. Placement inventory and peer admission do not authorize cleanup;
-// complete post-effect inventory is required later to release its hold.
+// CleanupPoolForIdentity checks an approved native cleanup's exact Pool and
+// backing observation. Its executor must also verify live anchored backing.
+// Complete post-effect inventory is required separately to release its hold.
 func (r *Registry) CleanupPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
 	pool, err := r.PoolForIdentity(ctx, name, uid, nodeName)
 	if err != nil {
@@ -324,8 +328,22 @@ func (r *Registry) CleanupPoolForIdentity(ctx context.Context, name, uid, nodeNa
 		return Pool{}, fmt.Errorf("%w: cleanup Pool protection is unavailable", ErrStateConflict)
 	}
 	now, staleAfter := r.readiness()
-	if ready, reason := pool.CleanupReadyAt(now, staleAfter); !ready {
+	if ready, reason := pool.ExecutionReadyAt(now, staleAfter); !ready {
 		return Pool{}, fmt.Errorf("%w: cleanup Pool %q: %s", ErrPoolNotReady, pool.Name, reason)
+	}
+	return pool, nil
+}
+
+// InventoryPoolForIdentity proves current backing and complete scanner evidence
+// for an exact existing Pool. It does not authorize new allocation.
+func (r *Registry) InventoryPoolForIdentity(ctx context.Context, name, uid, nodeName string) (Pool, error) {
+	pool, err := r.PoolForIdentity(ctx, name, uid, nodeName)
+	if err != nil {
+		return Pool{}, err
+	}
+	now, staleAfter := r.readiness()
+	if ready, reason := pool.InventoryReadyAt(now, staleAfter); !ready {
+		return Pool{}, fmt.Errorf("%w: inventory Pool %q: %s", ErrPoolNotReady, pool.Name, reason)
 	}
 	return pool, nil
 }
@@ -344,7 +362,7 @@ func (r *Registry) ReadyPoolForIdentity(ctx context.Context, name, uid, nodeName
 			continue
 		}
 		if pool.UID != uid || pool.NodeName != nodeName {
-			return Pool{}, fmt.Errorf("%w: ShiftPVPool %q identity changed", ErrStateConflict, name)
+			return Pool{}, fmt.Errorf("%w: ShiftPVPool %q", ErrPoolIdentityChanged, name)
 		}
 		now, staleAfter := r.readiness()
 		if ready, reason := poolReady(pool, now, staleAfter); !ready {
@@ -375,6 +393,9 @@ func (r *Registry) readiness() (time.Time, time.Duration) {
 // poolReady is the single gate that admits a Pool for new placement: a fresh
 // Ready probe, a complete inventory, and installed deregistration protection.
 func poolReady(pool Pool, now time.Time, staleAfter time.Duration) (bool, string) {
+	if check := pool.ConfigurationCheck(); !check.OK {
+		return false, check.Reason
+	}
 	if ready, reason := pool.ReadyAt(now, staleAfter); !ready {
 		return false, reason
 	}
@@ -396,7 +417,7 @@ func poolInventoryReadyAt(pool Pool, now time.Time, staleAfter time.Duration) (b
 	if inventory == nil {
 		return false, "InventoryMissing"
 	}
-	if !inventory.Valid {
+	if !inventory.Valid || inventory.Message != "" {
 		return false, "InventoryInvalid"
 	}
 	if inventory.Truncated {
@@ -474,6 +495,12 @@ func (r *Registry) SetPoolStatus(ctx context.Context, name, uid, nodeName string
 			if current.Status.CapacityUnit != nil && !SameCapacityUnit(current.Status.CapacityUnit, status.CapacityUnit) {
 				return fmt.Errorf("%w: ShiftPVPool %q capacity identity cannot be changed or cleared", ErrStateConflict, name)
 			}
+			if current.Status.RegistrationApproved && !status.RegistrationApproved {
+				return fmt.Errorf("%w: ShiftPVPool %q registration approval cannot be cleared", ErrStateConflict, name)
+			}
+			if status.ObservedGeneration != 0 && status.ObservedGeneration != current.Generation {
+				return fmt.Errorf("%w: ShiftPVPool %q", ErrPoolObservationChanged, name)
+			}
 			if status.CapacityUnit != nil {
 				if err := status.CapacityUnit.Validate(); err != nil {
 					return fmt.Errorf("invalid ShiftPVPool capacity identity: %w", err)
@@ -546,6 +573,16 @@ func (r *Registry) updatePoolFinalizer(ctx context.Context, name, uid string, pr
 }
 
 func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	return p.readyAt(now, staleAfter, p.Generation)
+}
+
+func (p Pool) readyAt(now time.Time, staleAfter time.Duration, generation int64) (bool, string) {
+	if p.RegistrationRetired() {
+		return false, "PoolRegistrationRetired"
+	}
+	if p.RetirementRequested() {
+		return false, "PoolRetirementPending"
+	}
 	if p.DeletionTimestamp != nil {
 		return false, "PoolDeregistering"
 	}
@@ -556,28 +593,28 @@ func (p Pool) ReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
 		}
 		return false, "ProbePending"
 	}
-	if p.Status.ObservedGeneration != p.Generation || condition.ObservedGeneration != p.Generation {
+	if p.Status.ObservedGeneration != generation || condition.ObservedGeneration != generation {
 		return false, "ProbeOutdated"
 	}
 	if p.Status.LastProbeTime.IsZero() || staleAfter <= 0 || now.Sub(p.Status.LastProbeTime.Time) > staleAfter || now.Before(p.Status.LastProbeTime.Time) {
 		return false, "ProbeStale"
 	}
-	if ready, reason := p.mountReady(); !ready {
+	if ready, reason := p.mountReady(generation); !ready {
 		return false, reason
 	}
-	if ready, reason := p.capacityReady(); !ready {
+	if ready, reason := p.capacityReadyAt(generation); !ready {
 		return false, reason
 	}
 	return true, condition.Reason
 }
 
-func (p Pool) mountReady() (bool, string) {
+func (p Pool) mountReady(generation int64) (bool, string) {
 	if p.MountPolicy == PoolMountPolicyRequireMountPoint {
 		if p.Status.MountIdentity == nil {
 			return false, "MountIdentityMissing"
 		}
 		mounted := meta.FindStatusCondition(p.Status.Conditions, PoolConditionMounted)
-		if mounted != nil && mounted.ObservedGeneration != p.Generation {
+		if mounted != nil && mounted.ObservedGeneration != generation {
 			return false, "MountProbeOutdated"
 		}
 		if mounted == nil || mounted.Status != metav1.ConditionTrue {
@@ -590,20 +627,50 @@ func (p Pool) mountReady() (bool, string) {
 	return true, ""
 }
 
-// CleanupReadyAt keeps an exact, already-approved cleanup executable while a
-// Pool is terminating. New placement continues to use ReadyAt and remains
-// closed for the same Pool.
+// CleanupReadyAt keeps exact, already-approved cleanup executable independently
+// of placement eligibility, using fresh current backing and directory evidence.
 func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
-	if p.DeletionTimestamp == nil {
-		return p.ReadyAt(now, staleAfter)
+	return p.cleanupReadyAt(now, staleAfter, p.Generation)
+}
+
+// InventoryReadyAt requires protected, current backing and a complete fresh scan
+// for existing-copy evidence, never a new allocation decision.
+func (p Pool) InventoryReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	if ready, reason := p.CleanupReadyAt(now, staleAfter); !ready {
+		return false, reason
+	}
+	if ready, reason := poolInventoryReadyAt(p, now, staleAfter); !ready {
+		return false, reason
+	}
+	if !slices.Contains(p.Finalizers, PoolProtectionFinalizer) {
+		return false, "PoolProtectionMissing"
+	}
+	return true, "PoolInventoryReady"
+}
+
+// ExecutionReadyAt is only for exact, already-approved native effects that also
+// verify live mount and block-allocation identity at every authority boundary.
+// A newer scan request does not revoke the original reservation. Retain fresh,
+// coherent successful backing evidence; never use this for placement, Helper
+// execution, destination publication proof, or post-effect absence confirmation.
+func (p Pool) ExecutionReadyAt(now time.Time, staleAfter time.Duration) (bool, string) {
+	if p.Status.ObservedGeneration <= 0 || p.Status.ObservedGeneration > p.Generation {
+		return false, "ProbeOutdated"
+	}
+	return p.cleanupReadyAt(now, staleAfter, p.Status.ObservedGeneration)
+}
+
+func (p Pool) cleanupReadyAt(now time.Time, staleAfter time.Duration, generation int64) (bool, string) {
+	if check := p.BackingConfigurationCheck(); !check.OK {
+		return false, check.Reason
 	}
 	if p.MountPolicy == PoolMountPolicyRequireMountPoint && p.Status.MountIdentity == nil {
 		return false, "MountIdentityMissing"
 	}
-	if p.Status.ObservedGeneration != p.Generation {
+	if p.Status.ObservedGeneration != generation {
 		return false, "ProbeOutdated"
 	}
-	if ready, reason := p.capacityReady(); !ready {
+	if ready, reason := p.capacityBackingReadyAt(generation); !ready {
 		return false, reason
 	}
 	conditionTypes := []string{PoolConditionAccessible, PoolConditionWritable, PoolConditionCapacityReadable}
@@ -615,7 +682,7 @@ func (p Pool) CleanupReadyAt(now time.Time, staleAfter time.Duration) (bool, str
 		if condition == nil {
 			return false, "ProbePending"
 		}
-		if condition.ObservedGeneration != p.Generation {
+		if condition.ObservedGeneration != generation {
 			return false, "ProbeOutdated"
 		}
 		if condition.Status != metav1.ConditionTrue {
@@ -653,6 +720,7 @@ func poolFrom(object *unstructured.Unstructured) (Pool, error) {
 		Name: object.GetName(), UID: string(object.GetUID()), NodeName: nodeName, PoolGroup: poolGroup, MountPath: filepath.Clean(mountPath), MountPolicy: mountPolicy, CapacityPolicy: capacityPolicy,
 		CapacityLimit: capacityLimit, Generation: object.GetGeneration(), DeletionTimestamp: object.GetDeletionTimestamp(),
 		Finalizers: append([]string(nil), object.GetFinalizers()...), IdentityReleaseApproval: object.GetAnnotations()[PoolIdentityReleaseAnnotation],
+		RetirementRequest: object.GetAnnotations()[PoolRetirementRequestAnnotation], RetirementApproval: object.GetAnnotations()[PoolRetirementApprovalAnnotation],
 		CapacityProbeRequest: object.GetAnnotations()[PoolCapacityProbeRequestAnnotation], Status: status,
 	}, nil
 }

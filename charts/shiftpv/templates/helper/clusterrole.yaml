@@ -12,6 +12,3 @@ rules:
   - apiGroups: ["shiftpv.io"]
     resources: ["shiftpvpools", "shiftpvvolumes", "shiftpvmoves"]
     verbs: ["get", "list"]
-  - apiGroups: ["shiftpv.io"]
-    resources: ["shiftpvvolumes/status", "shiftpvmoves/status"]
-    verbs: ["update"]

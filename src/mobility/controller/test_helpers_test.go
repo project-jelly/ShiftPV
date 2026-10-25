@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -17,6 +18,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -24,7 +26,7 @@ import (
 // share. Anything beyond it is an explicit option so each test still reads as
 // the exact configuration it exercises.
 func newTestReconciler(client kubernetes.Interface, repository Repository, options ...func(*Reconciler)) *Reconciler {
-	reconciler := &Reconciler{Client: client, Repository: repository, Namespace: "system", HelperImage: "helper"}
+	reconciler := &Reconciler{HistoryInspector: &helperpod.Inspector{Client: client, Namespace: "system"}, Client: client, Repository: repository, Namespace: "system", HelperImage: "helper", SourceUsage: fakeMoveCapacityProbe{}, PoolLocks: &poolcapacity.Locker{}, PlacementPriorityClassName: DefaultPlacementPriorityClassName}
 	for _, option := range options {
 		option(reconciler)
 	}
@@ -41,14 +43,24 @@ func withTestCleanups() func(*Reconciler) {
 	}
 }
 
-// recordingCleanupOperator counts executor requests without ever fabricating a
-// receipt. A path that must not start destructive work is proven by its zero
-// count, not by an empty Job list the fake would show anyway.
-type recordingCleanupOperator struct{ reclaims int }
+// recordingCleanupOperator counts new executor requests without fabricating a
+// receipt. Receipt-bearing fixture journals explicitly model a settled executor;
+// actual live Job/Pod settlement is covered by cleanup_job_reentry_test.go.
+type recordingCleanupOperator struct{ reclaims, observations int }
 
-func (o *recordingCleanupOperator) Reclaim(context.Context, cleanupapi.Cleanup, helperpod.CleanupJournal) (cleanupapi.Cleanup, error) {
+func (o *recordingCleanupOperator) ObserveCompletedCleanup(_ context.Context, current cleanupapi.Cleanup) (bool, error) {
+	o.observations++
+	err := cleanupapi.ValidateSettled(current)
+	return err == nil, err
+}
+
+func (o *recordingCleanupOperator) AdvanceReclaim(_ context.Context, current cleanupapi.Cleanup, _ cleanupapi.Journal) (cleanupapi.Cleanup, bool, error) {
+	if cleanupReceiptComplete(current, current.Spec) {
+		o.observations++
+		return current, true, nil
+	}
 	o.reclaims++
-	return cleanupapi.Cleanup{}, fmt.Errorf("cleanup executor was requested")
+	return cleanupapi.Cleanup{}, false, fmt.Errorf("cleanup executor was requested")
 }
 
 // withRecordingCleanupOperator replaces the receipt-fabricating stub so a test
@@ -67,11 +79,18 @@ func withCleanupsFrom(other *Reconciler) func(*Reconciler) {
 }
 
 func assignJobUIDs(client *fake.Clientset) {
+	var mu sync.Mutex
+	creations := map[string]int{}
 	for _, resource := range []string{"jobs", "pods", "services", "configmaps", "secrets"} {
 		client.PrependReactor("create", resource, func(action ktesting.Action) (bool, runtime.Object, error) {
 			object := action.(ktesting.CreateAction).GetObject().(metav1.Object)
 			if object.GetUID() == "" {
-				object.SetUID(types.UID(object.GetName() + "-uid"))
+				mu.Lock()
+				key := resource + "/" + action.GetNamespace() + "/" + object.GetName()
+				creations[key]++
+				generation := creations[key]
+				mu.Unlock()
+				object.SetUID(types.UID(fmt.Sprintf("%s-uid-%d", object.GetName(), generation)))
 			}
 			return false, nil, nil
 		})

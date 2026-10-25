@@ -7,6 +7,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/project-jelly/ShiftPV/src/volume/deletion"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,24 +23,32 @@ var (
 	PoolResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvpools"}
 	MoveResource   = schema.GroupVersionResource{Group: "shiftpv.io", Version: "v1alpha1", Resource: "shiftpvmoves"}
 
-	ErrStateConflict     = errors.New("ShiftPV state precondition failed")
-	ErrPoolConfiguration = errors.New("ShiftPV Pool configuration is invalid")
-	ErrPoolNotFound      = errors.New("ShiftPV Pool is not registered")
-	ErrPoolNotReady      = errors.New("ShiftPV Pool is not ready")
-	ErrPoolCopyConflict  = errors.New("ShiftPV Pool contains a conflicting serving copy")
+	ErrStateConflict       = errors.New("ShiftPV state precondition failed")
+	ErrVolumePublished     = errors.New("volume publication is still being released")
+	ErrPoolConfiguration   = errors.New("ShiftPV Pool configuration is invalid")
+	ErrPoolNotFound        = errors.New("ShiftPV Pool is not registered")
+	ErrPoolIdentityChanged = fmt.Errorf("%w: ShiftPV Pool identity changed", ErrStateConflict)
+	ErrPoolNotReady        = errors.New("ShiftPV Pool is not ready")
+	ErrPoolCopyConflict    = errors.New("ShiftPV Pool contains a conflicting serving copy")
+	// ErrPoolObservationChanged is only a stale observation generation, not a
+	// changed Pool UID, node, registration approval, or backing identity.
+	ErrPoolObservationChanged = fmt.Errorf("%w: Pool observation generation changed", ErrStateConflict)
 )
 
 const (
-	PoolConditionReady               = "Ready"
-	PoolConditionAccessible          = "Accessible"
-	PoolConditionCapacityIndependent = "CapacityIndependent"
-	PoolConditionMounted             = "Mounted"
-	PoolConditionIdentityReleased    = "IdentityReleased"
-	PoolProtectionFinalizer          = "shiftpv.io/pool-protection"
-	PoolIdentityReleaseAnnotation    = "shiftpv.io/release-pool-identity"
-	PoolConditionWritable            = "Writable"
-	PoolConditionCapacityReadable    = "CapacityReadable"
-	DefaultPoolReadinessStaleAfter   = 3 * time.Minute
+	PoolConditionReady                   = "Ready"
+	PoolConditionAccessible              = "Accessible"
+	PoolConditionCapacityIndependent     = "CapacityIndependent"
+	PoolConditionCapacityBackingVerified = "CapacityBackingVerified"
+	PoolConditionMounted                 = "Mounted"
+	PoolConditionIdentityReleased        = "IdentityReleased"
+	PoolProtectionFinalizer              = "shiftpv.io/pool-protection"
+	PoolIdentityReleaseAnnotation        = "shiftpv.io/release-pool-identity"
+	PoolRetirementRequestAnnotation      = "shiftpv.io/retire-registration"
+	PoolRetirementApprovalAnnotation     = "shiftpv.io/registration-retired"
+	PoolConditionWritable                = "Writable"
+	PoolConditionCapacityReadable        = "CapacityReadable"
+	DefaultPoolReadinessStaleAfter       = 3 * time.Minute
 )
 
 const PoolMountPolicyRequireMountPoint = "RequireMountPoint"
@@ -49,8 +59,8 @@ const (
 
 	PhasePending      = "Pending"
 	PhaseNodeCreating = "NodeCreating"
-	PhaseReady        = "Ready"
-	PhaseDeleting     = "Deleting"
+	PhaseReady        = deletion.PhaseReady
+	PhaseDeleting     = deletion.PhaseDeleting
 	PhaseMoving       = "Moving"
 	PhaseBlocked      = "Blocked"
 )

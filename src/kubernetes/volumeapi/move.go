@@ -10,18 +10,30 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
+const MoveProtocolPreparedV1 = "prepared-v1"
+
 type MoveSpec struct {
-	VolumeID   string
-	SourceNode string
-	Recovery   string
+	ProtocolVersion string
+	VolumeID        string
+	SourceNode      string
+	Recovery        string
+}
+
+type MovePreparation struct {
+	Pool          PoolReference `json:"pool"`
+	NodeName      string        `json:"nodeName"`
+	ReservedBytes int64         `json:"reservedBytes"`
 }
 
 type MoveStatus struct {
+	Preparation                *MovePreparation
+	PersistentVolumeUID        string
+	ClaimUID                   string
+	PlacementPodUID            string
 	Phase                      string
 	Reason                     string
 	Message                    string
@@ -50,6 +62,7 @@ type MoveStatus struct {
 	IncomingCopy               *volume.CopyIdentity
 	DestinationCopy            *volume.CopyIdentity
 	RollbackRequiredGeneration int64
+	SettlementRequested        bool
 	RecoveryPhase              string
 	RecoveryOwner              string
 	RecoveryReason             string
@@ -57,6 +70,7 @@ type MoveStatus struct {
 }
 
 type Move struct {
+	Deleting        bool
 	Name            string
 	UID             string
 	ResourceVersion string
@@ -76,6 +90,17 @@ func MoveReservesDestination(move Move, state State, nodeName string) bool {
 // temporary capacity holds. A terminal phase without embedded cleanup proof is
 // deliberately treated as unresolved.
 func MoveCleanupSettled(move Move) bool {
+	if move.Status.Preparation != nil || (move.Spec.ProtocolVersion != "" && move.Spec.ProtocolVersion != MoveProtocolPreparedV1) {
+		return false
+	}
+	if move.Spec.ProtocolVersion == MoveProtocolPreparedV1 {
+		if move.Status.Phase == "Cancelled" {
+			return !move.Status.CapacityApproved && !hasMoveDestinationIntent(move.Status)
+		}
+		if validatePreparedPlan(move) != nil {
+			return false
+		}
+	}
 	if move.Status.Phase == "Succeeded" {
 		return move.Status.CleanupPhase == "Completed"
 	}
@@ -87,16 +112,25 @@ func (r *Registry) CreateMove(ctx context.Context, generateName string, spec Mov
 	if err := r.validate(); err != nil {
 		return Move{}, err
 	}
+	if spec.ProtocolVersion != MoveProtocolPreparedV1 {
+		return Move{}, fmt.Errorf("unsupported Move protocol %q", spec.ProtocolVersion)
+	}
+	encodedSpec := map[string]any{"volumeID": spec.VolumeID, "sourceNode": spec.SourceNode, "protocolVersion": spec.ProtocolVersion}
+	options := metav1.CreateOptions{FieldValidation: metav1.FieldValidationStrict}
 	object, err := r.Client.Resource(MoveResource).Create(ctx, &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1",
 		"kind":       "ShiftPVMove",
 		"metadata":   map[string]any{"generateName": generateName, "finalizers": []any{MoveProtectionFinalizer}},
-		"spec":       map[string]any{"volumeID": spec.VolumeID, "sourceNode": spec.SourceNode},
-	}}, metav1.CreateOptions{})
+		"spec":       encodedSpec,
+	}}, options)
 	if err != nil {
 		return Move{}, fmt.Errorf("create ShiftPVMove: %w", err)
 	}
-	return moveFrom(object)
+	stored, err := moveFrom(object)
+	if err == nil && stored.Spec.ProtocolVersion != spec.ProtocolVersion {
+		return Move{}, fmt.Errorf("%w: Move protocol was not stored; upgrade the Move CRD", ErrStateConflict)
+	}
+	return stored, err
 }
 
 func (r *Registry) DeleteMove(ctx context.Context, name, uid string) error {
@@ -159,48 +193,22 @@ func (r *Registry) ListMoves(ctx context.Context) ([]Move, error) {
 	return result, nil
 }
 
-func (r *Registry) SetMoveStatus(ctx context.Context, name, uid string, status MoveStatus) error {
-	if err := r.validate(); err != nil {
-		return err
-	}
-	if name == "" || uid == "" {
-		return fmt.Errorf("ShiftPVMove name and UID are required for status update")
-	}
-	return r.mutateObject(ctx, objectMutation{
-		resource:   MoveResource,
-		kind:       "ShiftPVMove",
-		name:       name,
-		uid:        uid,
-		backoff:    retry.DefaultBackoff,
-		readError:  "get ShiftPVMove for status update",
-		writeError: "update ShiftPVMove status",
-		status:     true,
-		apply: func(object *unstructured.Unstructured) error {
-			current, err := moveStatusFrom(object)
-			if err != nil {
-				return err
-			}
-			if err := preserveMoveIdentity(current, status); err != nil {
-				return err
-			}
-			setMoveStatus(object, status)
-			return nil
-		},
-	})
-}
-
 func moveFrom(object *unstructured.Unstructured) (Move, error) {
 	volumeID, _, _ := unstructured.NestedString(object.Object, "spec", "volumeID")
 	sourceNode, _, _ := unstructured.NestedString(object.Object, "spec", "sourceNode")
 	recovery, _, _ := unstructured.NestedString(object.Object, "spec", "recovery")
+	protocol, _, err := unstructured.NestedString(object.Object, "spec", "protocolVersion")
+	if err != nil {
+		return Move{}, fmt.Errorf("decode protocolVersion: %w", err)
+	}
 	status, err := moveStatusFrom(object)
 	if err != nil {
 		return Move{}, err
 	}
 	return Move{
-		Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(),
+		Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion(), Deleting: object.GetDeletionTimestamp() != nil,
 		Finalizers: append([]string(nil), object.GetFinalizers()...),
-		Spec:       MoveSpec{VolumeID: volumeID, SourceNode: sourceNode, Recovery: recovery}, Status: status,
+		Spec:       MoveSpec{ProtocolVersion: protocol, VolumeID: volumeID, SourceNode: sourceNode, Recovery: recovery}, Status: status,
 	}, nil
 }
 
@@ -214,6 +222,10 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		return MoveStatus{}, fmt.Errorf("decode candidateNodes: %w", err)
 	}
 	evictionRequested, _, _ := unstructured.NestedBool(object.Object, "status", "evictionRequested")
+	settlementRequested, _, err := unstructured.NestedBool(object.Object, "status", "settlementRequested")
+	if err != nil {
+		return MoveStatus{}, fmt.Errorf("decode settlementRequested: %w", err)
+	}
 	rollbackGeneration, _, err := unstructured.NestedInt64(object.Object, "status", "rollbackRequiredGeneration")
 	if err != nil {
 		return MoveStatus{}, fmt.Errorf("decode rollbackRequiredGeneration: %w", err)
@@ -250,7 +262,12 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 	if err != nil {
 		return MoveStatus{}, fmt.Errorf("decode destinationCopy: %w", err)
 	}
+	preparation, err := movePreparationFrom(object)
+	if err != nil {
+		return MoveStatus{}, err
+	}
 	return MoveStatus{
+		Preparation: preparation, PersistentVolumeUID: read("persistentVolumeUID"), ClaimUID: read("persistentVolumeClaimUID"), PlacementPodUID: read("placementPodUID"),
 		Phase: read("phase"), Reason: read("reason"), Message: read("message"),
 		LastTransitionTime: read("lastTransitionTime"), LastProgressTime: read("lastProgressTime"),
 		PersistentVolumeName: read("persistentVolumeName"), ClaimNamespace: read("persistentVolumeClaimNamespace"),
@@ -262,6 +279,7 @@ func moveStatusFrom(object *unstructured.Unstructured) (MoveStatus, error) {
 		CopyOperationID: read("copyOperationID"), PromotionOperationID: read("promotionOperationID"),
 		SourceCopy: sourceCopy, IncomingCopy: incomingCopy, DestinationCopy: destinationCopy,
 		RollbackRequiredGeneration: rollbackGeneration,
+		SettlementRequested:        settlementRequested,
 		RecoveryPhase:              read("recoveryPhase"), RecoveryOwner: read("recoveryOwner"),
 		RecoveryReason: read("recoveryReason"), RecoveryMessage: read("recoveryMessage"),
 	}, nil
@@ -285,8 +303,19 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 		"recoveryPhase": status.RecoveryPhase, "recoveryOwner": status.RecoveryOwner,
 		"recoveryReason": status.RecoveryReason, "recoveryMessage": status.RecoveryMessage,
 	}
+	for key, value := range map[string]string{"persistentVolumeUID": status.PersistentVolumeUID, "persistentVolumeClaimUID": status.ClaimUID, "placementPodUID": status.PlacementPodUID} {
+		if value != "" {
+			next[key] = value
+		}
+	}
+	if status.Preparation != nil {
+		next["preparation"] = map[string]any{"pool": map[string]any{"name": status.Preparation.Pool.Name, "uid": status.Preparation.Pool.UID}, "nodeName": status.Preparation.NodeName, "reservedBytes": status.Preparation.ReservedBytes}
+	}
 	if status.RollbackRequiredGeneration > 0 {
 		next["rollbackRequiredGeneration"] = status.RollbackRequiredGeneration
+	}
+	if status.SettlementRequested {
+		next["settlementRequested"] = true
 	}
 	object.Object["status"] = next
 	encoded := next
@@ -304,6 +333,9 @@ func setMoveStatus(object *unstructured.Unstructured, status MoveStatus) {
 }
 
 func preserveMoveIdentity(current, next MoveStatus) error {
+	if next.SourceBytes < 0 || (current.SourceBytes > 0 && current.SourceBytes != next.SourceBytes) {
+		return fmt.Errorf("%w: recorded Move sourceBytes is immutable", ErrStateConflict)
+	}
 	if next.RollbackRequiredGeneration < 0 || (current.RollbackRequiredGeneration > 0 && current.RollbackRequiredGeneration != next.RollbackRequiredGeneration) {
 		return fmt.Errorf("%w: Move rollbackRequiredGeneration is immutable", ErrStateConflict)
 	}

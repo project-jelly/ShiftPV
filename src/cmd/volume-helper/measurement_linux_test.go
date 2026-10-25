@@ -4,11 +4,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/ownership"
@@ -38,6 +41,7 @@ func mountedMeasurementFixture(t *testing.T) (*measurementRepository, measuremen
 		t.Fatalf("mount probe=%+v", result)
 	}
 	repo.pool.Status.MountIdentity = result.MountIdentity
+	repo.pool.Status.Conditions = append(repo.pool.Status.Conditions, metav1.Condition{Type: volumeapi.PoolConditionMounted, Status: metav1.ConditionTrue, ObservedGeneration: repo.pool.Generation})
 	options.pool = repo.pool
 	var err error
 	options.evidence, err = capacity.MeasurementEvidence(repo.pool)
@@ -91,5 +95,67 @@ func TestLinuxMeasurementIntegrationMeasuresVerifiedCopyThroughReadOnlyBind(t *t
 		func(ctx context.Context) (string, error) { return readMeasurement(ctx, "usage", options) })
 	if err != nil || output == "" {
 		t.Fatalf("read-only serving usage output=%q err=%v", output, err)
+	}
+}
+
+func TestLinuxMeasurementIntegrationRejectsReadOnlyAllocation(t *testing.T) {
+	repo, options := mountedMeasurementFixture(t)
+	options.volumeID, options.copy = "", nil
+	if err := unix.Mount("", options.root, "", unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
+		t.Fatal(err)
+	}
+	output, err := measureWithAuthority(context.Background(), repo, options, readiness.VerifyMountedPath, ownership.VerifyServingPath,
+		func(ctx context.Context) (string, error) { return readMeasurement(ctx, "statfs", options) })
+	if !errors.Is(err, syscall.EROFS) || output != "" {
+		t.Fatalf("read-only allocation accepted: output=%q err=%v", output, err)
+	}
+}
+
+func TestLinuxMeasurementIntegrationRevalidatesUsageAfterScanRefresh(t *testing.T) {
+	for _, loseMount := range []bool{false, true} {
+		name := "same backing"
+		if loseMount {
+			name = "mount lost while awaiting refresh"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo, options := mountedMeasurementFixture(t)
+			if err := ownership.PrepareServing(context.Background(), options.root, *options.copy, func(context.Context) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			reads, waits := 0, 0
+			options.wait = func(context.Context) error {
+				waits++
+				if waits > 1 {
+					t.Fatal("fresh observation was not consumed")
+				}
+				if loseMount {
+					if err := unix.Unmount(options.root, 0); err != nil {
+						t.Fatal(err)
+					}
+				}
+				repo.pool.Status.ObservedGeneration = repo.pool.Generation
+				for i := range repo.pool.Status.Conditions {
+					repo.pool.Status.Conditions[i].ObservedGeneration = repo.pool.Generation
+				}
+				return nil
+			}
+			output, err := measureWithAuthority(context.Background(), repo, options, readiness.VerifyMountedPath, ownership.VerifyServingPath,
+				func(ctx context.Context) (string, error) {
+					reads++
+					value, err := readMeasurement(ctx, "usage", options)
+					repo.pool.Generation++
+					return value, err
+				})
+			if reads != 1 || waits != 1 {
+				t.Fatalf("du=%d waits=%d output=%q err=%v", reads, waits, output, err)
+			}
+			if loseMount {
+				if err == nil || output != "" {
+					t.Fatalf("lost mount measurement accepted: output=%q err=%v", output, err)
+				}
+			} else if err != nil || output == "" {
+				t.Fatalf("same backing measurement rejected: output=%q err=%v", output, err)
+			}
+		})
 	}
 }

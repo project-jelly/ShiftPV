@@ -1,4 +1,4 @@
-FROM golang:1.26.8 AS build-base
+FROM golang:1.26.10 AS build-base
 
 ARG TARGETOS
 ARG TARGETARCH

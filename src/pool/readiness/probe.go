@@ -14,16 +14,15 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	poolcapacity "github.com/project-jelly/ShiftPV/src/pool/capacity"
 	"github.com/project-jelly/ShiftPV/src/pool/capacityunit"
+	"github.com/project-jelly/ShiftPV/src/pool/registration"
 )
 
-type Check struct {
-	OK      bool
-	Known   bool
-	Reason  string
-	Message string
-}
+type Check = registration.Check
 
 type Result struct {
+	// RetryInventory requests another observation, never permission to use it.
+	RetryInventory   bool
+	Backing          Check
 	Independent      Check
 	CapacityUnit     *volumeapi.PoolCapacityUnit
 	Accessible       Check
@@ -34,31 +33,56 @@ type Result struct {
 	MountIdentity    *volumeapi.PoolMountIdentity
 }
 
+// Calls for different Pool UIDs may overlap. Implementations must not share
+// mutable observation state between those calls.
 type Inspector interface {
+	AllocationInspector
 	Inspect(volumeapi.Pool) Result
 }
 
+type AllocationResolver interface {
+	Resolve(string) ([]capacityunit.Extent, error)
+}
+
+// ProbeDependencies exposes only host operations used by registration checks.
+type ProbeDependencies struct {
+	Allocations      AllocationResolver
+	InspectDirectory func(string) error
+	Write            func(string) error
+	StatFS           func(string) (poolcapacity.Filesystem, error)
+	ListMounts       func() ([]mountutils.MountInfo, error)
+}
+
 type Probe struct {
-	allocations interface {
-		Resolve(string) ([]capacityunit.Extent, error)
+	allocations AllocationResolver
+	HostRoot    string
+	inspect     func(string) error
+	write       func(string) error
+	statFS      func(string) (poolcapacity.Filesystem, error)
+	listMounts  func() ([]mountutils.MountInfo, error)
+}
+
+func NewProbeWithDependencies(hostRoot string, d ProbeDependencies) (*Probe, error) {
+	if !filepath.IsAbs(hostRoot) || d.Allocations == nil || d.InspectDirectory == nil || d.Write == nil || d.StatFS == nil || d.ListMounts == nil {
+		return nil, fmt.Errorf("Pool probe configuration is incomplete")
 	}
-	HostRoot   string
-	inspect    func(string) error
-	write      func(string) error
-	statFS     func(string) (poolcapacity.Filesystem, error)
-	listMounts func() ([]mountutils.MountInfo, error)
+	return &Probe{HostRoot: hostRoot, allocations: d.Allocations, inspect: d.InspectDirectory, write: d.Write, statFS: d.StatFS, listMounts: d.ListMounts}, nil
 }
 
 func NewProbe(hostRoot string) *Probe {
-	return &Probe{
-		HostRoot:    hostRoot,
-		allocations: capacityunit.NewResolver(filepath.Join(hostRoot, "sys"), filepath.Join(hostRoot, "dev/mapper/control")),
-		inspect:     inspectDirectory,
-		write:       writeProbe,
-		listMounts: func() ([]mountutils.MountInfo, error) {
+	d := HostProbeDependencies(hostRoot)
+	return &Probe{HostRoot: hostRoot, allocations: d.Allocations, inspect: d.InspectDirectory, write: d.Write, statFS: d.StatFS, listMounts: d.ListMounts}
+}
+
+func HostProbeDependencies(hostRoot string) ProbeDependencies {
+	return ProbeDependencies{
+		Allocations:      capacityunit.NewResolver(filepath.Join(hostRoot, "sys"), filepath.Join(hostRoot, "dev/mapper/control")),
+		InspectDirectory: inspectDirectory,
+		Write:            writeProbe,
+		ListMounts: func() ([]mountutils.MountInfo, error) {
 			return mountutils.ParseMountInfo("/proc/self/mountinfo")
 		},
-		statFS: func(path string) (poolcapacity.Filesystem, error) {
+		StatFS: func(path string) (poolcapacity.Filesystem, error) {
 			var stat syscall.Statfs_t
 			if err := syscall.Statfs(path, &stat); err != nil {
 				return poolcapacity.Filesystem{}, err
@@ -69,21 +93,26 @@ func NewProbe(hostRoot string) *Probe {
 }
 
 func (p *Probe) Inspect(pool volumeapi.Pool) Result {
+	result := Result{}
+	if pool.CapacityPolicy != "" {
+		result.Backing = skipped()
+	}
 	if pool.MountPolicy != "" && pool.MountPolicy != volumeapi.PoolMountPolicyRequireMountPoint {
-		return Result{Accessible: Check{Known: true, Reason: "MountPolicyInvalid", Message: "unsupported Pool mount policy"}}
+		result.Accessible = Check{Known: true, Reason: "MountPolicyInvalid", Message: "unsupported Pool mount policy"}
+		return result
 	}
 	path, err := hostPath(p.HostRoot, pool.MountPath)
 	if err != nil {
 		failed := failure(err)
-		return Result{Accessible: failed, Writable: skipped(), CapacityReadable: skipped()}
+		result.Accessible, result.Writable, result.CapacityReadable = failed, skipped(), skipped()
+		return result
 	}
 	if err := p.inspect(path); err != nil {
 		failed := failure(err)
-		return Result{Accessible: failed, Writable: skipped(), CapacityReadable: skipped()}
+		result.Accessible, result.Writable, result.CapacityReadable = failed, skipped(), skipped()
+		return result
 	}
-	result := Result{
-		Accessible: Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: fmt.Sprintf("%s is an accessible directory", pool.MountPath)},
-	}
+	result.Accessible = Check{OK: true, Known: true, Reason: "DirectoryAccessible", Message: fmt.Sprintf("%s is an accessible directory", pool.MountPath)}
 	if pool.MountPolicy == volumeapi.PoolMountPolicyRequireMountPoint {
 		identity, check := p.inspectMount(path, pool.Status.MountIdentity)
 		result.Mounted = check
@@ -94,13 +123,13 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 		result.MountIdentity = &identity
 	}
 	if pool.CapacityPolicy == volumeapi.PoolCapacityPolicyFixedBlock {
-		result.CapacityUnit, result.Independent = p.InspectCapacityUnit(pool)
-		if !result.Independent.OK {
+		result.CapacityUnit, result.Backing = p.InspectCapacityUnit(pool)
+		if !result.Backing.OK {
 			result.Writable, result.CapacityReadable = skipped(), skipped()
 			return result
 		}
 	} else if pool.CapacityPolicy != "" {
-		result.Independent = capacityFailure("CapacityPolicyInvalid", fmt.Errorf("unsupported capacity policy"))
+		result.Backing = capacityFailure("CapacityPolicyInvalid", fmt.Errorf("unsupported capacity policy"))
 		return result
 	}
 	if err := p.write(path); err != nil {
@@ -113,6 +142,7 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 		result.CapacityReadable = failure(err)
 	} else {
 		result.Filesystem = stats
+		// Reading capacity does not prove that another metadata write will fit.
 		result.CapacityReadable = Check{OK: true, Known: true, Reason: "CapacityReadable", Message: "filesystem capacity is readable"}
 	}
 	if result.MountIdentity != nil {
@@ -126,7 +156,7 @@ func (p *Probe) Inspect(pool volumeapi.Pool) Result {
 	if result.CapacityUnit != nil {
 		candidate := pool
 		candidate.Status.CapacityUnit = result.CapacityUnit
-		_, result.Independent = p.InspectCapacityUnit(candidate)
+		_, result.Backing = p.InspectCapacityUnit(candidate)
 	}
 	return result
 }
@@ -179,7 +209,18 @@ func (p *Probe) inspectMount(path string, expected *volumeapi.PoolMountIdentity)
 // VerifyMountedPath checks the live mount at a node path or helper Pod bind
 // root before an opted-in Pool performs a storage operation. It is read-only.
 func VerifyMountedPath(path string, pool volumeapi.Pool) error {
-	if err := verifyCapacityMountedPath(path, pool); err != nil {
+	return NewProbe("/").verifyObservedMountedPath(path, pool)
+}
+
+func (p *Probe) verifyObservedMountedPath(path string, pool volumeapi.Pool) error {
+	if ready, reason := pool.CapacityBackingReady(); !ready {
+		return fmt.Errorf("Pool backing lacks a current successful observation: %s", reason)
+	}
+	return p.verifyMountedPath(path, pool)
+}
+
+func (p *Probe) verifyMountedPath(path string, pool volumeapi.Pool) error {
+	if err := p.verifyCapacityMountedPath(path, pool); err != nil {
 		return err
 	}
 	if pool.MountPolicy == "" {
@@ -194,10 +235,10 @@ func VerifyMountedPath(path string, pool volumeapi.Pool) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) == "/" {
 		return fmt.Errorf("Pool root %q must be an absolute non-root path", path)
 	}
-	if err := inspectDirectory(path); err != nil {
+	if err := p.inspect(path); err != nil {
 		return fmt.Errorf("inspect Pool root: %w", err)
 	}
-	_, check := NewProbe("/").inspectMount(filepath.Clean(path), pool.Status.MountIdentity)
+	_, check := p.inspectMount(filepath.Clean(path), pool.Status.MountIdentity)
 	if !check.OK {
 		return fmt.Errorf("verify Pool mount at %q: %s: %s", path, check.Reason, check.Message)
 	}

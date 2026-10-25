@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
 func setVolumeStateFixture(t *testing.T, client dynamic.Interface, volumeID string, state volumeapi.State) {
@@ -41,6 +42,20 @@ func setVolumeStateFixture(t *testing.T, client dynamic.Interface, volumeID stri
 		}
 		status["currentCopy"] = encoded
 	}
+	if state.CreationExecutor != nil {
+		encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(state.CreationExecutor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status["creationExecutor"] = encoded
+	}
+	if state.CreationReceipt != nil {
+		encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(state.CreationReceipt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status["creationReceipt"] = encoded
+	}
 	object.Object["status"] = status
 	if _, err := resource.UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update ShiftPVVolume fixture: %v", err)
@@ -53,4 +68,51 @@ func stringSliceToAnyFixture(values []string) []any {
 		result[index] = values[index]
 	}
 	return result
+}
+
+// Seed authority inputs independently of any executable Move status writer.
+func setMoveStatusFixture(t *testing.T, client dynamic.Interface, name string, state volumeapi.MoveStatus) {
+	t.Helper()
+	resource := client.Resource(volumeapi.MoveResource)
+	object, err := resource.Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := map[string]any{
+		"phase": state.Phase, "recoveryPhase": state.RecoveryPhase, "recoveryOwner": state.RecoveryOwner,
+		"destinationNode": state.DestinationNode, "destinationPoolUID": state.DestinationPoolUID,
+		"copyOperationID": state.CopyOperationID, "copyJobName": state.CopyJobName,
+		"promotionOperationID": state.PromotionOperationID, "promotionJobName": state.PromotionJobName,
+	}
+	for field, value := range map[string]string{
+		"persistentVolumeName": state.PersistentVolumeName, "persistentVolumeUID": state.PersistentVolumeUID,
+		"persistentVolumeClaimNamespace": state.ClaimNamespace, "persistentVolumeClaimName": state.ClaimName,
+		"persistentVolumeClaimUID": state.ClaimUID, "consumerName": state.ConsumerName, "consumerUID": state.ConsumerUID,
+	} {
+		if value != "" {
+			status[field] = value
+		}
+	}
+	if state.SettlementRequested {
+		status["settlementRequested"] = true
+	}
+	if state.RollbackRequiredGeneration > 0 {
+		status["rollbackRequiredGeneration"] = state.RollbackRequiredGeneration
+	}
+	for field, copy := range map[string]*volume.CopyIdentity{"sourceCopy": state.SourceCopy, "incomingCopy": state.IncomingCopy, "destinationCopy": state.DestinationCopy} {
+		if copy == nil {
+			continue
+		}
+		encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(copy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(encoded) > 0 {
+			status[field] = encoded
+		}
+	}
+	object.Object["status"] = status
+	if _, err := resource.UpdateStatus(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
 }

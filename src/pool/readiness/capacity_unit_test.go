@@ -37,7 +37,7 @@ func (f fakeAllocationInspector) Inspect(pool volumeapi.Pool) Result {
 		(*f.inspects)++
 	}
 	result := f.result
-	result.CapacityUnit, result.Independent = f.InspectCapacityUnit(pool)
+	result.CapacityUnit, result.Backing = f.InspectCapacityUnit(pool)
 	return result
 }
 func TestSharedAllocationIsRejectedBeforeWritableProbeAndInventory(t *testing.T) {
@@ -47,7 +47,7 @@ func TestSharedAllocationIsRejectedBeforeWritableProbeAndInventory(t *testing.T)
 		{Name: "pool-b", UID: "b-uid", NodeName: "node", MountPath: "/b", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock, Generation: 1},
 	}}
 	scans, inspects := 0, 0
-	r := &Reconciler{NodeName: "node", Pools: repo, Interval: time.Minute, Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok}, shared: true, inspects: &inspects}, Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
+	r := &Reconciler{NodeName: "node", Pools: repo, Interval: time.Minute, Inspector: fakeAllocationInspector{result: Result{Accessible: ok, Writable: ok, CapacityReadable: ok, Filesystem: testFilesystem}, shared: true, inspects: &inspects}, Inventory: func(context.Context, volumeapi.Pool, time.Time) volumeapi.PoolInventory {
 		scans++
 		return volumeapi.PoolInventory{Valid: true}
 	}}
@@ -91,7 +91,7 @@ func TestFixedBlockProbeAnchorsDirectoryFilesystemAndRejectsChangingBacking(t *t
 	}
 	pool := volumeapi.Pool{MountPath: "/var/lib/shiftpv", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
 	result := p.Inspect(pool)
-	if !result.Independent.OK || result.CapacityUnit == nil || writes != 1 {
+	if !result.Backing.OK || result.CapacityUnit == nil || writes != 1 {
 		t.Fatalf("directory allocation=%+v writes=%d", result, writes)
 	}
 	pool.Status.CapacityUnit = result.CapacityUnit
@@ -103,7 +103,7 @@ func TestFixedBlockProbeAnchorsDirectoryFilesystemAndRejectsChangingBacking(t *t
 		t.Fatal("same filesystem device with changed backing passed the operation check")
 	}
 	result = p.Inspect(pool)
-	if result.Independent.Reason != "CapacityIdentityChanged" || writes != 1 {
+	if result.Backing.Reason != "CapacityIdentityChanged" || writes != 1 {
 		t.Fatalf("changed backing was probed: %+v writes=%d", result, writes)
 	}
 	p.allocations = allocationResolver{err: fmt.Errorf("thin allocation unsupported")}
@@ -111,7 +111,7 @@ func TestFixedBlockProbeAnchorsDirectoryFilesystemAndRejectsChangingBacking(t *t
 		t.Fatal("unsupported live allocation passed the operation check")
 	}
 	result = p.Inspect(pool)
-	if result.Independent.OK || writes != 1 {
+	if result.Backing.OK || writes != 1 {
 		t.Fatal("unknown/thin allocation was approved")
 	}
 }
@@ -133,9 +133,9 @@ func TestNestedPoolRootsAreRejectedBeforeWrites(t *testing.T) {
 	a := volumeapi.Pool{Name: "pool-a", UID: "a-uid", NodeName: "node", MountPath: "/mnt/a", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
 	b := volumeapi.Pool{Name: "pool-b", UID: "b-uid", NodeName: "node", MountPath: "/mnt/a/nested", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
 	r := &Reconciler{NodeName: "node", Inspector: fakeAllocationInspector{}}
-	observations := r.capacityIsolation([]volumeapi.Pool{a, b})
+	observations := r.capacityIsolation(context.Background(), []volumeapi.Pool{testRegistration(a), testRegistration(b)}, "")
 	for _, p := range []volumeapi.Pool{a, b} {
-		if observed := observations[p.UID]; observed.check.OK || observed.check.Reason != "CapacityPathsOverlap" {
+		if observed := observations[p.UID]; observed.independent.OK || observed.independent.Reason != "CapacityPathsOverlap" {
 			t.Fatalf("nested root approved: %+v", observed)
 		}
 	}
@@ -148,11 +148,14 @@ func TestDeletingLegacyDuplicateStillCanBeInspected(t *testing.T) {
 		{Name: "b", UID: "b-uid", NodeName: "node", MountPath: "/b"},
 	}
 	r := &Reconciler{NodeName: "node", Inspector: fakeInspector{}}
-	observations := r.capacityIsolation(pools)
-	if _, exists := observations["a-uid"]; exists {
+	for i := range pools {
+		pools[i] = testRegistration(pools[i])
+	}
+	observations := r.capacityIsolation(context.Background(), pools, "")
+	if observed := observations["a-uid"]; observed.independent.Reason != "" && !observed.independent.OK {
 		t.Fatal("terminating legacy Pool was blocked from cleanup inspection")
 	}
-	if observations["b-uid"].check.OK || observations["b-uid"].check.Reason != "CapacityIsolationRequired" {
+	if observations["b-uid"].independent.OK || observations["b-uid"].independent.Reason != "CapacityIsolationRequired" {
 		t.Fatal("mixed duplicate became usable")
 	}
 }
@@ -172,23 +175,29 @@ func TestFixedBlockRejectsSymlinkBeforeWrite(t *testing.T) {
 	writes := 0
 	p.write = func(string) error { writes++; return nil }
 	result := p.Inspect(volumeapi.Pool{MountPath: "/alias", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock})
-	if result.Independent.Reason != "CapacityPathInvalid" || writes != 0 {
+	if result.Backing.Reason != "CapacityPathInvalid" || writes != 0 {
 		t.Fatalf("symlink written: %+v writes=%d", result, writes)
 	}
 }
 
+type changedPeerInspector struct{ fakeAllocationInspector }
+
+func (f changedPeerInspector) InspectCapacityUnit(pool volumeapi.Pool) (*volumeapi.PoolCapacityUnit, Check) {
+	if pool.Name == "pool-b" {
+		return nil, capacityFailure("CapacityAllocationUnproven", fmt.Errorf("unsupported changed backing"))
+	}
+	return f.fakeAllocationInspector.InspectCapacityUnit(pool)
+}
+
 func TestMissingLivePeerEvidenceDoesNotReuseOldAnchor(t *testing.T) {
 	inspector := fakeAllocationInspector{}
-	left := volumeapi.Pool{Name: "pool-a", UID: "a", MountPath: "/a"}
-	right := volumeapi.Pool{Name: "pool-b", UID: "b", MountPath: "/b"}
-	unit, check := inspector.InspectCapacityUnit(left)
+	left := volumeapi.Pool{Name: "pool-a", UID: "a", NodeName: "node", MountPath: "/a", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
+	right := volumeapi.Pool{Name: "pool-b", UID: "b", NodeName: "node", MountPath: "/b", CapacityPolicy: volumeapi.PoolCapacityPolicyFixedBlock}
+	left.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(left)
 	right.Status.CapacityUnit, _ = inspector.InspectCapacityUnit(right)
-	results := map[string]allocationObservation{
-		"a": {unit: unit, check: check},
-		"b": {check: capacityFailure("CapacityAllocationUnproven", fmt.Errorf("unsupported changed backing"))},
-	}
-	compareAllocations(left, right, results)
-	if results["a"].check.Reason != "CapacityPeerUnproven" || results["b"].check.Reason != "CapacityAllocationUnproven" {
+	r := &Reconciler{NodeName: "node", Inspector: changedPeerInspector{inspector}}
+	results := r.capacityIsolation(context.Background(), []volumeapi.Pool{testRegistration(left), testRegistration(right)}, "")
+	if results["a"].independent.Reason != "CapacityPeerUnproven" || results["b"].independent.Reason != "CapacityAllocationUnproven" {
 		t.Fatalf("ambiguous peer results=%+v", results)
 	}
 }

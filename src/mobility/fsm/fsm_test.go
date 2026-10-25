@@ -3,82 +3,90 @@ package fsm
 import "testing"
 
 func TestHappyPathIsClosed(t *testing.T) {
-	phase := PhasePending
-	observations := []Observation{
-		{PreconditionsValid: true, SourceHealthy: true},
-		{SourceHealthy: true, VolumeLocked: true},
-		{SourceHealthy: true, ConsumerExists: false},
-		{SourceHealthy: true, PublishedOnSource: false},
-		{SourceHealthy: true, ReplacementExists: true, ReplacementHeld: true},
-		{SourceHealthy: true, ReplacementExists: true, ReplacementHeld: true, PlacementExists: true, DestinationScheduled: true},
-		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, CapacityApproved: true},
-		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, CopyComplete: true},
-		{SourceHealthy: true, PlacementExists: true, DestinationScheduled: true, PromotionComplete: true},
-		{OwnerCommitted: true},
-		{ReplacementExists: true, ReplacementHeld: true},
-		{PublishedOnDestination: true},
-		{CleanupComplete: true},
-		{CompletionReady: true},
+	state := State{Phase: PhasePending}
+	observed := Observation{}
+	steps := []struct {
+		edit   func(*Observation)
+		action Action
+	}{
+		{func(*Observation) {}, ActionProtectMove},
+		{func(o *Observation) { o.ProtectionPresent = true; o.SourceHealthy = true; o.PreconditionsValid = true }, ActionInitializePreparation},
+		{func(o *Observation) { o.SourcePlanRecorded = true }, ActionClaimSource},
+		{func(o *Observation) { o.SourceClaimed = true }, ActionReservePreparation},
+		{func(o *Observation) { o.PreparationReserved = true }, ActionWait},
+		{func(*Observation) {}, ActionStartDisruption},
+		{func(*Observation) {}, ActionWait},
+		{func(o *Observation) { o.ReplacementExists = true; o.ReplacementHeld = true }, ActionEnsurePlacement},
+		{func(o *Observation) { o.PlacementExists = true; o.DestinationScheduled = true }, ActionWait},
+		{func(*Observation) {}, ActionEnsureCapacity},
+		{func(o *Observation) {
+			o.CapacityApproved = true
+			o.DestinationIntentRecorded = true
+			o.PreparationReserved = false
+		}, ActionEnsureCopy},
+		{func(o *Observation) { o.CopyComplete = true }, ActionEnsurePromotion},
+		{func(o *Observation) { o.PromotionComplete = true }, ActionCommitOwner},
+		{func(o *Observation) { o.OwnerCommitted = true }, ActionDeletePlacement},
+		{func(o *Observation) { o.PlacementExists = false }, ActionReleasePlacement},
+		{func(o *Observation) { o.ReplacementHeld = false; o.PublishedOnDestination = true }, ActionEnsureCleanup},
+		{func(o *Observation) { o.CleanupComplete = true }, ActionConfirmCleanup},
+		{func(o *Observation) { o.CompletionReady = true }, ActionMarkSucceeded},
 	}
-	wantActions := []Action{
-		ActionLockVolume,
-		ActionEvictConsumer,
-		ActionWait,
-		ActionWait,
-		ActionEnsurePlacement,
-		ActionEnsureCapacity,
-		ActionEnsureCopy,
-		ActionEnsurePromotion,
-		ActionCommitOwner,
-		ActionDeletePlacement,
-		ActionReleasePlacement,
-		ActionEnsureCleanup,
-		ActionConfirmCleanup,
-		ActionMarkSucceeded,
-	}
-	for index, observation := range observations {
-		decision, err := Decide(phase, observation)
-		if err != nil {
-			t.Fatalf("step %d: %v", index, err)
+	for i, step := range steps {
+		step.edit(&observed)
+		decision, err := Decide(state, observed)
+		if err != nil || decision.Action != step.action {
+			t.Fatalf("step%d: decision=%+v err=%v want=%s", i, decision, err, step.action)
 		}
-		if decision.Action != wantActions[index] {
-			t.Fatalf("step %d action = %q, want %q", index, decision.Action, wantActions[index])
-		}
-		phase = decision.Next
+		state = decision.Next
 	}
-	if phase != PhaseSucceeded {
-		t.Fatalf("final phase = %q, want %q", phase, PhaseSucceeded)
+	if state.Phase != PhaseSucceeded {
+		t.Fatalf("final state=%+v", state)
 	}
-	decision, err := Decide(phase, Observation{})
-	if err != nil || decision.Next != PhaseSucceeded || decision.Action != ActionWait {
-		t.Fatalf("terminal decision = %#v, %v", decision, err)
-	}
+	assertDecision(t, state, Observation{}, state, ActionFinalizeHistory)
 }
 
 func TestCompletingUsesDurableCleanupEvidence(t *testing.T) {
-	decision, err := Decide(PhaseCleaningSource, Observation{CleanupComplete: true})
-	if err != nil || decision.Next != PhaseCompleting || decision.Action != ActionConfirmCleanup {
+	decision, err := Decide(State{Phase: PhaseCleaningSource}, Observation{CleanupComplete: true})
+	if err != nil || decision.Next.Phase != PhaseCompleting || decision.Action != ActionConfirmCleanup {
 		t.Fatalf("cleanup must be journaled before effects: %+v, %v", decision, err)
 	}
-	decision, err = Decide(PhaseCompleting, Observation{CompletionReady: true, DestinationUnavailable: true})
-	if err != nil || decision.Next != PhaseSucceeded || decision.Action != ActionMarkSucceeded {
+	decision, err = Decide(State{Phase: PhaseCompleting}, Observation{CompletionReady: true, DestinationUnavailable: true})
+	if err != nil || decision.Next.Phase != PhaseSucceeded || decision.Action != ActionMarkSucceeded {
 		t.Fatalf("metadata completion depended on unavailable disk work: %+v, %v", decision, err)
 	}
-	decision, err = Decide(PhaseCompleting, Observation{})
-	if err != nil || decision.Next != PhaseCompleting || decision.Action != ActionWait || decision.Reason != "CompletionAuthorityMismatch" {
+	decision, err = Decide(State{Phase: PhaseCompleting}, Observation{})
+	if err != nil || decision.Next.Phase != PhaseCompleting || decision.Action != ActionWait || decision.Reason != "CompletionAuthorityMismatch" {
 		t.Fatalf("completion ignored authority: %+v, %v", decision, err)
 	}
 }
 
 func TestEveryPhaseHasAClosedDecision(t *testing.T) {
-	for phase := range allowedTransitions {
+	// Independent of allowedTransitions: preparation/cancellation constants must
+	// not silently exist outside the executable graph again.
+	phases := []Phase{
+		PhasePending, PhasePreparing, PhaseStartingDisruption, PhaseCanceling, PhaseCancelled,
+		PhaseWaitingForUnpublish, PhaseWaitingForReplacement,
+		PhaseWaitingForDestination, PhaseWaitingForCapacity, PhaseCopying, PhasePromoting,
+		PhaseCommitting, PhaseReleasingDestination, PhaseWaitingForDestinationPublish,
+		PhaseCleaningSource, PhaseCompleting, PhaseSucceeded, PhaseBlocked,
+	}
+	if len(phases) != len(allowedTransitions) {
+		t.Fatalf("declared phase list=%d graph=%d", len(phases), len(allowedTransitions))
+	}
+	for _, phase := range phases {
 		observation := Observation{PreconditionsValid: true, SourceHealthy: true}
-		decision, err := Decide(phase, observation)
+		switch phase {
+		case PhasePreparing, PhaseStartingDisruption, PhaseCanceling, PhaseCancelled:
+			observation.ProtectionPresent, observation.SourcePlanRecorded = true, true
+			observation.SourceClaimed, observation.PreparationReserved = true, phase != PhaseCancelled
+		}
+		decision, err := Decide(State{Phase: phase}, observation)
 		if err != nil {
 			t.Errorf("phase %q: %v", phase, err)
 			continue
 		}
-		if err := ValidateTransition(phase, decision.Next); err != nil {
+		if err := ValidateTransition(phase, decision.Next.Phase); err != nil {
 			t.Errorf("phase %q returned open transition: %v", phase, err)
 		}
 		if decision.Action == "" {
@@ -134,29 +142,28 @@ func canReachTerminal(start Phase) bool {
 
 func TestSafetyFailuresBlockBeforeCommit(t *testing.T) {
 	for _, phase := range []Phase{
-		PhasePending, PhaseLocking, PhaseEvicting, PhaseWaitingForUnpublish,
 		PhaseWaitingForReplacement, PhaseWaitingForDestination, PhaseCopying, PhasePromoting,
 		PhaseCommitting,
 	} {
-		decision, err := Decide(phase, Observation{UnsafeReason: "SourceUnavailable"})
+		decision, err := Decide(State{Phase: phase}, Observation{CapacityApproved: true, DestinationIntentRecorded: true, UnsafeReason: "SourceUnavailable"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if decision.Next != PhaseBlocked || decision.Action != ActionMarkBlocked {
+		if decision.Next.Phase != PhaseBlocked || decision.Action != ActionMarkBlocked {
 			t.Errorf("phase %q decision = %#v", phase, decision)
 		}
 	}
 }
 
 func TestCommittedOwnerSurvivesCommittingCrashWindow(t *testing.T) {
-	decision, err := Decide(PhaseCommitting, Observation{
+	decision, err := Decide(State{Phase: PhaseCommitting}, Observation{
 		OwnerCommitted: true,
 		SourceHealthy:  false,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Next != PhaseReleasingDestination || decision.Action != ActionDeletePlacement {
+	if decision.Next.Phase != PhaseReleasingDestination || decision.Action != ActionDeletePlacement {
 		t.Fatalf("committed crash-window decision = %#v", decision)
 	}
 }
@@ -174,18 +181,21 @@ func TestUnavailableDestinationCannotAdvanceTransaction(t *testing.T) {
 		{PhaseCleaningSource, Observation{DestinationUnavailable: true, CleanupComplete: true}},
 	}
 	for _, test := range tests {
-		decision, err := Decide(test.phase, test.observation)
+		if test.phase == PhaseCopying || test.phase == PhasePromoting || test.phase == PhaseCommitting || test.phase == PhaseCleaningSource {
+			test.observation.DestinationIntentRecorded = true
+		}
+		decision, err := Decide(State{Phase: test.phase}, test.observation)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if decision.Next != test.phase || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
+		if decision.Next.Phase != test.phase || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
 			t.Errorf("phase %q decision = %#v", test.phase, decision)
 		}
 	}
 }
 
 func TestSelectedUnavailableDestinationWaitsBeforeCapacityProbe(t *testing.T) {
-	decision, err := Decide(PhaseWaitingForDestination, Observation{
+	decision, err := Decide(State{Phase: PhaseWaitingForDestination}, Observation{
 		SourceHealthy:          true,
 		ReplacementExists:      true,
 		ReplacementHeld:        true,
@@ -195,31 +205,32 @@ func TestSelectedUnavailableDestinationWaitsBeforeCapacityProbe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Next != PhaseWaitingForCapacity || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
+	if decision.Next.Phase != PhaseWaitingForCapacity || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
 		t.Fatalf("selected unavailable-destination decision = %#v", decision)
 	}
 }
 
 func TestCommittedOwnerWaitsToReleaseWhileDestinationIsUnavailable(t *testing.T) {
-	decision, err := Decide(PhaseCommitting, Observation{OwnerCommitted: true, DestinationUnavailable: true})
+	decision, err := Decide(State{Phase: PhaseCommitting}, Observation{OwnerCommitted: true, DestinationUnavailable: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Next != PhaseCommitting || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
+	if decision.Next.Phase != PhaseCommitting || decision.Action != ActionWait || decision.Reason != "DestinationUnavailable" {
 		t.Fatalf("committed unavailable-destination decision = %#v", decision)
 	}
 }
 
 func TestBindingLossBlocksAfterOwnerCommit(t *testing.T) {
-	decision, err := Decide(PhaseWaitingForDestinationPublish, Observation{
-		OwnerCommitted:         true,
-		SourceAuthorityInvalid: true,
-		UnsafeReason:           "VolumeBindingMissing",
+	decision, err := Decide(State{Phase: PhaseWaitingForDestinationPublish}, Observation{
+		OwnerCommitted:            true,
+		DestinationIntentRecorded: true,
+		SourceAuthorityInvalid:    true,
+		UnsafeReason:              "VolumeBindingMissing",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Next != PhaseBlocked || decision.Reason != "VolumeBindingMissing" {
+	if decision.Next.Phase != PhaseBlocked || decision.Reason != "VolumeBindingMissing" {
 		t.Fatalf("post-commit binding-loss decision = %#v", decision)
 	}
 }
@@ -237,14 +248,17 @@ func TestActionFailuresAndDestinationFailureBlock(t *testing.T) {
 		{PhaseCopying, Observation{SourceHealthy: true, CopyFailed: true}, "CopyFailed"},
 		{PhasePromoting, Observation{SourceHealthy: true, PromotionFailed: true}, "PromotionFailed"},
 		{PhaseCleaningSource, Observation{CleanupFailed: true}, "CleanupFailed"},
-		{PhaseLocking, Observation{SourceHealthy: true, SourceAuthorityInvalid: true, UnsafeReason: "OwnerMismatch"}, "OwnerMismatch"},
+		{PhaseCopying, Observation{SourceHealthy: true, DestinationIntentRecorded: true, SourceAuthorityInvalid: true, UnsafeReason: "OwnerMismatch"}, "OwnerMismatch"},
 	}
 	for _, test := range tests {
-		decision, err := Decide(test.phase, test.observation)
+		if test.phase == PhaseCopying || test.phase == PhasePromoting || test.phase == PhaseCommitting || test.phase == PhaseCleaningSource {
+			test.observation.DestinationIntentRecorded = true
+		}
+		decision, err := Decide(State{Phase: test.phase}, test.observation)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if decision.Next != PhaseBlocked || decision.Reason != test.reason {
+		if decision.Next.Phase != PhaseBlocked || decision.Reason != test.reason {
 			t.Errorf("phase %q decision = %#v", test.phase, decision)
 		}
 	}
@@ -256,9 +270,7 @@ func TestWaitPathsStayInTheCurrentPhase(t *testing.T) {
 		observation Observation
 		action      Action
 	}{
-		{PhasePending, Observation{SourceHealthy: true, UnsafeReason: "UnsupportedConsumer"}, ActionWait},
-		{PhaseLocking, Observation{SourceHealthy: true}, ActionLockVolume},
-		{PhaseEvicting, Observation{SourceHealthy: true, ConsumerExists: true, EvictionRequested: true}, ActionWait},
+		{PhasePending, Observation{ProtectionPresent: true, SourceHealthy: true, UnsafeReason: "UnsupportedConsumer"}, ActionWait},
 		{PhaseWaitingForUnpublish, Observation{SourceHealthy: true, PublishedOnSource: true}, ActionWait},
 		{PhaseWaitingForReplacement, Observation{SourceHealthy: true}, ActionWait},
 		{PhaseWaitingForDestination, Observation{SourceHealthy: true}, ActionWait},
@@ -270,11 +282,14 @@ func TestWaitPathsStayInTheCurrentPhase(t *testing.T) {
 		{PhaseCleaningSource, Observation{}, ActionEnsureCleanup},
 	}
 	for _, test := range tests {
-		decision, err := Decide(test.phase, test.observation)
+		if test.phase == PhaseCopying || test.phase == PhasePromoting || test.phase == PhaseCommitting || test.phase == PhaseCleaningSource {
+			test.observation.DestinationIntentRecorded = true
+		}
+		decision, err := Decide(State{Phase: test.phase}, test.observation)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if decision.Next != test.phase || decision.Action != test.action {
+		if decision.Next.Phase != test.phase || decision.Action != test.action {
 			t.Errorf("phase %q decision = %#v", test.phase, decision)
 		}
 	}
@@ -286,11 +301,11 @@ func TestPlacementReservationIsRecreatedBeforeCommit(t *testing.T) {
 			{SourceHealthy: true},
 			{SourceHealthy: true, PlacementExists: true},
 		} {
-			decision, err := Decide(phase, observation)
+			decision, err := Decide(State{Phase: phase}, observation)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if decision.Next != phase || decision.Action != ActionEnsurePlacement {
+			if decision.Next.Phase != phase || decision.Action != ActionEnsurePlacement {
 				t.Errorf("phase %q reservation decision = %#v", phase, decision)
 			}
 		}
@@ -304,7 +319,7 @@ func TestTransitionValidation(t *testing.T) {
 	if err := ValidateTransition(PhaseSucceeded, PhasePending); err == nil {
 		t.Fatal("terminal transition was accepted")
 	}
-	if _, err := Decide(Phase("Mystery"), Observation{}); err == nil {
+	if _, err := Decide(State{Phase: Phase("Mystery")}, Observation{}); err == nil {
 		t.Fatal("unknown phase was accepted")
 	}
 }

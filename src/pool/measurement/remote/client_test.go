@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/node/rpc/connection"
@@ -84,6 +85,7 @@ func TestCapacityDoesNotAcceptStaleOrUnrelatedReply(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			c, p, r, f := fixture()
+			c.FallbackOnUnavailable = true
 			r.change = test.change
 			p.change = test.poolChange
 			stats, err := c.StatFSForPool(context.Background(), p.pool)
@@ -98,6 +100,165 @@ func TestCapacityDoesNotAcceptStaleOrUnrelatedReply(t *testing.T) {
 				t.Fatal("RPC authority failure switched backend")
 			}
 		})
+	}
+}
+
+func TestFallbackOnUnavailableIsOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		for _, code := range []codes.Code{codes.DeadlineExceeded, codes.Unavailable, codes.Unimplemented, codes.PermissionDenied, codes.Unauthenticated, codes.FailedPrecondition, codes.Canceled, codes.Internal} {
+			name := "default/" + code.String()
+			if enabled {
+				name = "opt-in/" + code.String()
+			}
+			t.Run(name, func(t *testing.T) {
+				c, p, r, f := fixture()
+				c.FallbackOnUnavailable = enabled
+				r.fail = status.Error(code, "probe failed")
+				stats, err := c.StatFSForPool(context.Background(), p.pool)
+				wantFallback := code == codes.DeadlineExceeded || enabled && (code == codes.Unavailable || code == codes.Unimplemented)
+				if wantFallback {
+					if err != nil || stats.AvailableBytes != 30 || f.calls != 1 {
+						t.Fatalf("fallback not used: stats=%+v calls=%d err=%v", stats, f.calls, err)
+					}
+				} else if !errors.Is(err, r.fail) || status.Code(err) != code || f.calls != 0 || stats != (capacity.Filesystem{}) {
+					t.Fatalf("RPC failure changed or fell back: stats=%+v calls=%d err=%v", stats, f.calls, err)
+				}
+			})
+		}
+	}
+}
+
+type rpcFunc func(context.Context, connection.Target, *protocol.CapacityRequest) (*protocol.CapacityResponse, error)
+
+func (f rpcFunc) GetCapacity(ctx context.Context, target connection.Target, req *protocol.CapacityRequest) (*protocol.CapacityResponse, error) {
+	return f(ctx, target, req)
+}
+
+type probeFunc func(context.Context, volumeapi.Pool) (capacity.Filesystem, error)
+
+func (f probeFunc) StatFSForPool(ctx context.Context, pool volumeapi.Pool) (capacity.Filesystem, error) {
+	return f(ctx, pool)
+}
+
+type cancelingDiscovery struct {
+	discovery
+	cancel context.CancelFunc
+}
+
+func (d cancelingDiscovery) Find(ctx context.Context, node string) (*volumeapi.NodeExecutor, error) {
+	d.cancel()
+	return d.discovery.Find(ctx, node)
+}
+
+func TestFallbackNeverOutlivesCaller(t *testing.T) {
+	for _, mode := range []string{"no resident", "unsupported endpoint", "deadline", "unavailable", "unimplemented"} {
+		t.Run(mode, func(t *testing.T) {
+			c, p, _, f := fixture()
+			c.FallbackOnUnavailable = true
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "no resident" || mode == "unsupported endpoint" {
+				d := discovery{}
+				if mode == "unsupported endpoint" {
+					d.identity = &volumeapi.NodeExecutor{}
+				}
+				c.Discovery = cancelingDiscovery{discovery: d, cancel: cancel}
+			} else {
+				code := map[string]codes.Code{"deadline": codes.DeadlineExceeded, "unavailable": codes.Unavailable, "unimplemented": codes.Unimplemented}[mode]
+				c.RPC = rpcFunc(func(context.Context, connection.Target, *protocol.CapacityRequest) (*protocol.CapacityResponse, error) {
+					cancel()
+					return nil, status.Error(code, "transport stopped")
+				})
+			}
+			stats, err := c.StatFSForPool(ctx, p.pool)
+			if !errors.Is(err, context.Canceled) || f.calls != 0 || stats != (capacity.Filesystem{}) {
+				t.Fatalf("caller cancellation escaped into fallback: stats=%+v calls=%d err=%v", stats, f.calls, err)
+			}
+		})
+	}
+}
+
+func TestFallbackSharesWholeCallContext(t *testing.T) {
+	c, p, _, _ := fixture()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c.Timeout = time.Millisecond
+	c.RPC = rpcFunc(func(readCtx context.Context, _ connection.Target, _ *protocol.CapacityRequest) (*protocol.CapacityResponse, error) {
+		<-readCtx.Done()
+		return nil, status.Error(codes.DeadlineExceeded, "RPC read budget expired")
+	})
+	calls := 0
+	c.Fallback = probeFunc(func(fallbackCtx context.Context, pool volumeapi.Pool) (capacity.Filesystem, error) {
+		calls++
+		if fallbackCtx != ctx || fallbackCtx.Err() != nil || pool.UID != p.pool.UID {
+			t.Fatalf("fallback restarted or replaced the caller budget: ctx=%v pool=%+v", fallbackCtx.Err(), pool)
+		}
+		return capacity.Filesystem{TotalBytes: 100, AvailableBytes: 30}, nil
+	})
+	stats, err := c.StatFSForPool(ctx, p.pool)
+	if err != nil || calls != 1 || stats.AvailableBytes != 30 {
+		t.Fatalf("shared-budget fallback failed: stats=%+v calls=%d err=%v", stats, calls, err)
+	}
+}
+
+func TestNonBlockingPoolIsolation(t *testing.T) {
+	c, p, r, f := fixture()
+	c.NonBlocking = true
+	busyPool := p.pool
+	busyPool.Name, busyPool.UID = "busy-pool", "busy-pool-uid"
+	unlock := c.locks.Lock(busyPool.UID)
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.StatFSForPool(context.Background(), busyPool)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		var retryable interface{ Retryable() bool }
+		if !errors.As(err, &retryable) || !retryable.Retryable() || p.reads != 0 || r.calls != 0 || f.calls != 0 {
+			t.Fatalf("busy probe touched a transport or did not retry: reads=%d RPC=%d fallback=%d err=%v", p.reads, r.calls, f.calls, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("busy probe waited for the Pool lock")
+	}
+	if stats, err := c.StatFSForPool(context.Background(), p.pool); err != nil || stats.AvailableBytes != 40 {
+		t.Fatalf("independent Pool failed: stats=%+v err=%v", stats, err)
+	}
+	unlock()
+	unlock = nil
+	p.pool = busyPool
+	if stats, err := c.StatFSForPool(context.Background(), busyPool); err != nil || stats.AvailableBytes != 40 || r.calls != 2 {
+		t.Fatalf("fresh retry failed after lock release: stats=%+v RPC=%d err=%v", stats, r.calls, err)
+	}
+}
+
+func TestDefaultWaitsForPoolLock(t *testing.T) {
+	c, p, r, f := fixture()
+	unlock := c.locks.Lock(p.pool.UID)
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.StatFSForPool(context.Background(), p.pool)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		unlock()
+		t.Fatalf("default probe did not wait for lock: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-result:
+		if err != nil || r.calls != 1 || f.calls != 0 {
+			t.Fatalf("default RPC changed: RPC=%d fallback=%d err=%v", r.calls, f.calls, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("default probe did not resume after lock release")
 	}
 }
 func TestReadonlyFallbackAndCallerCancellation(t *testing.T) {

@@ -5,13 +5,9 @@ package fsm
 // helper starts where its old `case` arm started, with every guard kept in the
 // order it was evaluated before.
 
-// lifecycleGuard settles the phases whose decision does not depend on the
-// source or the destination at all: the terminal phases park, and Completing
-// answers only to durable completion evidence.
+// lifecycleGuard makes Completing answer only to durable completion evidence.
+// Terminal history and recovery have already been routed by decideLifecycle.
 func lifecycleGuard(current Phase, observation Observation) (Decision, bool, error) {
-	if terminal(current) {
-		return Decision{Next: current, Action: ActionWait}, true, nil
-	}
 	if current == PhaseCompleting {
 		if observation.CompletionReady {
 			decision, err := transition(current, PhaseSucceeded, ActionMarkSucceeded, "")
@@ -28,51 +24,16 @@ func lifecycleGuard(current Phase, observation Observation) (Decision, bool, err
 // not yet moved to the destination.
 func authorityGuard(current Phase, observation Observation) (Decision, bool, error) {
 	if observation.SourceAuthorityInvalid {
-		return blockedWith(observation, "SourceAuthorityInvalid"), true, nil
+		return blockedWith(current, observation, "SourceAuthorityInvalid"), true, nil
 	}
 	if beforeCommit(current) && !observation.OwnerCommitted && !observation.SourceHealthy {
-		return blockedWith(observation, "SourceUnavailable"), true, nil
+		if beforeExecutionApproval(observation) && disruptionPossible(current) {
+			decision, err := transition(current, current, ActionWait, reasonOr(observation.UnsafeReason, "SourceUnavailable"))
+			return decision, true, err
+		}
+		return blockedWith(current, observation, "SourceUnavailable"), true, nil
 	}
 	return Decision{}, false, nil
-}
-
-// preflightGuard parks the phases that still run before the consumer has been
-// asked to leave while preflight defers them.
-//
-// A related but looser pre-eviction window is derived from Move status by
-// preEviction in src/mobility/controller/preflight.go; they are not the same
-// predicate, so do not unify them blindly.
-func preflightGuard(current Phase, observation Observation) (Decision, bool, error) {
-	if observation.PreflightDeferred && (current == PhasePending || current == PhaseLocking ||
-		(current == PhaseEvicting && !observation.EvictionRequested)) {
-		decision, err := transition(current, current, ActionWait, observation.UnsafeReason)
-		return decision, true, err
-	}
-	return Decision{}, false, nil
-}
-
-func decidePending(current Phase, observation Observation) (Decision, error) {
-	if !observation.PreconditionsValid {
-		return transition(current, current, ActionWait, reasonOr(observation.UnsafeReason, "PreconditionFailed"))
-	}
-	return transition(current, PhaseLocking, ActionLockVolume, "")
-}
-
-func decideLocking(current Phase, observation Observation) (Decision, error) {
-	if observation.VolumeLocked {
-		return transition(current, PhaseEvicting, ActionEvictConsumer, "")
-	}
-	return transition(current, PhaseLocking, ActionLockVolume, "")
-}
-
-func decideEvicting(current Phase, observation Observation) (Decision, error) {
-	if !observation.ConsumerExists {
-		return transition(current, PhaseWaitingForUnpublish, ActionWait, "")
-	}
-	if observation.EvictionRequested {
-		return transition(current, PhaseEvicting, ActionWait, "")
-	}
-	return transition(current, PhaseEvicting, ActionEvictConsumer, "")
 }
 
 func decideWaitingForUnpublish(current Phase, observation Observation) (Decision, error) {
@@ -87,7 +48,7 @@ func decideWaitingForReplacement(current Phase, observation Observation) (Decisi
 		return transition(current, current, ActionWait, "")
 	}
 	if !observation.ReplacementHeld {
-		return blockedWith(observation, "PlacementHoldLost"), nil
+		return blockedWith(current, observation, "PlacementHoldLost"), nil
 	}
 	return transition(current, PhaseWaitingForDestination, ActionEnsurePlacement, "")
 }
@@ -97,13 +58,13 @@ func decideWaitingForDestination(current Phase, observation Observation) (Decisi
 	// unavailable destination is not a wait condition here and a blocked one
 	// reports DestinationUnavailable rather than InvalidDestination.
 	if observation.DestinationBlocked {
-		return blockedWith(observation, "DestinationUnavailable"), nil
+		return blockedWith(current, observation, "DestinationUnavailable"), nil
 	}
 	if !observation.ReplacementExists {
 		return transition(current, current, ActionWait, "")
 	}
 	if !observation.ReplacementHeld {
-		return blockedWith(observation, "PlacementHoldLost"), nil
+		return blockedWith(current, observation, "PlacementHoldLost"), nil
 	}
 	if !observation.DestinationScheduled {
 		return transition(current, current, ActionEnsurePlacement, "")
@@ -111,15 +72,21 @@ func decideWaitingForDestination(current Phase, observation Observation) (Decisi
 	if observation.DestinationUnavailable {
 		return transition(current, PhaseWaitingForCapacity, ActionWait, "DestinationUnavailable")
 	}
-	return transition(current, PhaseWaitingForCapacity, ActionEnsureCapacity, "")
+	// Approval consumes a freshly observed WaitingForCapacity reservation.
+	return transition(current, PhaseWaitingForCapacity, ActionWait, "")
 }
 
 func decideWaitingForCapacity(current Phase, observation Observation) (Decision, error) {
 	if decision, guarded, err := destinationGuard(current, observation); guarded {
 		return decision, err
 	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
+	}
 	if observation.CapacityBlocked {
-		return blockedWith(observation, "DestinationCapacityInsufficient"), nil
+		// CapacityReason is persisted from a prior probe. Recheck it so physical
+		// space recovery can approve the existing reservation without a new Move.
+		return transition(current, current, ActionEnsureCapacity, reasonOr(observation.UnsafeReason, "DestinationCapacityInsufficient"))
 	}
 	if observation.CapacityApproved {
 		return transition(current, PhaseCopying, ActionEnsureCopy, "")
@@ -132,7 +99,11 @@ func decideCopying(current Phase, observation Observation) (Decision, error) {
 		return decision, err
 	}
 	if observation.CopyFailed {
-		return blockedWith(observation, "CopyFailed"), nil
+		observation.UnsafeReason = ""
+		return blockedWith(current, observation, "CopyFailed"), nil
+	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
 	}
 	if decision, guarded, err := placementGuard(current, observation); guarded {
 		return decision, err
@@ -144,11 +115,20 @@ func decideCopying(current Phase, observation Observation) (Decision, error) {
 }
 
 func decidePromoting(current Phase, observation Observation) (Decision, error) {
+	if observation.OwnerCommitted {
+		// Owner CAS can succeed before its phase write is observed. Advance
+		// through its idempotent action without requiring the old Job or Pod.
+		return transition(current, PhaseCommitting, ActionCommitOwner, "")
+	}
 	if decision, guarded, err := destinationGuard(current, observation); guarded {
 		return decision, err
 	}
 	if observation.PromotionFailed {
-		return blockedWith(observation, "PromotionFailed"), nil
+		observation.UnsafeReason = ""
+		return blockedWith(current, observation, "PromotionFailed"), nil
+	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
 	}
 	if decision, guarded, err := placementGuard(current, observation); guarded {
 		return decision, err
@@ -171,6 +151,9 @@ func decideCommitting(current Phase, observation Observation) (Decision, error) 
 	if decision, guarded, err := destinationGuard(current, observation); guarded {
 		return decision, err
 	}
+	if decision, guarded, err := consumerGuard(current, observation); guarded {
+		return decision, err
+	}
 	if decision, guarded, err := placementGuard(current, observation); guarded {
 		return decision, err
 	}
@@ -187,18 +170,30 @@ func decideReleasingDestination(current Phase, observation Observation) (Decisio
 	if observation.ReplacementExists && observation.ReplacementHeld {
 		return transition(current, PhaseWaitingForDestinationPublish, ActionReleasePlacement, "")
 	}
-	return transition(current, PhaseWaitingForDestinationPublish, ActionWait, "")
+	reason := ""
+	if observation.ConsumersAmbiguous && !observation.PublishedOnDestination {
+		reason = "MultipleConsumers"
+	}
+	return transition(current, PhaseWaitingForDestinationPublish, ActionWait, reason)
 }
 
 func decideWaitingForDestinationPublish(current Phase, observation Observation) (Decision, error) {
 	if observation.CleanupFailed {
-		return blockedWith(observation, "CleanupFailed"), nil
+		observation.UnsafeReason = ""
+		return blockedWith(current, observation, "CleanupFailed"), nil
 	}
 	if observation.DestinationUnavailable {
 		return transition(current, current, ActionWait, "DestinationUnavailable")
 	}
+	if observation.ReplacementExists && observation.ReplacementHeld {
+		return transition(current, current, ActionReleasePlacement, "")
+	}
 	if !observation.PublishedOnDestination {
-		return transition(current, current, ActionWait, "")
+		reason := ""
+		if observation.ConsumersAmbiguous {
+			reason = "MultipleConsumers"
+		}
+		return transition(current, current, ActionWait, reason)
 	}
 	return transition(current, PhaseCleaningSource, ActionEnsureCleanup, "")
 }
@@ -208,7 +203,11 @@ func decideCleaningSource(current Phase, observation Observation) (Decision, err
 		return transition(current, current, ActionWait, "DestinationUnavailable")
 	}
 	if observation.CleanupFailed {
-		return blockedWith(observation, "CleanupFailed"), nil
+		observation.UnsafeReason = ""
+		return blockedWith(current, observation, "CleanupFailed"), nil
+	}
+	if observation.ReplacementExists && observation.ReplacementHeld {
+		return transition(current, current, ActionReleasePlacement, "")
 	}
 	if observation.CleanupComplete {
 		return transition(current, PhaseCompleting, ActionConfirmCleanup, "")

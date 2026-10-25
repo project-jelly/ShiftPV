@@ -44,39 +44,6 @@ func TestClassifyKubernetesAPIErrorMarksTransientFailuresRetryable(t *testing.T)
 	}
 }
 
-func TestCreateCopyRunsIdentityAwareHelper(t *testing.T) {
-	client, created := clientWithPodPhase(t, corev1.PodSucceeded, "")
-	runner := validRunner(client)
-	runner.ServiceAccountName = "shiftpv-controller"
-	runner.Pools = fakePoolResolver{pool: volumeapi.Pool{Name: "pool-a", UID: "pool-uid", NodeName: "worker-a", MountPath: "/mnt/shiftpv-a"},
-		nodeErr: errors.New("node has multiple Pools")}
-	identity := volume.CopyIdentity{
-		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
-		VolumeID: testVolumeID, VolumeUID: "volume-uid", CopyID: "copy-id",
-		NodeName: "worker-a", Role: volume.RoleServing,
-	}
-	if err := runner.CreateCopy(context.Background(), identity); err != nil {
-		t.Fatal(err)
-	}
-	if created.pod.Spec.ServiceAccountName != "shiftpv-controller" {
-		t.Fatalf("serviceAccountName=%q", created.pod.Spec.ServiceAccountName)
-	}
-	if got := created.pod.Spec.Volumes[0].HostPath.Path; got != "/mnt/shiftpv-a" {
-		t.Fatalf("creation Pool path = %q", got)
-	}
-	command := created.pod.Spec.Containers[0].Command
-	joined := strings.Join(command, "\x00")
-	for _, expected := range []string{
-		"/shiftpv-volume-helper", "create", "--operation-id=create-volume-uid", "--installation-id=installation", "--pool-name=pool-a",
-		"--pool-uid=pool-uid", "--volume-id=" + testVolumeID, "--volume-uid=volume-uid",
-		"--copy-id=copy-id", "--node-name=worker-a",
-	} {
-		if !strings.Contains(joined, expected) {
-			t.Fatalf("identity argument %q missing from %#v", expected, command)
-		}
-	}
-}
-
 func TestStatFSReturnsRegisteredPoolFilesystemCapacity(t *testing.T) {
 	client, created := clientWithPodTerminationMessage(t, "100 25 4096 12\n")
 	runner := validRunner(client)
@@ -92,8 +59,8 @@ func TestStatFSReturnsRegisteredPoolFilesystemCapacity(t *testing.T) {
 	if len(got) < 6 || got[0] != "/shiftpv-volume-helper" || got[1] != "statfs" || !strings.Contains(strings.Join(got, "\x00"), "--pool-evidence=") {
 		t.Fatalf("command = %#v", got)
 	}
-	if created.pod.Spec.AutomountServiceAccountToken == nil || !*created.pod.Spec.AutomountServiceAccountToken || !created.pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
-		t.Fatal("measurement helper must authenticate and bind the Pool read-only")
+	if created.pod.Spec.AutomountServiceAccountToken == nil || !*created.pod.Spec.AutomountServiceAccountToken || created.pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
+		t.Fatal("allocation helper must authenticate and observe the host mount access mode")
 	}
 }
 
@@ -140,6 +107,9 @@ func TestVolumeUsageReturnsQuiescedDirectoryBytes(t *testing.T) {
 	command := created.pod.Spec.Containers[0].Command
 	if len(command) < 7 || command[1] != "usage" || !strings.Contains(strings.Join(command, "\x00"), "--volume-id="+testVolumeID) {
 		t.Fatalf("command = %#v", command)
+	}
+	if !created.pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
+		t.Fatal("existing-copy usage helper lost its read-only bind")
 	}
 }
 

@@ -36,9 +36,15 @@ type Scanner struct {
 	// SnapshotPublications is scoped to one scan, after its generation was read.
 	SnapshotPublications func() (Publications, error)
 	Limit                int
+	// VerifyBacking injects only host evidence; inventory and identity checks
+	// remain real. Nil verifies the anchored mount and block extents locally.
+	VerifyBacking func(string, volumeapi.Pool) error
 }
 
 func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
+	if pool.DeletingUnapprovedFixedBlock() {
+		return s.verifyUnclaimedPool(ctx, pool)
+	}
 	if s == nil || s.Installation == nil || !filepath.IsAbs(s.HostRoot) || pool.UID == "" {
 		return ownership.ErrIdentity
 	}
@@ -47,13 +53,28 @@ func (s *Scanner) ReleasePool(ctx context.Context, pool volumeapi.Pool) error {
 		return err
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
-	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
+	if err := s.verifyBacking(pool); err != nil {
 		return err
 	}
 	return ownership.ReleaseEmptyPool(ctx, root, ownership.PoolIdentity{InstallationID: installationID, PoolUID: pool.UID})
 }
 
 func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) volumeapi.PoolInventory {
+	if pool.DeletingUnapprovedFixedBlock() {
+		result := volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now.UTC())}
+		if err := s.verifyUnclaimedPool(ctx, pool); err != nil {
+			result.Message = "RegistrationCancellationBlocked: " + err.Error()
+		} else {
+			result.Valid = true
+		}
+		return result
+	}
+	return s.scan(ctx, pool, now, scanPhysical, physicalPathType)
+}
+
+func (s *Scanner) scan(ctx context.Context, pool volumeapi.Pool, now time.Time,
+	physical func(context.Context, string, map[string]struct{}, int) ([]volumeapi.CopyObservation, bool, error),
+	pathType func(string, string) (bool, bool, error)) volumeapi.PoolInventory {
 	result := volumeapi.PoolInventory{ObservedAt: metav1.NewTime(now.UTC())}
 	if s.configurationInvalid(pool) {
 		result.Message = "InventoryConfigurationInvalid"
@@ -75,8 +96,13 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 		return result
 	}
 	root := filepath.Join(s.HostRoot, strings.TrimPrefix(filepath.Clean(pool.MountPath), string(filepath.Separator)))
-	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
+	if err := s.verifyBacking(pool); err != nil {
 		result.Message = "MountUnavailable: " + err.Error()
+		return result
+	}
+	paths, truncated, err := physical(ctx, root, nil, s.Limit)
+	if err != nil {
+		result.Message = "PhysicalInventoryFailed: " + err.Error()
 		return result
 	}
 	known := map[string]struct{}{}
@@ -95,14 +121,11 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		result.Message = "PoolIdentityInvalid: " + err.Error()
 	}
-	unknown, truncated, err := scanPhysical(ctx, root, known, s.Limit-len(result.Copies))
-	if err != nil {
-		result.Message = "PhysicalInventoryFailed: " + err.Error()
+	result.Truncated = result.Truncated || truncated
+	if !s.observeUnrecorded(ctx, root, paths, known, &result, pathType) {
 		return result
 	}
-	result.Copies = append(result.Copies, unknown...)
-	result.Truncated = result.Truncated || truncated
-	if err := readiness.VerifyHostPool(s.HostRoot, pool); err != nil {
+	if err := s.verifyBacking(pool); err != nil {
 		result.Message = "MountUnavailable: " + err.Error()
 		return result
 	}
@@ -111,6 +134,13 @@ func (s *Scanner) Scan(ctx context.Context, pool volumeapi.Pool, now time.Time) 
 	}
 	result.Valid = result.Message == ""
 	return result
+}
+
+func (s *Scanner) verifyBacking(pool volumeapi.Pool) error {
+	if s.VerifyBacking != nil {
+		return s.VerifyBacking(s.HostRoot, pool)
+	}
+	return readiness.NewProbe(s.HostRoot).VerifyBacking(pool)
 }
 
 func physicalKey(identity volume.CopyIdentity) string {

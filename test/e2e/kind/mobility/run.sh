@@ -14,6 +14,8 @@ KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 PHASE_TIMEOUT_SECONDS=${PHASE_TIMEOUT_SECONDS:-180}
 # shellcheck source=test/e2e/kind/cleanup-journal.sh
 source "${ROOT_DIR}/test/e2e/kind/cleanup-journal.sh"
+# shellcheck source=test/e2e/kind/mobility/controller.sh
+source "${ROOT_DIR}/test/e2e/kind/mobility/controller.sh"
 # shellcheck source=test/e2e/kind/mobility/recovery.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/recovery.sh"
 # shellcheck source=test/e2e/kind/mobility/preflight.sh
@@ -23,7 +25,7 @@ source "${ROOT_DIR}/test/e2e/kind/mobility/cleanup-lifecycle.sh"
 # shellcheck source=test/e2e/kind/mobility/terminal-journal-gc.sh
 source "${ROOT_DIR}/test/e2e/kind/mobility/terminal-journal-gc.sh"
 
-for command in docker kind kubectl helm sed; do
+for command in docker kind kubectl helm sed jq shasum; do
 	command -v "${command}" >/dev/null || {
 		echo "required command not found: ${command}" >&2
 		exit 1
@@ -101,6 +103,7 @@ helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
 	--set helperPod.image=shiftpv-mobility-fault:dev \
 	--set mobility.helperImage=shiftpv-mobility-fault:dev \
 	--set mobility.interval=10s \
+	--set mobility.operationTimeout=10m \
 	--wait \
 	--timeout 5m
 WEBHOOK_SECRET=shiftpv-webhook-tls
@@ -124,11 +127,11 @@ kubectl -n shiftpv-system wait --for=condition=Ready pod \
 
 BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
 
-# Scenario groups. CI runs g1/g2/g3 as parallel shards on separate clusters;
-# `all` (the default) runs the original sweep on one cluster in the original
-# order. The split targets equal wall clock once the ~200 s cluster and install
+# Scenario groups. CI runs each group on a separate cluster.
+# `all` (the default) runs preparation, then the original g1/g2/g3 sweep. The split targets equal wall clock once the ~200 s cluster and install
 # setup that every group pays for is included:
 #
+#   preparation  legacy in-flight upgrade, then durable admission/restart/cancel
 #   g1  preflight (478 s)
 #       The four deferral scenarios share the retained-volume bookkeeping that
 #       test_preflight itself re-asserts after every scenario, so they stay
@@ -154,7 +157,7 @@ BLOCKED_SOURCE_NODE="${CLUSTER_NAME}-worker"
 # test_preflight runs it after every scenario.
 KIND_MOBILITY_GROUP=${KIND_MOBILITY_GROUP:-all}
 case "${KIND_MOBILITY_GROUP}" in
-all | g1 | g2 | g3) ;;
+all | g1 | g2 | g3 | preparation | node-cleanup | retirement) ;;
 *)
 	echo "unsupported KIND_MOBILITY_GROUP: ${KIND_MOBILITY_GROUP}" >&2
 	exit 1
@@ -164,6 +167,19 @@ esac
 group_selected() {
 	[[ "${KIND_MOBILITY_GROUP}" == all || "${KIND_MOBILITY_GROUP}" == "$1" ]]
 }
+
+if group_selected preparation; then
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/legacy-upgrade.sh"
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/preparation.sh"
+fi
+
+if group_selected node-cleanup; then
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/native-cleanup.sh"
+fi
+
+if group_selected retirement; then
+	CLUSTER_NAME="${CLUSTER_NAME}" bash "${ROOT_DIR}/test/e2e/kind/mobility/workload-retirement.sh"
+fi
 
 if group_selected g1; then
 	test_preflight
@@ -244,6 +260,7 @@ if group_selected g3; then
 	OLD_POD_UID=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.metadata.uid}')
 	SOURCE_NODE=$(kubectl -n shiftpv-mobility-test get pod "${OLD_POD}" -o jsonpath='{.spec.nodeName}')
 	CHECKSUM_BEFORE=$(pod_sha256 shiftpv-mobility-test "${OLD_POD}" /data/payload)
+	hold_owner_commit "${VOLUME_ID}"
 
 	if [[ "${SOURCE_NODE}" == "${CLUSTER_NAME}-worker" ]]; then
 		DESTINATION_NODE="${CLUSTER_NAME}-worker2"
@@ -278,8 +295,60 @@ if group_selected g3; then
 				local pod uid_before uid_after
 				pod=$(kubectl -n shiftpv-system get pod -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')
 				uid_before=$(kubectl -n shiftpv-system get "pod/${pod}" -o jsonpath='{.metadata.uid}')
-				kubectl -n shiftpv-system delete "pod/${pod}" --grace-period=0 --force --wait=true
-				kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
+				if [[ "${phase}" == Copying ]]; then
+					# Lose an approved scheduler reservation while the controller is
+					# stopped. A new API Pod UID must remain valid for this same Move.
+					controller_down
+					local move_json placement placement_uid recreated_uid="" recreation_deadline
+					move_json=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o json)
+					jq -e '.status.capacityApproved == true and
+					 (.status.phase == "Copying" or .status.phase == "Promoting" or .status.phase == "Committing")' <<<"${move_json}" >/dev/null
+					test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
+					placement_uid=$(jq -r '.status.placementPodUID' <<<"${move_json}")
+					placement=$(kubectl -n shiftpv-system get pods -l shiftpv.io/role=placement -o json |
+						jq -er --arg uid "${placement_uid}" '.items[] | select(.metadata.uid == $uid) | .metadata.name')
+					kubectl -n shiftpv-system delete "pod/${placement}" --wait=true --timeout=120s
+					controller_up
+					recreation_deadline=$((SECONDS + 120))
+					while ((SECONDS < recreation_deadline)); do
+						current=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.phase}')
+						if [[ "${current}" == Blocked ]]; then
+							kubectl get "shiftpvmove/${MOVE_NAME}" -o yaml >&2
+							return 1
+						fi
+						recreated_uid=$(kubectl -n shiftpv-system get "pod/${placement}" --ignore-not-found -o jsonpath='{.metadata.uid}')
+						if [[ -n "${recreated_uid}" && "${recreated_uid}" != "${placement_uid}" ]]; then break; fi
+						sleep 0.2
+					done
+					test -n "${recreated_uid}"
+					test "${recreated_uid}" != "${placement_uid}"
+					echo "approved placement recreated: ${placement_uid} -> ${recreated_uid}"
+				elif [[ "${phase}" == Promoting ]]; then
+					controller_down
+					local old_replacement old_replacement_uid replacement_uid="" replacement_deadline
+					old_replacement=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.replacementName}')
+					old_replacement_uid=$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.replacementUID}')
+					test -n "${old_replacement_uid}"
+					kubectl -n shiftpv-mobility-test delete "pod/${old_replacement}" --wait=true --timeout=120s
+					controller_up
+					replacement_deadline=$((SECONDS + 120))
+					while ((SECONDS < replacement_deadline)); do
+						test "$(kubectl get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${SOURCE_NODE}"
+						replacement_uid=$(kubectl -n shiftpv-mobility-test get pods -l app=shiftpv-mobility-wffc -o json |
+							jq -r --arg old "${old_replacement_uid}" '[.items[] | select(.metadata.uid != $old and .metadata.deletionTimestamp == null) |
+							 select(any(.spec.schedulingGates[]?; .name == "shiftpv.io/placement-hold")) | .metadata.uid][0] // empty')
+						[[ -n "${replacement_uid}" ]] && break
+						sleep 0.2
+						done
+					test -n "${replacement_uid}"
+					test "${replacement_uid}" != "${old_replacement_uid}"
+					test "$(kubectl get "shiftpvmove/${MOVE_NAME}" -o jsonpath='{.status.replacementUID}')" = "${old_replacement_uid}"
+					release_owner_commit
+					echo "consumer recreated before owner commit: ${old_replacement_uid} -> ${replacement_uid}"
+				else
+					kubectl -n shiftpv-system delete "pod/${pod}" --grace-period=0 --force --wait=true
+					kubectl -n shiftpv-system rollout status deployment/shiftpv-controller --timeout=5m
+				fi
 				uid_after=$(kubectl -n shiftpv-system get pod -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.uid}')
 				test "${uid_before}" != "${uid_after}"
 				echo "controller restart injected at ${phase}: ${uid_before} -> ${uid_after}"

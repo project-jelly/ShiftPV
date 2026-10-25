@@ -1,4 +1,4 @@
-.PHONY: verify fmt fmt-check mod-verify test coverage vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template chart-render-diff complexity linux-mount-integration kind-e2e kind-mobility-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
+.PHONY: verify fmt fmt-check mod-verify test coverage cmd-test vet build image image-controller image-node image-combined image-version-check release-workflow-test shellcheck actionlint helm-lint helm-template chart-render-diff complexity linux-mount-integration kind-e2e kind-mobility-e2e kind-upgrade-e2e v04-model v04-kubernetes-primitives v04-filesystem-primitives
 
 CONTROLLER_VERSION_FILE ?= versions/controller
 NODE_VERSION_FILE ?= versions/node
@@ -16,7 +16,7 @@ SHELL_SCRIPTS := $(shell find build test -type f -name '*.sh' | LC_ALL=C sort)
 # helm-template is not listed here: COVERAGE_PACKAGES already contains ./test/...,
 # so coverage runs ./test/helm once with -race. The target stays for running the
 # chart render contracts on their own.
-verify: fmt-check mod-verify coverage vet build image-version-check release-workflow-test shellcheck actionlint helm-lint complexity v04-model
+verify: fmt-check mod-verify coverage cmd-test vet build image-version-check release-workflow-test shellcheck actionlint helm-lint complexity v04-model
 
 fmt:
 	gofmt -w $$(find src test -name '*.go' -type f)
@@ -36,7 +36,8 @@ v04-kubernetes-primitives:
 	./test/model/kubernetes-primitives.sh
 
 v04-filesystem-primitives:
-	./test/model/filesystem-primitives.sh
+	@image_id=$$(docker image inspect --format '{{.Id}}' "$(IMAGE)") && \
+		./test/model/filesystem-primitives.sh "$${image_id}"
 
 coverage:
 	mkdir -p .tmp
@@ -51,11 +52,16 @@ coverage:
 			printf "coverage %.1f%% meets %.1f%% minimum\n", total, minimum; \
 		}'
 
+cmd-test:
+	go test -race -count=1 ./src/cmd/...
+
 vet:
 	go vet ./...
 
 build:
 	go build ./src/cmd/controller ./src/cmd/node ./src/cmd/uninstall-guard ./src/cmd/volume-helper
+	mkdir -p .tmp
+	go build -tags shiftpv_profile -o .tmp/provisioning-profile ./test/measurement/provisioning
 
 image: image-controller image-node
 
@@ -81,6 +87,7 @@ release-workflow-test:
 	./test/release/wait-for-chart-images.sh
 	./test/release/validate-artifact-lock.sh
 	./test/release/resolve-latest-artifacts.sh
+	./test/release/chart-render-diff.sh
 
 shellcheck:
 	@test -n "$(SHELL_SCRIPTS)" || { echo 'no shell scripts were discovered under build/ or test/'; exit 1; }

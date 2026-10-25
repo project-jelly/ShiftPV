@@ -27,9 +27,11 @@ func TestLimitBytesRejectsInvalidQuantity(t *testing.T) {
 }
 
 func TestLimitBytesRejectsQuantityThatIsNotWholeBytes(t *testing.T) {
-	got, err := LimitBytes(volumeapi.Pool{CapacityLimit: "1500m"})
-	if !errors.Is(err, ErrLimitInexact) || got != 0 {
-		t.Fatalf("limit=%d err=%v", got, err)
+	for _, limit := range []string{"1500m", "9223372036854775808"} {
+		got, err := LimitBytes(volumeapi.Pool{CapacityLimit: limit})
+		if !errors.Is(err, ErrLimitInexact) || got != 0 {
+			t.Fatalf("limit %q: got=%d err=%v", limit, got, err)
+		}
 	}
 }
 

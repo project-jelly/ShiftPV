@@ -135,12 +135,12 @@ func TestPlacementRecreationStaysOnPersistedDestination(t *testing.T) {
 func TestOwnerCommitRequiresLiveReservationOnDestination(t *testing.T) {
 	ctx := context.Background()
 	volumeID := "shiftpv-0123456789abcdef0123456789abcdef"
-	_, _, destination := testCopyIdentities(volumeID, "source", "destination")
+	source, _, destination := testCopyIdentities(volumeID, "source", "destination")
 	move := volumeapi.Move{Name: "move-test", UID: "move-uid", Spec: volumeapi.MoveSpec{VolumeID: volumeID, SourceNode: "source"}, Status: volumeapi.MoveStatus{
-		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination,
+		CandidateNodes: []string{"destination"}, DestinationNode: "destination", DestinationCopy: &destination, SourceCopy: &source, DestinationPoolUID: destination.PoolUID,
 	}}
 	repository := &memoryRepository{volumes: map[string]volumeapi.State{volumeID: {
-		Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name,
+		UID: source.VolumeUID, Phase: volumeapi.PhaseMoving, OwnerNode: "source", ActiveMove: move.Name, CurrentCopy: &source,
 	}}}
 	reconciler := newTestReconciler(fake.NewSimpleClientset(), repository)
 	observed := observation{Volume: identifiedTestState(volumeID, repository.volumes[volumeID], repository.pools), DestinationNode: "destination"}

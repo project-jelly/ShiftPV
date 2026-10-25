@@ -11,6 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 )
@@ -56,11 +57,25 @@ func (s *Store) ReconcileAbsence(ctx context.Context, expected Cleanup) (Cleanup
 // settledAbsence re-checks an already Completed journal: closing cleanup is
 // only reportable while the recorded proof still stands on its own.
 func settledAbsence(current Cleanup) (Cleanup, bool, error) {
-	if !validPurgedReceipt(current, current.Status) || !validAbsenceFence(current.Spec.Target, current.Status.AbsenceProof) ||
-		!confirmedAbsence(current.Status.AbsenceProof) || current.Status.SettledAt == "" {
-		return Cleanup{}, false, fmt.Errorf("%w: completed cleanup proof is invalid", ErrConflict)
+	if err := ValidateSettled(current); err != nil {
+		return Cleanup{}, false, err
 	}
 	return current, true, nil
+}
+
+// ValidateSettled checks the recorded completion evidence without reading or
+// modifying its parent, Pool, or executor. Callers must independently match the
+// exact parent and target they expect; this does not prove live Job termination.
+func ValidateSettled(current Cleanup) error {
+	if err := current.Spec.Validate(); err != nil {
+		return fmt.Errorf("%w: invalid completed cleanup intent: %v", ErrConflict, err)
+	}
+	if current.UID != current.Spec.Authority.UID || current.Status.Phase != PhaseCompleted ||
+		!validPurgedReceipt(current, current.Status) || !validAbsenceFence(current.Spec.Target, current.Status.AbsenceProof) ||
+		!confirmedAbsence(current.Status.AbsenceProof) {
+		return fmt.Errorf("%w: completed cleanup proof is invalid", ErrConflict)
+	}
+	return validateCompletedRule(current, PhaseCompleted, current.Status)
 }
 
 // openAbsenceFence bumps spec.scanEpoch on the target Pool and records the
@@ -185,4 +200,27 @@ func absenceRequestID(cleanup Cleanup, generation int64) string {
 	encoded := cleanup.Spec.Authority.UID + "\x00" + cleanup.Spec.OperationID + "\x00" + fmt.Sprint(generation)
 	sum := sha256.Sum256([]byte(encoded))
 	return "scan-" + hex.EncodeToString(sum[:16])
+}
+
+// WaitForAbsence waits only for the existing causal proof. A local timeout
+// leaves the journal and its capacity hold intact; caller cancellation wins.
+func (s *Store) WaitForAbsence(ctx context.Context, expected Cleanup, timeout time.Duration) (Cleanup, bool, error) {
+	if timeout <= 0 {
+		return expected, false, nil
+	}
+	current, settled := expected, false
+	err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, timeout, true, func(pollCtx context.Context) (bool, error) {
+		next, complete, err := s.ReconcileAbsence(pollCtx, current)
+		if err == nil {
+			current, settled = next, complete
+		}
+		return settled, err
+	})
+	if ctx.Err() != nil {
+		return current, false, ctx.Err()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return current, false, nil
+	}
+	return current, settled, err
 }

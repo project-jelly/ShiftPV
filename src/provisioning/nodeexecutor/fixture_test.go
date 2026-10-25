@@ -5,6 +5,7 @@ import (
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/helperpod"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/node/executor"
 	"github.com/project-jelly/ShiftPV/src/volume"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,8 @@ import (
 	"time"
 )
 
+type Node = executor.Node
+
 const testID = "shiftpv-0123456789abcdef0123456789abcdef"
 const testDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -30,17 +33,21 @@ func fixture(t *testing.T) (*Client, *Node, *dynamicfake.FakeDynamicClient, *kub
 	encoded, _ := runtime.DefaultUnstructuredConverter.ToUnstructured(&copy)
 	_ = unstructured.SetNestedMap(parent.Object, encoded, "status", "currentCopy")
 	identity := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "kube-system", "uid": "installation"}}}
-	pool := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool", "metadata": map[string]any{"name": "pool-a", "uid": "pool-uid", "generation": int64(1), "finalizers": []any{volumeapi.PoolProtectionFinalizer}}, "spec": map[string]any{"nodeName": "worker-a", "mountPath": "/mnt/pool"}, "status": map[string]any{"observedGeneration": int64(1), "inventory": map[string]any{"valid": true, "observedAt": time.Now().UTC().Format(time.RFC3339Nano)}, "conditions": []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": int64(1), "lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano), "reason": "PoolReady"}}, "lastProbeTime": time.Now().UTC().Format(time.RFC3339Nano)}}}
+	pool := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool", "metadata": map[string]any{"name": "pool-a", "uid": "pool-uid", "generation": int64(1), "finalizers": []any{volumeapi.PoolProtectionFinalizer}}, "spec": map[string]any{"nodeName": "worker-a", "mountPath": "/mnt/pool", "capacity": map[string]any{"limit": "1Gi"}}, "status": map[string]any{"observedGeneration": int64(1), "inventory": map[string]any{"valid": true, "observedAt": time.Now().UTC().Format(time.RFC3339Nano)}, "conditions": []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": int64(1), "lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano), "reason": "PoolReady"}}, "lastProbeTime": time.Now().UTC().Format(time.RFC3339Nano)}}}
+	conditions, _, _ := unstructured.NestedSlice(pool.Object, "status", "conditions")
+	for _, kind := range []string{volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable} {
+		conditions = append(conditions, map[string]any{"type": kind, "status": "True", "observedGeneration": int64(1), "lastTransitionTime": time.Now().UTC().Format(time.RFC3339Nano), "reason": "ProbeSucceeded"})
+	}
+	_ = unstructured.SetNestedSlice(pool.Object, conditions, "status", "conditions")
 	dynamic := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.PoolResource: "ShiftPVPoolList", volumeapi.MoveResource: "ShiftPVMoveList"}, parent, pool, identity)
 	controller := true
 	ds := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Namespace: "shiftpv", Name: "shiftpv-node", UID: "ds-uid"}, Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{ServiceAccountName: "node"}}}}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: executor.Namespace, Name: executor.PodName, UID: types.UID(executor.PodUID), Annotations: map[string]string{capabilityAnnotation: "v1"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "DaemonSet", Name: ds.Name, UID: ds.UID, Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: executor.NodeName, ServiceAccountName: "node"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: executor.Namespace, Name: executor.PodName, UID: types.UID(executor.PodUID), Annotations: map[string]string{volumeapi.NodeEffectsAnnotation: "v1"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "DaemonSet", Name: ds.Name, UID: ds.UID, Controller: &controller}}}, Spec: corev1.PodSpec{NodeName: executor.NodeName, ServiceAccountName: "node"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
 	kube := kubefake.NewClientset(ds, pod)
 	registry := &volumeapi.Registry{Client: dynamic}
 	discovery := Discovery{Client: kube, Namespace: "shiftpv", DaemonSet: ds.Name}
-	helper := &helperpod.Runner{Client: kube, Namespace: "shiftpv", Pools: registry, Image: "helper:test", Timeout: time.Second}
-	client := &Client{Discovery: discovery, Volumes: registry, Fallback: helper, Timeout: 10 * time.Millisecond}
-	node := &Node{Identity: executor, Discovery: discovery, Volumes: registry, Cleanups: &cleanupapi.Store{Client: dynamic}, HostRoot: "/host"}
+	client := &Client{Discovery: discovery, Volumes: registry, Inspector: &helperpod.Inspector{Client: kube, Namespace: "shiftpv"}, Timeout: 10 * time.Millisecond}
+	node := &Node{Identity: executor, Pods: kube.CoreV1().Pods(executor.Namespace), Volumes: registry, Cleanups: &cleanupapi.Store{Client: dynamic}, HostRoot: "/host"}
 	state, err := registry.Get(context.Background(), testID)
 	if err != nil {
 		t.Fatal(err)

@@ -39,6 +39,10 @@ type waiter struct {
 	requested                         int64
 	firstSeen, lastSeen               time.Time
 	serial                            uint64
+	observation                       bool
+	observedPool                      string
+	observedGeneration                int64
+	observedProbe                     metav1.Time
 }
 
 // Retries is a bounded, advisory index. It never grants capacity. Losing it on
@@ -51,15 +55,33 @@ type Retries struct {
 	mu      sync.Mutex
 	waiting map[string]waiter
 	serial  uint64
+	wake    chan struct{}
 	now     func() time.Time
 }
 
 func NewRetries(client kubernetes.Interface, pools Repository) *Retries {
-	return &Retries{Client: client, Pools: pools, waiting: make(map[string]waiter), now: time.Now}
+	return &Retries{Client: client, Pools: pools, waiting: make(map[string]waiter), wake: make(chan struct{}, 1), now: time.Now}
 }
 
 func (r *Retries) Register(namespace, name, uid, node, group string, requested int64) {
-	if namespace == "" || name == "" || uid == "" || node == "" || requested <= 0 {
+	r.register(namespace, name, uid, node, group, requested, false, volumeapi.Pool{})
+}
+
+// RegisterObservation waits for a placeable Pool, not additional free capacity.
+// The subsequent CSI call still performs all admission and reservation checks.
+func (r *Retries) RegisterObservation(namespace, name, uid, node, group string, observed volumeapi.Pool) {
+	r.register(namespace, name, uid, node, group, 0, true, observed)
+	// Cover recovery between the failed CSI snapshot and registration, even if
+	// its watch event has already been consumed. Capacity waits do not do this:
+	// a logical-space hint cannot prove recovery from physical ENOSPC.
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Retries) register(namespace, name, uid, node, group string, requested int64, observation bool, observed volumeapi.Pool) {
+	if namespace == "" || name == "" || uid == "" || node == "" || (!observation && requested <= 0) {
 		return
 	}
 	r.mu.Lock()
@@ -78,7 +100,9 @@ func (r *Retries) Register(namespace, name, uid, node, group string, requested i
 		first = previous.firstSeen
 	}
 	r.serial++
-	r.waiting[uid] = waiter{namespace, name, uid, node, group, requested, first, now, r.serial}
+	r.waiting[uid] = waiter{namespace: namespace, name: name, uid: uid, node: node, group: group,
+		requested: requested, firstSeen: first, lastSeen: now, serial: r.serial, observation: observation,
+		observedPool: observed.UID, observedGeneration: observed.Generation, observedProbe: observed.Status.LastProbeTime}
 }
 
 func (r *Retries) snapshot() []waiter {
@@ -106,9 +130,9 @@ func (r *Retries) expire(now time.Time) {
 	}
 }
 
-// Reconcile notifies only requests which now fit a live, valid logical ledger.
-// Its per-Pool budget limits fan-out, but is only a hint: CreateVolume must
-// re-check physical space and record its durable intent under the Pool lock.
+// Reconcile wakes observation waits when a matching Pool is placeable. Capacity
+// waits additionally require a valid ledger and a per-Pool fan-out budget.
+// Neither kind grants admission; CSI must recheck under the Pool lock.
 func (r *Retries) Reconcile(ctx context.Context) error {
 	waiting := r.snapshot()
 	if len(waiting) == 0 {
@@ -118,39 +142,38 @@ func (r *Retries) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	capacityWaits, notifyErrors := r.notifyObservations(ctx, waiting, pools)
+	if len(capacityWaits) == 0 {
+		return notifyErrors
+	}
 	volumes, err := r.Pools.ListVolumes(ctx)
 	if err != nil {
-		return err
+		return errors.Join(notifyErrors, err)
 	}
 	moves, err := r.Pools.ListMoves(ctx)
 	if err != nil {
-		return err
+		return errors.Join(notifyErrors, err)
 	}
 	free := make(map[string]int64, len(pools))
 	for _, pool := range pools {
 		limit, err := poolcapacity.LimitBytes(pool)
 		if err != nil {
-			return err
+			return errors.Join(notifyErrors, err)
 		}
 		reserved, err := poolcapacity.ReservedBytesForPool(volumes, moves, pool.UID)
 		if err != nil {
-			return err
+			return errors.Join(notifyErrors, err)
 		}
 		if reserved < limit {
 			free[pool.UID] = limit - reserved
 		}
 	}
-	var notifyErrors error
-	for _, w := range waiting {
+	for _, w := range capacityWaits {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(notifyErrors, err)
 		}
 		for _, pool := range pools {
-			group := pool.PoolGroup
-			if group == "" {
-				group = volumeapi.DefaultPoolGroup
-			}
-			if pool.NodeName != w.node || group != w.group || w.requested > free[pool.UID] {
+			if !w.matches(pool) || w.requested > free[pool.UID] {
 				continue
 			}
 			notified, err := r.notify(ctx, w)
@@ -165,6 +188,20 @@ func (r *Retries) Reconcile(ctx context.Context) error {
 		}
 	}
 	return notifyErrors
+}
+
+func (w waiter) matches(pool volumeapi.Pool) bool {
+	group := pool.PoolGroup
+	if group == "" {
+		group = volumeapi.DefaultPoolGroup
+	}
+	if pool.NodeName != w.node || group != w.group {
+		return false
+	}
+	// A selected candidate whose live probe failed must produce new successful
+	// evidence. Its old Ready snapshot cannot wake a tight CSI notification loop.
+	return !w.observation || w.observedPool != pool.UID ||
+		w.observedGeneration != pool.Generation || !pool.Status.LastProbeTime.Equal(&w.observedProbe)
 }
 
 func (r *Retries) notify(ctx context.Context, w waiter) (bool, error) {
@@ -197,7 +234,7 @@ func (r *Retries) notify(ctx context.Context, w waiter) (bool, error) {
 		r.mu.Unlock()
 		return false, err
 	}
-	klog.V(2).InfoS("Capacity retry requested", "namespace", w.namespace, "pvc", w.name, "node", w.node, "poolGroup", w.group)
+	klog.V(2).InfoS("Provisioning retry requested", "namespace", w.namespace, "pvc", w.name, "node", w.node, "poolGroup", w.group, "observation", w.observation)
 	return true, nil
 }
 
@@ -216,7 +253,7 @@ func (r *Retries) take(w waiter) bool {
 // provides a fallback for missed events; external-provisioner retries also
 // remain active. No PVC watch is installed, preventing notification loops.
 func (r *Retries) Run(ctx context.Context, client dynamic.Interface) {
-	wake := make(chan struct{}, 1)
+	wake := r.wake
 	notify := func(any) {
 		select {
 		case wake <- struct{}{}:
@@ -263,4 +300,26 @@ func (r *Retries) Run(ctx context.Context, client dynamic.Interface) {
 			klog.V(2).InfoS("Capacity retry observation failed", "error", err)
 		}
 	}
+}
+
+func (r *Retries) notifyObservations(ctx context.Context, waiting []waiter, pools []volumeapi.Pool) ([]waiter, error) {
+	var notifyErrors error
+	capacityWaits := make([]waiter, 0, len(waiting))
+	for _, w := range waiting {
+		if err := ctx.Err(); err != nil {
+			return nil, errors.Join(notifyErrors, err)
+		}
+		if !w.observation {
+			capacityWaits = append(capacityWaits, w)
+			continue
+		}
+		for _, pool := range pools {
+			if w.matches(pool) {
+				_, err := r.notify(ctx, w)
+				notifyErrors = errors.Join(notifyErrors, err)
+				break
+			}
+		}
+	}
+	return capacityWaits, notifyErrors
 }

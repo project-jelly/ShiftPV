@@ -6,16 +6,15 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	"github.com/project-jelly/ShiftPV/src/kubernetes/cleanupapi"
 	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
+	"github.com/project-jelly/ShiftPV/src/pool/capacityunit"
 	"github.com/project-jelly/ShiftPV/src/volume"
 )
 
@@ -75,154 +74,6 @@ func TestUnknownOrphanCleanupHasNoExecutableAuthority(t *testing.T) {
 	}
 }
 
-func TestCleanupExecutorMustMatchExactRunningPod(t *testing.T) {
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "pod-uid"}, Spec: corev1.PodSpec{NodeName: "worker-a"}}
-	executor := &cleanupapi.Executor{JobName: "cleanup-job", JobUID: "job-uid", PodUID: "pod-uid", NodeName: "worker-a"}
-	if !MatchesCleanupExecutor(executor, "cleanup-job", "job-uid", pod) {
-		t.Fatal("exact Pod-bound executor was rejected")
-	}
-	for name, mutate := range map[string]func(*cleanupapi.Executor, *corev1.Pod){
-		"missing executor": func(current *cleanupapi.Executor, _ *corev1.Pod) { *current = cleanupapi.Executor{} },
-		"job name":         func(current *cleanupapi.Executor, _ *corev1.Pod) { current.JobName = "replacement" },
-		"job UID":          func(current *cleanupapi.Executor, _ *corev1.Pod) { current.JobUID = "replacement" },
-		"Pod UID":          func(current *cleanupapi.Executor, _ *corev1.Pod) { current.PodUID = "replacement" },
-		"node":             func(_ *cleanupapi.Executor, currentPod *corev1.Pod) { currentPod.Spec.NodeName = "worker-b" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			changedExecutor := *executor
-			changedPod := pod.DeepCopy()
-			mutate(&changedExecutor, changedPod)
-			if MatchesCleanupExecutor(&changedExecutor, "cleanup-job", "job-uid", changedPod) {
-				t.Fatal("changed executor identity was accepted")
-			}
-		})
-	}
-	if MatchesCleanupExecutor(nil, "cleanup-job", "job-uid", pod) || MatchesCleanupExecutor(executor, "cleanup-job", "job-uid", nil) {
-		t.Fatal("missing executor or Pod was accepted")
-	}
-}
-
-func TestOwnedByCleanupParentRequiresExactControllerReference(t *testing.T) {
-	authority := cleanupapi.Authority{Kind: "ShiftPVVolume", Name: "shiftpv-volume", UID: "volume-uid"}
-	controller := true
-	owner := metav1.OwnerReference{APIVersion: "shiftpv.io/v1alpha1", Kind: authority.Kind, Name: authority.Name, UID: types.UID(authority.UID), Controller: &controller}
-	if !OwnedByCleanupParent([]metav1.OwnerReference{owner}, authority) {
-		t.Fatal("exact parent-owned reference was rejected")
-	}
-	if OwnedByCleanupParent(nil, authority) {
-		t.Fatal("missing owner reference was accepted")
-	}
-	for name, mutate := range map[string]func(*metav1.OwnerReference){
-		"group":      func(current *metav1.OwnerReference) { current.APIVersion = "batch/v1" },
-		"kind":       func(current *metav1.OwnerReference) { current.Kind = "ShiftPVMove" },
-		"name":       func(current *metav1.OwnerReference) { current.Name = "replacement" },
-		"UID":        func(current *metav1.OwnerReference) { current.UID = "replacement" },
-		"controller": func(current *metav1.OwnerReference) { current.Controller = nil },
-	} {
-		t.Run(name, func(t *testing.T) {
-			changed := owner
-			mutate(&changed)
-			if OwnedByCleanupParent([]metav1.OwnerReference{changed}, authority) {
-				t.Fatal("changed parent reference was accepted")
-			}
-		})
-	}
-}
-
-func TestCleanupAuthorityRechecksIntentPoolAndParentState(t *testing.T) {
-	const volumeID = "shiftpv-cccccccccccccccccccccccccccccccc"
-	target := volume.CopyIdentity{
-		InstallationID: "installation", PoolName: "pool-a", PoolUID: "pool-uid",
-		VolumeID: volumeID, VolumeUID: "volume-uid", CopyID: "copy-a", NodeName: "worker-a", Role: volume.RoleServing,
-	}
-	volumeObject := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
-		"metadata": map[string]any{"name": volumeID, "uid": target.VolumeUID, "finalizers": []any{volumeapi.VolumeProtectionFinalizer}},
-		"spec":     map[string]any{"volumeID": volumeID},
-	}}
-	poolObject := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVPool",
-		"metadata": map[string]any{"name": target.PoolName, "uid": target.PoolUID, "finalizers": []any{volumeapi.PoolProtectionFinalizer}},
-		"spec":     map[string]any{"nodeName": target.NodeName, "mountPath": "/pool", "capacity": map[string]any{"limit": "1Gi"}},
-	}}
-	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "v1", "kind": "Namespace",
-		"metadata": map[string]any{"name": "kube-system", "uid": target.InstallationID},
-	}}
-	namespaceResource := schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
-	dynamicClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-		volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList", namespaceResource: "NamespaceList",
-	}, volumeObject, poolObject, clusterIdentity)
-	registry := &volumeapi.Registry{Client: dynamicClient}
-	cleanups := &cleanupapi.Store{Client: dynamicClient}
-	setVolumeStateFixture(t, dynamicClient, volumeID, volumeapi.State{Phase: volumeapi.PhaseReady, OwnerNode: target.NodeName, CurrentCopy: &target})
-	if _, err := registry.BeginDelete(context.Background(), volumeID, target.VolumeUID, target); err != nil {
-		t.Fatal(err)
-	}
-	spec := cleanupapi.Spec{
-		OperationID: "delete-" + target.VolumeUID, Target: target, Reason: "VolumeDelete",
-		Authority: cleanupapi.Authority{Kind: "ShiftPVVolume", Name: volumeID, UID: target.VolumeUID},
-	}
-	pending, err := cleanups.Ensure(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := cleanupapi.Executor{JobName: "cleanup-job", JobUID: "job-uid", NodeName: target.NodeName}
-	if err := cleanups.UpdateStatus(context.Background(), pending, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &executor}); err != nil {
-		t.Fatal(err)
-	}
-	running, err := cleanups.Get(context.Background(), spec.Authority)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bound := executor
-	bound.PodUID = "pod-uid"
-	if err := cleanups.UpdateStatus(context.Background(), running, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &bound}); err != nil {
-		t.Fatal(err)
-	}
-	approved, err := cleanups.Get(context.Background(), spec.Authority)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "cleanup-pod", Namespace: "system", UID: "pod-uid"}, Spec: corev1.PodSpec{NodeName: target.NodeName}}
-	options := CleanupOptions{Authority: spec.Authority, Approved: approved, JobName: executor.JobName, JobUID: executor.JobUID, Pod: pod}
-	if err := CleanupAuthority(cleanups, registry, options)(context.Background(), false); err != nil {
-		t.Fatalf("exact cleanup authority rejected: %v", err)
-	}
-	replacementPod := pod.DeepCopy()
-	replacementPod.UID = "replacement-pod"
-	replaced := options
-	replaced.Pod = replacementPod
-	if err := CleanupAuthority(cleanups, registry, replaced)(context.Background(), false); err == nil {
-		t.Fatal("replacement executor Pod kept destructive authority")
-	}
-	pool, err := dynamicClient.Resource(volumeapi.PoolResource).Get(context.Background(), target.PoolName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool.SetFinalizers(nil)
-	if _, err := dynamicClient.Resource(volumeapi.PoolResource).Update(context.Background(), pool, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := CleanupAuthority(cleanups, registry, options)(context.Background(), false); err == nil {
-		t.Fatal("unprotected Pool kept destructive authority")
-	}
-	// Restore the Pool so the next step fails only on the installation identity.
-	pool.SetFinalizers([]string{volumeapi.PoolProtectionFinalizer})
-	if _, err := dynamicClient.Resource(volumeapi.PoolResource).Update(context.Background(), pool, metav1.UpdateOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := CleanupAuthority(cleanups, registry, options)(context.Background(), false); err != nil {
-		t.Fatalf("restored Pool protection was rejected: %v", err)
-	}
-	if err := dynamicClient.Resource(namespaceResource).Delete(context.Background(), "kube-system", metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := CleanupAuthority(cleanups, registry, options)(context.Background(), false); err == nil {
-		t.Fatal("unreadable installation identity kept destructive authority")
-	}
-}
-
 func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.T) {
 	const (
 		volumeID = "shiftpv-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -257,7 +108,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 			moveObject := &unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
 				"metadata": map[string]any{"name": moveName, "uid": moveUID},
-				"spec":     map[string]any{"volumeID": volumeID, "sourceNode": source.NodeName, "recovery": "ResumeOwner"},
+				"spec":     map[string]any{"volumeID": volumeID, "sourceNode": source.NodeName, "recovery": "ResumeOwner", "protocolVersion": volumeapi.MoveProtocolPreparedV1},
 			}}
 			volumeObject := &unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
@@ -270,7 +121,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 					"name": destination.PoolName, "uid": destination.PoolUID, "generation": int64(1),
 					"finalizers": []any{volumeapi.PoolProtectionFinalizer},
 				},
-				"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool"},
+				"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool", "capacity": map[string]any{"limit": "1Gi"}},
 			}}
 			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 				volumeapi.VolumeResource: "ShiftPVVolumeList", volumeapi.MoveResource: "ShiftPVMoveList", volumeapi.PoolResource: "ShiftPVPoolList",
@@ -281,9 +132,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				DestinationNode: destination.NodeName, DestinationPoolUID: destination.PoolUID,
 				SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
 			}
-			if err := registry.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err != nil {
-				t.Fatal(err)
-			}
+			setMoveStatusFixture(t, client, moveName, moveStatus)
 			statePhase := volumeapi.PhaseBlocked
 			if test.reason == "MoveSource" {
 				statePhase = volumeapi.PhaseReady
@@ -298,7 +147,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
 					ObservedGeneration: 1,
 					LastProbeTime:      now,
-					Conditions:         []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+					Conditions:         cleanupBackingConditions(),
 					Inventory: &volumeapi.PoolInventory{
 						ObservedAt: now, Valid: true,
 						Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: true}},
@@ -326,7 +175,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
 					ObservedGeneration: 1,
 					LastProbeTime:      now,
-					Conditions:         []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+					Conditions:         cleanupBackingConditions(),
 					Inventory: &volumeapi.PoolInventory{
 						ObservedAt: now, Valid: true,
 						Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: false}},
@@ -340,7 +189,7 @@ func TestRecoveryCleanupAuthorityRequiresExactTargetAndRetainedOwner(t *testing.
 				if err := registry.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
 					ObservedGeneration: 1,
 					LastProbeTime:      now,
-					Conditions:         []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+					Conditions:         cleanupBackingConditions(),
 					Inventory: &volumeapi.PoolInventory{
 						ObservedAt: now, Valid: true,
 						Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: true}},
@@ -401,7 +250,7 @@ func TestMoveSourceCleanupAuthorityHonorsOperatorPoolReadinessBudget(t *testing.
 	moveObject := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVMove",
 		"metadata": map[string]any{"name": moveName, "uid": moveUID, "finalizers": []any{volumeapi.MoveProtectionFinalizer}},
-		"spec":     map[string]any{"volumeID": volumeID, "sourceNode": source.NodeName, "recovery": "ResumeOwner"},
+		"spec":     map[string]any{"volumeID": volumeID, "sourceNode": source.NodeName, "recovery": "ResumeOwner", "protocolVersion": volumeapi.MoveProtocolPreparedV1},
 	}}
 	volumeObject := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "shiftpv.io/v1alpha1", "kind": "ShiftPVVolume",
@@ -419,7 +268,7 @@ func TestMoveSourceCleanupAuthorityHonorsOperatorPoolReadinessBudget(t *testing.
 			"name": destination.PoolName, "uid": destination.PoolUID, "generation": int64(1),
 			"finalizers": []any{volumeapi.PoolProtectionFinalizer},
 		},
-		"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool"},
+		"spec": map[string]any{"nodeName": destination.NodeName, "mountPath": "/destination-pool", "capacityPolicy": volumeapi.PoolCapacityPolicyFixedBlock, "capacity": map[string]any{"limit": "1Gi"}},
 	}}
 	clusterIdentity := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1", "kind": "Namespace",
@@ -442,17 +291,22 @@ func TestMoveSourceCleanupAuthorityHonorsOperatorPoolReadinessBudget(t *testing.
 		DestinationNode: destination.NodeName, DestinationPoolUID: destination.PoolUID,
 		SourceCopy: &source, IncomingCopy: &incoming, DestinationCopy: &destination,
 	}
-	if err := setup.SetMoveStatus(context.Background(), moveName, moveUID, moveStatus); err != nil {
-		t.Fatal(err)
-	}
+	setMoveStatusFixture(t, client, moveName, moveStatus)
 	setVolumeStateFixture(t, client, volumeID, volumeapi.State{
 		UID: source.VolumeUID, Phase: volumeapi.PhaseReady, OwnerNode: destination.NodeName,
 		ActiveMove: moveName, CurrentCopy: &destination, PublishedNodes: []string{destination.NodeName},
 	})
+	conditions := cleanupBackingConditions()
+	conditions[0].Status, conditions[0].Reason = metav1.ConditionFalse, "CapacityPeerUnproven"
+	conditions = append(conditions,
+		metav1.Condition{Type: volumeapi.PoolConditionCapacityBackingVerified, Status: metav1.ConditionTrue, ObservedGeneration: 1},
+		metav1.Condition{Type: volumeapi.PoolConditionCapacityIndependent, Status: metav1.ConditionFalse, ObservedGeneration: 1, Reason: "CapacityPeerUnproven"})
 	if err := setup.SetPoolStatus(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName, volumeapi.PoolStatus{
 		ObservedGeneration: 1,
 		LastProbeTime:      probeAt,
-		Conditions:         []metav1.Condition{{Type: volumeapi.PoolConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: 1}},
+		Conditions:         conditions,
+		CapacityUnit: &volumeapi.PoolCapacityUnit{Device: "8:1", Source: "/dev/a", Filesystem: "ext4",
+			Extents: []capacityunit.Extent{{Device: "8:0", Start: 100, Sectors: 100}}},
 		Inventory: &volumeapi.PoolInventory{
 			ObservedAt: probeAt, Valid: true,
 			Copies: []volumeapi.CopyObservation{{Identity: &destination, Present: true, Published: true}},
@@ -461,34 +315,11 @@ func TestMoveSourceCleanupAuthorityHonorsOperatorPoolReadinessBudget(t *testing.
 		t.Fatal(err)
 	}
 
-	cleanups := &cleanupapi.Store{Client: client}
 	spec := cleanupapi.Spec{
 		OperationID: "cleanup-" + moveUID, Target: source, Reason: "MoveSource",
 		Authority: cleanupapi.Authority{Kind: "ShiftPVMove", Name: moveName, UID: moveUID},
 	}
-	pending, err := cleanups.Ensure(context.Background(), spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := cleanupapi.Executor{JobName: "cleanup-job", JobUID: "job-uid", NodeName: source.NodeName}
-	if err := cleanups.UpdateStatus(context.Background(), pending, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &executor}); err != nil {
-		t.Fatal(err)
-	}
-	running, err := cleanups.Get(context.Background(), spec.Authority)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bound := executor
-	bound.PodUID = "pod-uid"
-	if err := cleanups.UpdateStatus(context.Background(), running, cleanupapi.Status{Phase: cleanupapi.PhaseRunning, Executor: &bound}); err != nil {
-		t.Fatal(err)
-	}
-	approved, err := cleanups.Get(context.Background(), spec.Authority)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "cleanup-pod", Namespace: "system", UID: "pod-uid"}, Spec: corev1.PodSpec{NodeName: source.NodeName}}
-	options := CleanupOptions{Authority: spec.Authority, Approved: approved, JobName: executor.JobName, JobUID: executor.JobUID, Pod: pod}
+	approved := cleanupapi.Cleanup{Spec: spec}
 
 	registryAt := func(staleAfter time.Duration) *volumeapi.Registry {
 		return &volumeapi.Registry{
@@ -497,17 +328,69 @@ func TestMoveSourceCleanupAuthorityHonorsOperatorPoolReadinessBudget(t *testing.
 			Now:                     func() time.Time { return observed },
 		}
 	}
-	if err := CleanupAuthority(cleanups, registryAt(0), options)(context.Background(), false); err != nil {
+	if _, err := registryAt(0).ReadyPoolForIdentity(context.Background(), destination.PoolName, destination.PoolUID, destination.NodeName); err == nil {
+		t.Fatal("peer failure admitted new destination allocation")
+	}
+	// The existing published copy remains proven even while peer uncertainty
+	// prevents new allocation on its Pool.
+	if err := VerifyCleanupAuthority(context.Background(), registryAt(0), approved); err != nil {
 		t.Fatalf("publication proof inside the compiled default was rejected: %v", err)
 	}
-	if err := CleanupAuthority(cleanups, registryAt(volumeapi.DefaultPoolReadinessStaleAfter), options)(context.Background(), false); err != nil {
+	if err := VerifyCleanupAuthority(context.Background(), registryAt(volumeapi.DefaultPoolReadinessStaleAfter), approved); err != nil {
 		t.Fatalf("publication proof inside the explicit default budget was rejected: %v", err)
 	}
-	err = CleanupAuthority(cleanups, registryAt(time.Minute), options)(context.Background(), false)
+	err := VerifyCleanupAuthority(context.Background(), registryAt(time.Minute), approved)
 	if err == nil {
 		t.Fatal("publication proof older than the operator budget kept destructive authority")
 	}
 	if !errors.Is(err, volumeapi.ErrPoolNotReady) {
 		t.Fatalf("stale publication proof was rejected for the wrong reason: %v", err)
 	}
+	baseline, err := client.Resource(volumeapi.PoolResource).Get(context.Background(), destination.PoolName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*unstructured.Unstructured){
+		"own backing failed": func(object *unstructured.Unstructured) {
+			conditions, _, _ := unstructured.NestedSlice(object.Object, "status", "conditions")
+			conditions[4].(map[string]any)["status"] = "False"
+			_ = unstructured.SetNestedSlice(object.Object, conditions, "status", "conditions")
+		},
+		"outdated generation": func(object *unstructured.Unstructured) { object.SetGeneration(2) },
+		"unprotected Pool":    func(object *unstructured.Unstructured) { object.SetFinalizers(nil) },
+		"replaced Pool":       func(object *unstructured.Unstructured) { object.SetUID("replacement") },
+		"invalid inventory": func(object *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(object.Object, false, "status", "inventory", "valid")
+		},
+		"truncated inventory": func(object *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(object.Object, true, "status", "inventory", "truncated")
+		},
+		"stale inventory": func(object *unstructured.Unstructured) {
+			_ = unstructured.SetNestedField(object.Object, observed.Add(-4*time.Minute).Format(time.RFC3339), "status", "inventory", "observedAt")
+		},
+		"different published copy": func(object *unstructured.Unstructured) {
+			copies, _, _ := unstructured.NestedSlice(object.Object, "status", "inventory", "copies")
+			copies[0].(map[string]any)["identity"].(map[string]any)["copyID"] = "different-copy"
+			_ = unstructured.SetNestedSlice(object.Object, copies, "status", "inventory", "copies")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			object := baseline.DeepCopy()
+			change(object)
+			if _, err := client.Resource(volumeapi.PoolResource).Update(context.Background(), object, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyCleanupAuthority(context.Background(), registryAt(0), approved); err == nil {
+				t.Fatal("lost exact destination proof authorized source deletion")
+			}
+		})
+	}
+}
+
+func cleanupBackingConditions() []metav1.Condition {
+	conditions := []metav1.Condition{}
+	for _, kind := range []string{volumeapi.PoolConditionReady, volumeapi.PoolConditionAccessible, volumeapi.PoolConditionWritable, volumeapi.PoolConditionCapacityReadable} {
+		conditions = append(conditions, metav1.Condition{Type: kind, Status: metav1.ConditionTrue, ObservedGeneration: 1})
+	}
+	return conditions
 }

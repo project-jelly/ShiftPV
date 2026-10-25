@@ -4,6 +4,8 @@ set -Eeuo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # shellcheck source=test/e2e/real-node/lib.sh
 source "${ROOT_DIR}/test/e2e/real-node/lib.sh"
+# shellcheck source=test/e2e/real-node/cleanup-executor.sh
+source "${ROOT_DIR}/test/e2e/real-node/cleanup-executor.sh"
 
 require_real_node_env
 
@@ -17,8 +19,13 @@ MOVE_TIMEOUT_SECONDS=${MOVE_TIMEOUT_SECONDS:-900}
 ARTIFACT_DIR=${ARTIFACT_DIR:-${ROOT_DIR}/.tmp/real-node/soak-${RUN_ID}}
 
 if ! [[ "${ITERATIONS}" =~ ^[1-9][0-9]*$ && "${MIN_DURATION_SECONDS}" =~ ^[0-9]+$ &&
-	"${CONTROLLER_RESTART_EVERY}" =~ ^[0-9]+$ && "${CLEANUP_POD_DELETE_EVERY}" =~ ^[0-9]+$ ]]; then
-	echo 'iteration, duration, and fault interval values must be non-negative integers; ITERATIONS must be positive' >&2
+	"${CONTROLLER_RESTART_EVERY}" =~ ^[0-9]+$ && "${CLEANUP_POD_DELETE_EVERY}" =~ ^[0-9]+$ &&
+	"${MOVE_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+	echo 'iteration, duration, and fault intervals must be integers; ITERATIONS and MOVE_TIMEOUT_SECONDS must be positive, others non-negative' >&2
+	exit 1
+fi
+if [[ "${CLEANUP_POD_DELETE_EVERY}" == 1 ]]; then
+	echo 'native cleanup fault requires a settled baseline Move first; use an interval of at least 2 (or 0 for smoke without faults)' >&2
 	exit 1
 fi
 if [[ "${FAULT_NODE}" != "${SOURCE_NODE}" || "${FAULT_SSH_TARGET}" != "${SOURCE_SSH_TARGET}" ]]; then
@@ -32,28 +39,12 @@ mkdir -p "${ARTIFACT_DIR}"
 
 trap report_error ERR
 
-restore_environment() {
-	local result_code=$? restore_failed=0
-	trap - ERR EXIT INT TERM
-	set +e
-	if ! k uncordon "${SOURCE_NODE}" >/dev/null 2>&1; then
-		restore_failed=1
-		warn_uncordon_needed "${SOURCE_NODE}" "uncordon failed for ${SOURCE_NODE}"
-	fi
-	if ! k uncordon "${DESTINATION_NODE}" >/dev/null 2>&1; then
-		restore_failed=1
-		warn_uncordon_needed "${DESTINATION_NODE}" "uncordon failed for ${DESTINATION_NODE}"
-	fi
-	capture_evidence final
-	if ((result_code != 0)); then
-		echo "soak failed; test resources were preserved for diagnosis in ${ARTIFACT_DIR}" >&2
-	fi
-	if ((result_code == 0 && restore_failed)); then
-		result_code=1
-	fi
-	exit "${result_code}"
-}
-trap restore_environment EXIT INT TERM
+SOAK_STARTED=0
+SOAK_RESULT_READY=0
+CLEANUP_POLICY_UID=''
+CLEANUP_BINDING_UID=''
+CLEANUP_LOCK_ROLE=''
+install_soak_traps
 
 wait_for_move() {
 	local previous_move=$1 deadline=$((SECONDS + MOVE_TIMEOUT_SECONDS)) move='' after=''
@@ -117,36 +108,6 @@ wait_for_pools_current() {
 	return 1
 }
 
-restart_controller() {
-	local pod
-	pod=$(k -n "${SYSTEM_NAMESPACE}" get pod -l app.kubernetes.io/component=controller -o jsonpath='{.items[0].metadata.name}')
-	k -n "${SYSTEM_NAMESPACE}" delete "pod/${pod}" --wait=true --timeout=180s
-	k -n "${SYSTEM_NAMESPACE}" rollout status deployment/shiftpv-controller --timeout=300s
-}
-
-delete_cleanup_pod() {
-	local move=$1 deadline=$((SECONDS + MOVE_TIMEOUT_SECONDS)) phase='' cleanup_phase='' job='' pod=''
-	while ((SECONDS < deadline)); do
-		phase=$(k get "shiftpvmove/${move}" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-		cleanup_phase=$(k get "shiftpvmove/${move}" -o jsonpath='{.status.cleanup.status.phase}' 2>/dev/null || true)
-		job=$(k get "shiftpvmove/${move}" -o jsonpath='{.status.cleanup.status.executor.jobName}' 2>/dev/null || true)
-		if [[ "${cleanup_phase}" == Running && -n "${job}" ]]; then
-			pod=$(k -n "${SYSTEM_NAMESPACE}" get pod -l "job-name=${job}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-			if [[ -n "${pod}" ]]; then
-				k -n "${SYSTEM_NAMESPACE}" delete "pod/${pod}" --wait=true --timeout=180s
-				return
-			fi
-		fi
-		if [[ "${phase}" == Succeeded || "${phase}" == Blocked || "${cleanup_phase}" == Completed || "${cleanup_phase}" == NeedsReview ]]; then
-			echo "missed cleanup Pod deletion boundary: move=${move} phase=${phase} cleanup=${cleanup_phase}" >&2
-			return 1
-		fi
-		sleep 0.1
-	done
-	echo "cleanup Pod did not become injectable: move=${move}" >&2
-	return 1
-}
-
 assert_iteration() {
 	local iteration=$1 move=$2 expected_node=$3 old_node=$4 pod checksum cleanup_phase finalizers old_pool expected_pool old_role expected_role
 	k -n "${TEST_NAMESPACE}" rollout status deployment/writer --timeout=600s
@@ -160,20 +121,19 @@ assert_iteration() {
 	test "${checksum}" = "${SOURCE_CHECKSUM}"
 	test "$(k -n "${TEST_NAMESPACE}" get pvc/data -o jsonpath='{.metadata.uid}')" = "${PVC_UID}"
 	test "$(k -n "${TEST_NAMESPACE}" get pvc/data -o jsonpath='{.spec.volumeName}')" = "${PV_NAME}"
+	test "$(k get "pv/${PV_NAME}" -o jsonpath='{.metadata.uid}')" = "${PV_UID}"
 	test "$(k get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')" = "${VOLUME_ID}"
+	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')" = "${VOLUME_UID}"
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.phase}')" = Ready
 	test "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.ownerNode}')" = "${expected_node}"
+	test -z "$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.status.activeMove}')"
 	cleanup_phase=$(k get "shiftpvmove/${move}" -o jsonpath='{.status.cleanup.status.phase}')
 	finalizers=$(k get "shiftpvmove/${move}" -o jsonpath='{.metadata.finalizers}')
 	test "${cleanup_phase}" = Completed
 	test -z "${finalizers}"
-	k get "shiftpvmove/${move}" -o json | jq -e '
-		.status.cleanup.status.phase == "Completed" and
-		.status.cleanup.status.receipt.purged == true and
-		.status.cleanup.status.receipt.retired == true and
-		.status.cleanup.spec.operationID == .status.cleanup.status.receipt.operationID and
-		.status.cleanup.status.executor.jobUID == .status.cleanup.status.receipt.executorUID and
-		(.status.cleanup.status.receipt.localReceiptDigest | test("^[0-9a-f]{64}$"))' >/dev/null
+	k get "shiftpvmove/${move}" -o json >"${ARTIFACT_DIR}/${move}-settled.json"
+	validate_native_cleanup_proof "${ARTIFACT_DIR}/${move}-settled.json" "${fault_reference:-}"
+	assert_no_soak_cleanup_job "${ARTIFACT_DIR}/${move}-settled.json"
 	if [[ "${old_node}" == "${SOURCE_NODE}" ]]; then
 		old_role=source
 		expected_role=destination
@@ -203,6 +163,14 @@ cleanup_test_volume() {
 }
 
 "${ROOT_DIR}/test/e2e/real-node/preflight.sh" | tee "${ARTIFACT_DIR}/preflight.txt"
+if ((CLEANUP_POD_DELETE_EVERY > 0)); then
+	for resource in validatingadmissionpolicies validatingadmissionpolicybindings; do
+		k get "${resource}.admissionregistration.k8s.io" --limit=1 -o json >/dev/null
+		for verb in create delete; do
+			test "$(k auth can-i "${verb}" "${resource}.admissionregistration.k8s.io")" = yes
+		done
+	done
+fi
 if k get "namespace/${TEST_NAMESPACE}" >/dev/null 2>&1; then
 	echo "test namespace already exists: ${TEST_NAMESPACE}" >&2
 	exit 1
@@ -210,6 +178,7 @@ fi
 snapshot_non_shiftpv_specs before exact "${TEST_NAMESPACE}"
 capture_evidence before
 
+SOAK_STARTED=1
 k cordon "${DESTINATION_NODE}" >/dev/null
 create_test_workload "${TEST_NAMESPACE}" shiftpv-real-node-soak 128Mi 64 'ShiftPV real-node alternating soak'
 k -n "${TEST_NAMESPACE}" rollout status deployment/writer --timeout=600s
@@ -218,10 +187,23 @@ pod=$(k -n "${TEST_NAMESPACE}" get pod -l app=shiftpv-real-node-soak -o jsonpath
 test "$(k -n "${TEST_NAMESPACE}" get "pod/${pod}" -o jsonpath='{.spec.nodeName}')" = "${SOURCE_NODE}"
 PVC_UID=$(k -n "${TEST_NAMESPACE}" get pvc/data -o jsonpath='{.metadata.uid}')
 PV_NAME=$(k -n "${TEST_NAMESPACE}" get pvc/data -o jsonpath='{.spec.volumeName}')
+PV_UID=$(k get "pv/${PV_NAME}" -o jsonpath='{.metadata.uid}')
 VOLUME_ID=$(k get "pv/${PV_NAME}" -o jsonpath='{.spec.csi.volumeHandle}')
+VOLUME_UID=$(k get "shiftpvvolume/${VOLUME_ID}" -o jsonpath='{.metadata.uid}')
+test -n "${PVC_UID}" && test -n "${PV_UID}" && test -n "${VOLUME_UID}" && test -n "${VOLUME_ID}"
+nonce="${RUN_ID}-${PVC_UID}-${VOLUME_UID}"
+# Keep the template's default payload unchanged: a freshly regenerated file at
+# the destination must not match this one volume's data.
+# shellcheck disable=SC2016
+k -n "${TEST_NAMESPACE}" exec "${pod}" -- sh -ec 'printf "%s\n" "$1" >>/data/payload; sync' sh "${nonce}"
 SOURCE_CHECKSUM=$(k -n "${TEST_NAMESPACE}" exec "${pod}" -- sha256sum /data/payload | awk '{print $1}')
-SOURCE_POOL=$(k get shiftpvpools -o jsonpath="{.items[?(@.spec.nodeName=='${SOURCE_NODE}')].spec.mountPath}")
-DESTINATION_POOL=$(k get shiftpvpools -o jsonpath="{.items[?(@.spec.nodeName=='${DESTINATION_NODE}')].spec.mountPath}")
+printf 'nonce=%s\npvcUID=%s\npvUID=%s\nvolumeUID=%s\nchecksum=%s\n' \
+	"${nonce}" "${PVC_UID}" "${PV_UID}" "${VOLUME_UID}" "${SOURCE_CHECKSUM}" >"${ARTIFACT_DIR}/payload-identity.txt"
+# This qualification deliberately requires exactly one Pool per reviewed node,
+# as preflight does; do not concatenate paths from multiple registrations.
+pool_json=$(k get shiftpvpools -o json)
+SOURCE_POOL=$(jq -er --arg node "${SOURCE_NODE}" '[.items[] | select(.spec.nodeName == $node)] | select(length == 1) | .[0].spec.mountPath' <<<"${pool_json}")
+DESTINATION_POOL=$(jq -er --arg node "${DESTINATION_NODE}" '[.items[] | select(.spec.nodeName == $node)] | select(length == 1) | .[0].spec.mountPath' <<<"${pool_json}")
 test -n "${SOURCE_POOL}"
 test -n "${DESTINATION_POOL}"
 k uncordon "${DESTINATION_NODE}" >/dev/null
@@ -230,20 +212,29 @@ printf 'iteration\ttimestamp\tmove\tsource\tdestination\tchecksum\n' >"${ARTIFAC
 start_seconds=${SECONDS}
 current_node=${SOURCE_NODE}
 last_move=''
+controller_faults=0
+cleanup_faults=0
 for ((iteration = 1; iteration <= ITERATIONS; iteration++)); do
 	if [[ "${current_node}" == "${SOURCE_NODE}" ]]; then
 		next_node=${DESTINATION_NODE}
 	else
 		next_node=${SOURCE_NODE}
 	fi
+	fault_reference=''
+	if ((CLEANUP_POD_DELETE_EVERY > 0 && iteration % CLEANUP_POD_DELETE_EVERY == 0)); then
+		hold_soak_cleanup "shiftpv-soak-$(printf '%s' "${RUN_ID}" | tr '[:upper:]' '[:lower:]')-${iteration}" "${VOLUME_ID}" "${last_move}"
+	fi
 	k uncordon "${next_node}" >/dev/null
 	k cordon "${current_node}" >/dev/null
 	move=$(wait_for_move "${last_move}")
 	if ((CONTROLLER_RESTART_EVERY > 0 && iteration % CONTROLLER_RESTART_EVERY == 0)); then
-		restart_controller
+		restart_soak_controller
+		controller_faults=$((controller_faults + 1))
 	fi
 	if ((CLEANUP_POD_DELETE_EVERY > 0 && iteration % CLEANUP_POD_DELETE_EVERY == 0)); then
-		delete_cleanup_pod "${move}"
+		fault_native_cleanup "${move}" "${current_node}"
+		fault_reference="${ARTIFACT_DIR}/${move}-cleanup-rebound.json"
+		cleanup_faults=$((cleanup_faults + 1))
 	fi
 	wait_for_move_settled "${move}"
 	assert_iteration "${iteration}" "${move}" "${next_node}" "${current_node}"
@@ -267,10 +258,7 @@ for subject in non-shiftpv-workloads existing-pvcs existing-pvs storageclasses; 
 done
 capture_evidence passed
 
-if ((ITERATIONS >= 100 && elapsed_seconds >= 43200)); then
-	result_marker=REAL_NODE_SOAK_OK
-else
-	result_marker=REAL_NODE_SOAK_SMOKE_OK
-fi
-printf '%s context=%s iterations=%d elapsedSeconds=%d artifacts=%s\n' \
-	"${result_marker}" "${KUBECTL_CONTEXT}" "${ITERATIONS}" "${elapsed_seconds}" "${ARTIFACT_DIR}"
+result_marker=$(soak_result_marker "${ITERATIONS}" "${elapsed_seconds}" "${CONTROLLER_RESTART_EVERY}" \
+	"${CLEANUP_POD_DELETE_EVERY}" "${controller_faults}" "${cleanup_faults}")
+# EXIT emits the marker only after owned fault resources and cordons release.
+SOAK_RESULT_READY=1

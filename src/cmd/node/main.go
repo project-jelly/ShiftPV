@@ -16,8 +16,8 @@ import (
 	"github.com/project-jelly/ShiftPV/src/csi/identity"
 	nodecsi "github.com/project-jelly/ShiftPV/src/csi/node"
 	csiserver "github.com/project-jelly/ShiftPV/src/csi/server"
-	"github.com/project-jelly/ShiftPV/src/kubernetes/volumeapi"
 	"github.com/project-jelly/ShiftPV/src/metrics"
+	"github.com/project-jelly/ShiftPV/src/node/metadata"
 	shiftmount "github.com/project-jelly/ShiftPV/src/node/mount"
 	nodeobservation "github.com/project-jelly/ShiftPV/src/node/observation"
 	poolmeasurement "github.com/project-jelly/ShiftPV/src/pool/measurement"
@@ -33,6 +33,7 @@ func main() {
 		hostRoot              = flag.String("host-root", "/host", "host filesystem root mounted into the node plugin")
 		targetRoot            = flag.String("target-root", "/var/lib/kubelet/pods", "allowed kubelet publish target root")
 		poolReadinessInterval = flag.Duration("pool-readiness-interval", time.Minute, "interval between local Pool mount and write probes")
+		metadataRetention     = flag.Duration("metadata-retention", metadata.DefaultRetention, "minimum retention for settled local reclaim records")
 		metricsAddress        = flag.String("metrics-listen-address", "", "metrics HTTP address; empty disables observation")
 		rpcAddress            = flag.String("node-rpc-listen-address", "", "authenticated internal gRPC address; empty keeps API transport")
 		controllerAccount     = flag.String("controller-service-account", "shiftpv-controller", "ServiceAccount authorized to call internal gRPC")
@@ -42,11 +43,21 @@ func main() {
 	if *poolReadinessInterval <= 0 {
 		klog.Fatalf("pool readiness interval must be positive")
 	}
+	if *metadataRetention < time.Hour {
+		klog.Fatalf("node metadata retention must be at least one hour")
+	}
 
-	registry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
-	probeRegistry := &volumeapi.Registry{Client: wiring.InClusterDynamic(fatal)}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	var exporter *metrics.Exporter
+	var observeAPI func(string, time.Duration)
+	if *metricsAddress != "" {
+		exporter = metrics.New("filesystem")
+		exporter.Start(ctx, *metricsAddress)
+		observeAPI = exporter.ObserveProvisioningStep
+	}
+	clients := newNodeAPIClients(newNodeAPIConfigs(wiring.InClusterConfig(fatal), observeAPI), fatal)
+	registry, observer, probeRegistry := clients.foreground, clients.observation, clients.measurement
 
 	binder := shiftmount.NewBinder(*targetRoot)
 	nodeService := &nodecsi.Service{
@@ -58,29 +69,36 @@ func main() {
 		Pools:      registry,
 	}
 	identityService := &identity.Service{Version: version}
-	readinessReconciler := &poolreadiness.Reconciler{
-		Wake:     poolreadiness.WatchPoolChanges(ctx, registry.Client, *nodeName),
-		NodeName: *nodeName, Pools: registry, Inspector: poolreadiness.NewProbe(*hostRoot), Interval: *poolReadinessInterval,
+	probe, err := poolreadiness.NewProbeWithDependencies(*hostRoot, poolreadiness.HostProbeDependencies(*hostRoot))
+	if err != nil {
+		fatal("configure Pool probe", err)
 	}
+	nodeService.PoolVerifier = probe
+	readinessReconciler, err := poolreadiness.NewReconciler(*nodeName, observer, probe, *poolReadinessInterval)
+	if err != nil {
+		fatal("configure Pool readiness", err)
+	}
+	readinessReconciler.Wake = poolreadiness.WatchPoolChanges(ctx, observer.Client, *nodeName)
 	inventoryScanner := &nodeobservation.Scanner{
-		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: registry, Publications: binder, Limit: 256,
+		HostRoot: *hostRoot, TargetRoot: *targetRoot, Installation: observer, Publications: binder, Limit: 256,
 	}
 	inventoryScanner.SnapshotPublications = func() (nodeobservation.Publications, error) {
 		return binder.PublicationSnapshot()
 	}
 	readinessReconciler.Inventory = inventoryScanner.Scan
 	readinessReconciler.Release = inventoryScanner.ReleasePool
-	var exporter *metrics.Exporter
-	if *metricsAddress != "" {
-		exporter = metrics.New("filesystem")
-		exporter.Start(ctx, *metricsAddress)
+	if exporter != nil {
 		readinessReconciler.ObserveAll = exporter.ObservePools
 	}
 
 	klog.Infof("starting ShiftPV node plugin %s on %s", version, *nodeName)
-	errCh := make(chan error, 5)
+	errCh := make(chan error, 6)
+	go func() {
+		collector := &metadata.Collector{NodeName: *nodeName, HostRoot: *hostRoot, Repository: clients.metadata, Retention: *metadataRetention}
+		errCh <- collector.Run(ctx)
+	}()
 	if os.Getenv("POD_UID") != "" {
-		startNodeEffects(ctx, *nodeName, *hostRoot, *rpcAddress, *controllerAccount, errCh)
+		startNodeEffects(ctx, clients.effects, *nodeName, *hostRoot, *rpcAddress, *controllerAccount, exporter.ObserveProvisioningStep, errCh)
 	}
 	go func() { errCh <- readinessReconciler.Run(ctx) }()
 	go func() {

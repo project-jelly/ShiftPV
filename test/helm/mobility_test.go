@@ -5,6 +5,62 @@ import (
 	"testing"
 )
 
+func TestHelperPermissionsReadOnly(t *testing.T) {
+	for _, external := range []bool{false, true} {
+		var args []string
+		if external {
+			args = []string{"--set", "serviceAccount.helper.create=false,serviceAccount.helper.name=existing-helper"}
+		}
+		output, err := render(t, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chart := parseChart(t, output)
+		for _, kind := range []string{"Role", "ClusterRole"} {
+			role := chart.wantObject(t, "helper authority is read-only", kind, fullname+"-helper")
+			for _, rule := range role.Rules {
+				for _, verb := range rule.Verbs {
+					if verb != "get" && verb != "list" {
+						t.Errorf("helper %s grants write or watch permission: %+v", kind, rule)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestMobilityOperationTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name, value, want string
+		fail              bool
+		omitted           bool
+	}{
+		{"default", "", "--mobility-operation-timeout=5m", false, false},
+		{"large copy", "30m", "--mobility-operation-timeout=30m", false, false},
+		{"legacy values without new key", "null", "", false, true},
+		{"zero", "0s", "schema", true, false},
+		{"negative", "-1m", "schema", true, false},
+		{"invalid", "unbounded", "schema", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var args []string
+			if test.value != "" {
+				args = []string{"--set", "mobility.operationTimeout=" + test.value}
+			}
+			output, err := render(t, args...)
+			if test.omitted {
+				if err != nil || strings.Contains(output, "--mobility-operation-timeout=") {
+					t.Fatalf("legacy values did not retain the controller's default: error=%v output=%s", err, output)
+				}
+				return
+			}
+			if (err != nil) != test.fail || !strings.Contains(output, test.want) {
+				t.Fatalf("operation timeout render: error=%v output=%s", err, output)
+			}
+		})
+	}
+}
+
 func TestMoveJournalRetention(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -31,6 +87,39 @@ func TestMoveJournalRetention(t *testing.T) {
 			if strings.Count(output, tc.wantFlag) != 1 {
 				t.Fatalf("wanted exactly one %q flag", tc.wantFlag)
 			}
+		})
+	}
+}
+
+func TestMobilityPlacementPriorityClass(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix string
+		args         []string
+		disabled     bool
+	}{
+		{name: "default", prefix: fullname},
+		{name: "renamed release", prefix: "custom", args: []string{"--set", "fullnameOverride=custom"}},
+		{name: "disabled", prefix: fullname, args: []string{"--set", "mobility.enabled=false"}, disabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output, err := render(t, tc.args...)
+			if err != nil {
+				t.Fatalf("%v: %s", err, output)
+			}
+			chart := parseChart(t, output)
+			controller := chart.container(t, "Deployment", tc.prefix+"-controller", "shiftpv-controller")
+			args := controller.Spec.Template.Spec.Containers[0].Args
+			if tc.disabled {
+				chart.wantNoObject(t, "disabled mobility creates no placement class", "PriorityClass", "")
+				wantNoArgPrefix(t, "disabled mobility has no placement class flag", args, "--mobility-placement-priority-class=")
+				return
+			}
+			name := tc.prefix + "-placement"
+			class := chart.wantObject(t, "dedicated non-preempting placement", "PriorityClass", name)
+			if class.Value == nil || *class.Value != 0 || class.GlobalDefault == nil || *class.GlobalDefault || class.PreemptionPolicy != "Never" || class.Metadata.Namespace != "" {
+				t.Fatalf("unsafe placement PriorityClass: %+v", class)
+			}
+			wantArg(t, "controller uses the installed class", args, "--mobility-placement-priority-class="+name)
 		})
 	}
 }
