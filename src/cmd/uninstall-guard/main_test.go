@@ -379,7 +379,6 @@ func TestRunPreservesRetiredPoolAcrossGrantResponseLoss(t *testing.T) {
 			gate := &uninstallcheck.QuiesceGate{Store: store, Interval: time.Millisecond}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			go func() { _ = gate.Run(ctx) }()
 			pool := volumeapi.Pool{Name: "lost", UID: "lost-uid", NodeName: "node", MountPath: "/mnt/lost", RetirementApproval: "lost-uid", Finalizers: []string{volumeapi.PoolProtectionFinalizer}, Status: volumeapi.PoolStatus{RegistrationApproved: true}}
 			if terminating {
 				at := metav1.Now()
@@ -398,6 +397,7 @@ func TestRunPreservesRetiredPoolAcrossGrantResponseLoss(t *testing.T) {
 				}
 				return true, nil, fmt.Errorf("injected applied grant response loss")
 			})
+			go func() { _ = gate.Run(ctx) }()
 			if err := run(ctx, checker, store, "shiftpv-lifecycle"); err == nil || !strings.Contains(err.Error(), "injected applied grant response loss") {
 				t.Fatalf("first run=%v", err)
 			}
