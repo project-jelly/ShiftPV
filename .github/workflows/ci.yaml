@@ -27,7 +27,7 @@ jobs:
           mkdir -p release-context
           jq -n --arg before "$BEFORE" --arg sha "$GITHUB_SHA" --arg repository "$GITHUB_REPOSITORY" \
             '{before: $before, sha: $sha, repository: $repository}' > release-context/push.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-context
           path: release-context/push.json
@@ -77,7 +77,7 @@ jobs:
         run: bash test/helm/dashboard/run.sh
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
           path: |
@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload rsync qualification evidence
         if: always() && matrix.component == 'controller'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rsync-qualification
           path: .tmp/rsync-qualification/
@@ -178,7 +178,7 @@ jobs:
           } >>"${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -189,7 +189,7 @@ jobs:
 
       - name: Build and push amd64 candidate
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: build/package/Dockerfile
@@ -247,7 +247,7 @@ jobs:
 
       - name: Upload native boundary regression evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: boundary-regressions
           path: .tmp/boundary-regressions/native
@@ -310,7 +310,7 @@ jobs:
 
       - name: Upload delayed PV handoff evidence
         if: always() && matrix.group == 'node-rpc'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: delayed-pv-handoff
           path: .tmp/delayed-pv-handoff
@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload preserved retirement evidence
         if: always() && matrix.group == 'g2'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: preserved-retirement
           path: .tmp/preserved-uninstall
@@ -328,7 +328,7 @@ jobs:
 
       - name: Upload read-only Unpublish evidence
         if: always() && matrix.group == 'g2'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: readonly-unpublish
           path: .tmp/readonly-unpublish
@@ -397,7 +397,7 @@ jobs:
 
       - name: Upload workload retirement evidence
         if: always() && matrix.group == 'retirement'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: workload-retirement
           path: .tmp/workload-retirement
@@ -533,7 +533,7 @@ jobs:
 
       - name: Upload native creation recovery evidence
         if: always() && matrix.scenario == 'creation-recovery'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-creation-recovery
           path: .tmp/creation-recovery
@@ -541,7 +541,7 @@ jobs:
 
       - name: Upload native Move recovery evidence
         if: always() && matrix.scenario == 'move-recovery'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-move-recovery
           path: .tmp/move-recovery
