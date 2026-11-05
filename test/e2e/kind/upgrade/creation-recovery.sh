@@ -5,9 +5,85 @@
 # shellcheck source=test/e2e/kind/node-path.sh
 source "${ROOT_DIR}/test/e2e/kind/node-path.sh"
 
+assert_writer_stopped() {
+	assert_equal "controller replicas" 0 "$(kubectl -n "${NAMESPACE}" get deployment/shiftpv-controller -o jsonpath='{.spec.replicas}')" || return 1
+	kubectl -n "${NAMESPACE}" get pods -o json | jq -e '
+	 all(.items[]; (.metadata.labels["app.kubernetes.io/component"] != "controller") and
+	   all(.spec.containers[]; .name != "csi-provisioner"))' >/dev/null
+}
+
+wait_for_pool_admission() {
+	local expected=$1 result
+	for _ in {1..60}; do
+		if result=$(kubectl annotate shiftpvpool worker-a \
+			shiftpv.io/release-pool-identity=e2e-admission-probe --overwrite --dry-run=server 2>&1); then
+			:
+		elif [[ "${result}" == *"${expected}"* ]]; then
+			return 0
+		fi
+		sleep 1
+	done
+	printf 'expected admission result %s; last result: %s\n' "${expected}" "${result}" >&2
+	return 1
+}
+
+assert_cancelled_creation_absent() {
+	local name=$1 uid=$2 request=$3 node=$4 mount=$5 copy_id=$6
+	kubectl get shiftpvvolumes -o json >"${RECOVERY_EVIDENCE}/post-restart-volumes.json" || return 1
+	jq -e --arg name "${name}" --arg uid "${uid}" --arg request "${request}" '
+	 all(.items[]; .metadata.name != $name and .metadata.uid != $uid and .spec.requestName != $request)' \
+		"${RECOVERY_EVIDENCE}/post-restart-volumes.json" >/dev/null || return 1
+	docker exec "${node}" sh -ec '
+	 for path do if test -e "$path" || test -L "$path"; then echo "unexpected path: $path" >&2; exit 1; fi; done' sh \
+		"${mount}/volumes/${name}" "${mount}/.shiftpv/incoming/create-${copy_id}" "${mount}/.shiftpv/retired/${copy_id}"
+}
+
+replay_stale_creation() {
+	local uid=$1 volume_id=$2 context=kind-shiftpv-upgrade-e2e-creation-recovery
+	local pod pod_uid current_uid pvc builder binary="${WORK_DIR}/stale-create-replay"
+	[[ "${CLUSTER_NAME}" == shiftpv-upgrade-e2e-creation-recovery && "${NAMESPACE}" == shiftpv-system ]] || return 1
+	[[ "$(kubectl config current-context)" == "${context}" ]] || return 1
+	pvc=$(kubectl --context="${context}" -n shiftpv-upgrade-creation get pvc/partial --ignore-not-found -o name) || return 1
+	[[ -z "${pvc}" ]] || return 1
+	pod=$(kubectl --context="${context}" -n "${NAMESPACE}" get pods -l app.kubernetes.io/component=controller -o json |
+		jq -er --arg image "${CANDIDATE_IMAGE}" '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running" and
+		 any(.status.containerStatuses[]; .name == "shiftpv-controller" and .ready) and
+		 any(.spec.containers[]; .name == "shiftpv-controller" and .image == $image))] |
+		 if length == 1 then .[0].metadata.name else error("expected one ready controller Pod") end') || return 1
+	pod_uid=$(kubectl --context="${context}" -n "${NAMESPACE}" get "pod/${pod}" -o jsonpath='{.metadata.uid}') || return 1
+	[[ -n "${pod_uid}" ]] || return 1
+	builder=$(docker build -q --target build-base -f "${ROOT_DIR}/build/package/Dockerfile" "${ROOT_DIR}") || return 1
+	if ! docker run --rm --network none -i --user 65532:65532 --entrypoint /bin/sh "${builder}" -ec '
+	 export GOCACHE=/tmp/go-cache GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
+	 cat > /tmp/stale-create.go
+	 CGO_ENABLED=0 go build -o /tmp/stale-create /tmp/stale-create.go
+	 cat /tmp/stale-create' <"${TEST_DIR}/replay/main.go" >"${binary}"; then
+		rm -f "${binary}"
+		return 1
+	fi
+	current_uid=$(kubectl --context="${context}" -n "${NAMESPACE}" get "pod/${pod}" -o jsonpath='{.metadata.uid}') || { rm -f "${binary}"; return 1; }
+	[[ "${current_uid}" == "${pod_uid}" ]] || { rm -f "${binary}"; return 1; }
+	pvc=$(kubectl --context="${context}" -n shiftpv-upgrade-creation get pvc/partial --ignore-not-found -o name) || { rm -f "${binary}"; return 1; }
+	[[ -z "${pvc}" ]] || { rm -f "${binary}"; return 1; }
+	# shellcheck disable=SC2016
+	if ! kubectl --context="${context}" -n "${NAMESPACE}" exec -i "${pod}" -c shiftpv-controller -- sh -ec '
+	 file=$(mktemp /tmp/shiftpv-stale-create.XXXXXX)
+	 trap '\''rm -f "$file"'\'' EXIT
+	 cat > "$file"
+	 chmod 700 "$file"
+	 "$file" "$@"' replay "${uid}" "${volume_id}" <"${binary}" >"${RECOVERY_EVIDENCE}/stale-create-replay.log"; then
+		rm -f "${binary}"
+		return 1
+	fi
+	rm -f "${binary}"
+	current_uid=$(kubectl --context="${context}" -n "${NAMESPACE}" get "pod/${pod}" -o jsonpath='{.metadata.uid}') || return 1
+	[[ "${current_uid}" == "${pod_uid}" ]]
+}
+
 test_creation_recovery_transition() {
 	test "${CHART_VERSION}" = 0.6.13
-	test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
+	test "${CLUSTER_NAME}" = shiftpv-upgrade-e2e-creation-recovery
+	test "$(kubectl config current-context)" = kind-shiftpv-upgrade-e2e-creation-recovery
 	RECOVERY_EVIDENCE="${ROOT_DIR}/.tmp/creation-recovery"
 	mkdir -p "${RECOVERY_EVIDENCE}"
 	local ns=shiftpv-upgrade-creation policy=shiftpv-upgrade-creation
@@ -127,9 +203,51 @@ EOF
 		"${RECOVERY_EVIDENCE}/native-check-before-report.json" >/dev/null
 	recovery_command native-ready-preserved Failed cancel-creation --namespace="${NAMESPACE}" --volume-id="${ready_volume}" --volume-uid="${ready_uid}"
 	assert_marker shiftpv-upgrade-existing "${MARKER}"
+	# Stop the published writer and its provisioner before retiring the old UID.
+	kubectl -n "${NAMESPACE}" scale deployment/shiftpv-controller --replicas=0
+	local stopped=0
+	for _ in {1..90}; do
+		if assert_writer_stopped; then stopped=1; break; fi
+		sleep 1
+	done
+	test "${stopped}" = 1
+	kubectl -n "${NAMESPACE}" get service/shiftpv-webhook -o json >"${RECOVERY_EVIDENCE}/webhook-service-before.json"
+	kubectl get validatingwebhookconfiguration/shiftpv-lifecycle -o json | jq -e '
+	 any(.webhooks[]; .name == "lifecycle-crs.shiftpv.io" and .failurePolicy == "Fail")' >/dev/null
+	wait_for_pool_admission 'failed calling webhook "lifecycle-crs.shiftpv.io"'
+	kubectl -n "${NAMESPACE}" apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: maintenance-admission
+  labels:
+    shiftpv.io/maintenance-admission: "true"
+spec:
+  serviceAccountName: shiftpv-controller
+  containers:
+  - name: admission
+    image: ${CANDIDATE_IMAGE}
+    imagePullPolicy: IfNotPresent
+    command: [/shiftpv-controller]
+    args: [--admission-only, --namespace=${NAMESPACE}]
+    ports:
+    - name: webhook
+      containerPort: 9443
+    readinessProbe:
+      httpGet:
+        scheme: HTTPS
+        path: /healthz
+        port: webhook
+EOF
+	kubectl -n "${NAMESPACE}" wait pod/maintenance-admission --for=condition=Ready --timeout=120s
+	kubectl -n "${NAMESPACE}" patch service/shiftpv-webhook --type=json \
+		-p '[{"op":"replace","path":"/spec/selector","value":{"shiftpv.io/maintenance-admission":"true"}}]'
+	wait_for_pool_admission 'admission webhook "lifecycle-crs.shiftpv.io" denied the request: ShiftPV Pool update denied: only the trusted controller may change lifecycle protection'
+	assert_writer_stopped
 	# This call records cancellation but cannot finish while the API receipt is
 	# denied. A new command Pod must continue the same intent, never make Ready.
 	recovery_command native-cancel-interrupted Failed cancel-creation --namespace="${NAMESPACE}" --volume-id="${partial}" --volume-uid="${uid}" --timeout=10s
+	assert_writer_stopped
 	object=$(kubectl get "shiftpvvolume/${partial}" -o json)
 	jq -e --arg uid "${uid}" --argjson copy "${copy}" '
 	 .metadata.uid == $uid and .status.currentCopy == $copy and .status.phase == "Deleting" and
@@ -138,6 +256,7 @@ EOF
 	printf '%s\n' "${object}" >"${RECOVERY_EVIDENCE}/cancel-interrupted.json"
 	kubectl patch "validatingadmissionpolicy/${policy}" --type=json -p '[{"op":"replace","path":"/spec/validations/2/expression","value":"true"}]'
 	recovery_command native-cancel-complete Succeeded cancel-creation --namespace="${NAMESPACE}" --volume-id="${partial}" --volume-uid="${uid}" --timeout=120s
+	assert_writer_stopped
 	jq -e --arg id "${partial}" --arg uid "${uid}" '.complete and .volumeID == $id and .volumeUID == $uid' "${RECOVERY_EVIDENCE}/native-cancel-complete.log" >/dev/null
 	kubectl wait "shiftpvvolume/${partial}" --for=delete --timeout=60s
 	assert_node_absent "${node}" "${mount}/volumes/${partial}"
@@ -145,17 +264,41 @@ EOF
 	assert_node_absent "${node}" "${mount}/.shiftpv/retired/$(jq -er '.copyID' <<<"${copy}")"
 	recovery_command native-check-settled Succeeded upgrade-check --namespace="${NAMESPACE}" --node-daemonset-name=shiftpv-node
 	jq -e '.complete and (.blockers|length) == 0' "${RECOVERY_EVIDENCE}/native-check-settled-report.json" >/dev/null
+	assert_writer_stopped
+	assert_marker shiftpv-upgrade-existing "${MARKER}"
 
 	# The strict transition check is now SAFE, before replacing the sole writer.
 	upgrade_candidate
 	assert_candidate_images
+	assert_equal "candidate controller replicas" 1 "$(kubectl -n "${NAMESPACE}" get deployment/shiftpv-controller -o jsonpath='{.spec.replicas}')"
+	kubectl -n "${NAMESPACE}" patch service/shiftpv-webhook --type=json \
+		-p "$(jq -c '[{op:"replace",path:"/spec/selector",value:.spec.selector}]' "${RECOVERY_EVIDENCE}/webhook-service-before.json")"
+	wait_for_pool_admission 'admission webhook "lifecycle-crs.shiftpv.io" denied the request: ShiftPV Pool update denied: only the trusted controller may change lifecycle protection'
+	kubectl -n "${NAMESPACE}" logs pod/maintenance-admission >"${RECOVERY_EVIDENCE}/maintenance-admission.log"
+	kubectl -n "${NAMESPACE}" delete pod/maintenance-admission --wait=true --timeout=60s
+	wait_for_pool_admission 'admission webhook "lifecycle-crs.shiftpv.io" denied the request: ShiftPV Pool update denied: only the trusted controller may change lifecycle protection'
+	create_workload shiftpv-recovery-new "${DEFAULT_CLASS}" 'new creation after native recovery transition'
+	local copy_id
+	copy_id=$(jq -er '.copyID' <<<"${copy}")
+	assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
+	replay_stale_creation "${claim_uid}" "${partial}"
+	assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
+	# Observe the old request through a provisioner retry interval after restart.
+	local deadline=$((SECONDS + 45))
+	while ((SECONDS < deadline)); do
+		assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
+		sleep 3
+	done
+	assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
 	assert_marker shiftpv-upgrade-existing "${MARKER}"
+	assert_marker shiftpv-recovery-new 'new creation after native recovery transition'
 	object=$(kubectl get "shiftpvvolume/${ready_volume}" -o json)
 	jq -e --argjson before "${original_ready}" '.metadata.uid == $before.metadata.uid and .status.currentCopy == $before.status.currentCopy and .spec.capacityBytes == $before.spec.capacityBytes and .spec.creationClaim == null' <<<"${object}" >/dev/null
 	printf '%s\n' "${object}" >"${RECOVERY_EVIDENCE}/ready-after.json"
 	assert_equal "existing PVC UID" "$(jq -er '.metadata.uid' "${RECOVERY_EVIDENCE}/ready-pvc-before.json")" "$(kubectl get pvc/shiftpv-upgrade-existing -o jsonpath='{.metadata.uid}')"
 	assert_equal "existing PV UID" "$(jq -er '.metadata.uid' "${RECOVERY_EVIDENCE}/ready-pv-before.json")" "$(kubectl get "pv/${ready_pv}" -o jsonpath='{.metadata.uid}')"
-	create_workload shiftpv-recovery-new "${DEFAULT_CLASS}" 'new creation after native recovery transition'
+	assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
+	assert_marker shiftpv-upgrade-existing "${MARKER}"
 	delete_workload shiftpv-recovery-new
 	delete_workload shiftpv-upgrade-existing
 	kubectl delete "validatingadmissionpolicybinding/${policy}" "validatingadmissionpolicy/${policy}"
