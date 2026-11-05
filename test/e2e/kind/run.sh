@@ -69,7 +69,7 @@ docker build \
 kind load docker-image shiftpv:dev --name "${CLUSTER_NAME}"
 
 install_shiftpv() {
-	local default_class=${1:-true}
+	local default_class=${1:-true} pool
 	helm upgrade --install shiftpv "${ROOT_DIR}/charts/shiftpv" \
 		--namespace shiftpv-system \
 		--create-namespace \
@@ -81,6 +81,12 @@ install_shiftpv() {
     --for=condition=Ready pod \
     -l app.kubernetes.io/instance=shiftpv \
 		--timeout=5m
+	for pool in worker-a worker-b; do
+		if kubectl get shiftpvpool "${pool}" -o name >/dev/null 2>&1; then
+			wait_for_lifecycle_webhook "${pool}"
+			break
+		fi
+	done
 	kubectl apply -f "${WORK_DIR}/pools.yaml"
 	kubectl wait --for=condition=Ready shiftpvpool --all --timeout=2m
 }
@@ -151,10 +157,14 @@ run_mobility_node_restarts() {
 
 wait_for_lifecycle_webhook() {
 	# Pod readiness can precede the API server's webhook endpoint refresh.
-	# Exercise the read-only admission path before any focused case starts.
-	local attempt ready=0
+	# The expected denial proves the webhook ran; dry-run cannot change the Pool.
+	local pool=${1:-worker-b} attempt ready=0 result
 	for ((attempt = 0; attempt < 30; attempt++)); do
-		if kubectl delete shiftpvpool worker-b --dry-run=server >/dev/null 2>&1; then
+		if result=$(kubectl annotate shiftpvpool "${pool}" \
+			shiftpv.io/release-pool-identity=e2e-admission-probe \
+			--overwrite --dry-run=server 2>&1); then
+			:
+		elif [[ "${result}" == *'admission webhook "lifecycle-crs.shiftpv.io" denied the request: ShiftPV Pool update denied: only the trusted controller may change lifecycle protection'* ]]; then
 			ready=1
 			break
 		fi
