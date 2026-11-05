@@ -27,6 +27,17 @@ wait_for_pool_admission() {
 	return 1
 }
 
+assert_cancelled_creation_absent() {
+	local name=$1 uid=$2 request=$3 node=$4 mount=$5 copy_id=$6
+	kubectl get shiftpvvolumes -o json >"${RECOVERY_EVIDENCE}/post-restart-volumes.json" || return 1
+	jq -e --arg name "${name}" --arg uid "${uid}" --arg request "${request}" '
+	 all(.items[]; .metadata.name != $name and .metadata.uid != $uid and .spec.requestName != $request)' \
+		"${RECOVERY_EVIDENCE}/post-restart-volumes.json" >/dev/null || return 1
+	docker exec "${node}" sh -ec '
+	 for path do if test -e "$path" || test -L "$path"; then echo "unexpected path: $path" >&2; exit 1; fi; done' sh \
+		"${mount}/volumes/${name}" "${mount}/.shiftpv/incoming/create-${copy_id}" "${mount}/.shiftpv/retired/${copy_id}"
+}
+
 test_creation_recovery_transition() {
 	test "${CHART_VERSION}" = 0.6.13
 	test "$(kubectl config current-context)" = "kind-${CLUSTER_NAME}"
@@ -223,6 +234,14 @@ EOF
 	kubectl -n "${NAMESPACE}" logs pod/maintenance-admission >"${RECOVERY_EVIDENCE}/maintenance-admission.log"
 	kubectl -n "${NAMESPACE}" delete pod/maintenance-admission --wait=true --timeout=60s
 	wait_for_pool_admission 'admission webhook "lifecycle-crs.shiftpv.io" denied the request: ShiftPV Pool update denied: only the trusted controller may change lifecycle protection'
+	# Observe the old request through a provisioner retry interval after restart.
+	local deadline=$((SECONDS + 45)) copy_id
+	copy_id=$(jq -er '.copyID' <<<"${copy}")
+	while ((SECONDS < deadline)); do
+		assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
+		sleep 3
+	done
+	assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
 	assert_marker shiftpv-upgrade-existing "${MARKER}"
 	object=$(kubectl get "shiftpvvolume/${ready_volume}" -o json)
 	jq -e --argjson before "${original_ready}" '.metadata.uid == $before.metadata.uid and .status.currentCopy == $before.status.currentCopy and .spec.capacityBytes == $before.spec.capacityBytes and .spec.creationClaim == null' <<<"${object}" >/dev/null
@@ -230,6 +249,8 @@ EOF
 	assert_equal "existing PVC UID" "$(jq -er '.metadata.uid' "${RECOVERY_EVIDENCE}/ready-pvc-before.json")" "$(kubectl get pvc/shiftpv-upgrade-existing -o jsonpath='{.metadata.uid}')"
 	assert_equal "existing PV UID" "$(jq -er '.metadata.uid' "${RECOVERY_EVIDENCE}/ready-pv-before.json")" "$(kubectl get "pv/${ready_pv}" -o jsonpath='{.metadata.uid}')"
 	create_workload shiftpv-recovery-new "${DEFAULT_CLASS}" 'new creation after native recovery transition'
+	assert_cancelled_creation_absent "${partial}" "${uid}" "pvc-${claim_uid}" "${node}" "${mount}" "${copy_id}"
+	assert_marker shiftpv-upgrade-existing "${MARKER}"
 	delete_workload shiftpv-recovery-new
 	delete_workload shiftpv-upgrade-existing
 	kubectl delete "validatingadmissionpolicybinding/${policy}" "validatingadmissionpolicy/${policy}"
