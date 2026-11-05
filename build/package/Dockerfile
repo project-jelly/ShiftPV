@@ -1,4 +1,4 @@
-FROM golang:1.26.10 AS build-base
+FROM golang:1.27.3 AS build-base
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -26,7 +26,7 @@ RUN export GOOS="${TARGETOS:-$(go env GOOS)}" GOARCH="${TARGETARCH:-$(go env GOA
     -trimpath -ldflags="-s -w -X main.version=${NODE_VERSION}" \
     -o /out/shiftpv-node ./src/cmd/node
 
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS runtime-base
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS runtime-base
 RUN apk add --no-cache ca-certificates
 
 FROM runtime-base AS controller
